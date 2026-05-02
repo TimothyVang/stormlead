@@ -254,6 +254,12 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:
       - "8001:8000"
+    # so the auction's POST-to-buyer can reach a host-bound listener
+    # (smoke_e2e.py runs in-process aiohttp on the host's :9999); seed
+    # buyers point at host.docker.internal. linux/wsl2 needs the
+    # explicit gateway alias; mac docker desktop has it natively.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   storm-watcher:
     build:

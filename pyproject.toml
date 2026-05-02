@@ -24,6 +24,7 @@ dev-dependencies = [
     "ruff>=0.7",
     "mypy>=1.13",
     "httpx>=0.27",
+    "aiohttp>=3.10",   # in-process buyer listeners for scripts/smoke_e2e.py
 ]
 
 # pin a known-good litellm. as of audit: 1.82.7/1.82.8 were compromised.

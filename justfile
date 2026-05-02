@@ -52,7 +52,7 @@ test-watch:
 
 # --- smoke test: real lead → ping-post → buyer ---
 smoke:
-    @echo "TODO: scripts/smoke_e2e.py not yet implemented"
+    uv run python scripts/smoke_e2e.py
 
 # --- lint + format ---
 
