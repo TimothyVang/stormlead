@@ -1,0 +1,20 @@
+{
+  "identities": [
+    {
+      "name": "stormlead",
+      "credentials": [
+        {
+          "accessKey": "stormlead",
+          "secretKey": "changeme"
+        }
+      ],
+      "actions": [
+        "Read",
+        "Write",
+        "List",
+        "Tagging",
+        "Admin"
+      ]
+    }
+  ]
+}

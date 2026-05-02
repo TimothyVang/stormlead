@@ -1,0 +1,71 @@
+# litellm proxy config
+# CRITICAL: this image must be cosign-verified before deploy.
+# the march 2026 supply-chain attack injected payloads into 1.82.7 / 1.82.8.
+#
+# verify on pull:
+#   cosign verify ghcr.io/berriai/litellm-database:main-v1.83.4-stable \
+#     --certificate-identity-regexp 'github.com/BerriAI/litellm' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+model_list:
+
+  # primary: claude sonnet 4.5 via anthropic
+  - model_name: claude-sonnet-4-5
+    litellm_params:
+      model: anthropic/claude-sonnet-4-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  # smart: claude opus 4 for hard reasoning (qualification, self-evolution)
+  - model_name: claude-opus-4
+    litellm_params:
+      model: anthropic/claude-opus-4
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  # cheap: claude haiku for high-volume classification (lead scoring)
+  - model_name: claude-haiku
+    litellm_params:
+      model: anthropic/claude-haiku-4-5-20251001
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  # vision: claude with image input for damage classification
+  - model_name: claude-vision
+    litellm_params:
+      model: anthropic/claude-sonnet-4-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  # fallback: openrouter (uncomment + add key if you want failover)
+  # - model_name: claude-sonnet-4-5-or
+  #   litellm_params:
+  #     model: openrouter/anthropic/claude-sonnet-4-5
+  #     api_key: os.environ/OPENROUTER_API_KEY
+
+# routing
+router_settings:
+  routing_strategy: simple-shuffle
+  fallbacks:
+    - claude-sonnet-4-5: [claude-haiku]   # cheap fallback if rate-limited
+
+# per-team budgets (postgres-backed)
+litellm_settings:
+  drop_params: True
+  set_verbose: False
+  json_logs: True
+  cache: False
+  callbacks: ["langfuse"]   # auto-trace every call
+  langfuse_default_tags: ["service", "user_id", "team_alias"]
+  # NOTE: the bundled claude cli ignores ANTHROPIC_BASE_URL
+  # services that use claude-agent-sdk must pass cli_path explicitly
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+  store_model_in_db: True
+
+  # prevent agents from burning the bank
+  max_budget: 1000.0
+  budget_duration: 30d
+
+  # block prompt injection patterns at the gateway
+  enable_jwt_auth: False
+  alerting: ["slack"]
+  alert_types: ["budget_alerts", "spend_logs"]

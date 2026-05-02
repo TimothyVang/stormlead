@@ -1,0 +1,76 @@
+# stormlead caddyfile
+# CRITICAL: { order coraza_waf first } at the top, otherwise waf runs after handlers and is useless.
+
+{
+    # global options
+    order coraza_waf first
+    auto_https off  # dev only; prod gets letsencrypt automatically
+
+    # crowdsec bouncer would go here in prod
+    # order crowdsec first
+}
+
+# ---- public-facing landing pages (pseo) ----
+:80 {
+    @has_form path /api/lead/*
+    handle @has_form {
+        coraza_waf {
+            load_owasp_crs
+            directives `
+                Include /etc/caddy/coraza.conf
+                Include /etc/caddy/owasp_crs/@crs-setup.conf.example
+                Include /etc/caddy/owasp_crs/rules/*.conf
+                SecRuleEngine On
+            `
+        }
+        reverse_proxy form-receiver:8000
+    }
+
+    handle /webhooks/formbricks {
+        reverse_proxy form-receiver:8000
+    }
+
+    handle /webhooks/jambonz {
+        reverse_proxy voice-bridge:8080
+    }
+
+    # all other public traffic to the next.js landing app
+    handle {
+        reverse_proxy landing:3000
+    }
+
+    log {
+        output stdout
+        format json
+        level INFO
+    }
+
+    # security headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
+        Permissions-Policy "geolocation=(), camera=(), microphone=()"
+    }
+}
+
+# ---- internal admin (in prod, behind netbird tailnet only) ----
+# in dev, just expose on a different host
+:81 {
+    handle /hatchet/* {
+        uri strip_prefix /hatchet
+        reverse_proxy hatchet-frontend:80
+    }
+
+    handle /langfuse/* {
+        uri strip_prefix /langfuse
+        reverse_proxy langfuse-web:3000
+    }
+
+    handle /buyers/* {
+        uri strip_prefix /buyers
+        reverse_proxy buyer-portal:3000
+    }
+}

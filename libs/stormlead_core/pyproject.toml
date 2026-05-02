@@ -1,0 +1,20 @@
+[project]
+name = "stormlead-core"
+version = "0.1.0"
+description = "shared models, events, and utilities"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.9",
+    "structlog>=24.4",
+    "celpy>=0.3",       # cel evaluator for buyer filters
+    "shapely>=2.0",
+    "pyproj>=3.7",
+    "nats-py>=2.9",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/stormlead_core"]
