@@ -1,21 +1,42 @@
 # litellm proxy config
 # CRITICAL: this image must be cosign-verified before deploy.
-# the march 2026 supply-chain attack injected payloads into 1.82.7 / 1.82.8.
+# the march 2026 supply-chain attack injected payloads into 1.82.7 / 1.82.8;
+# v1.83.4 → v1.83.6 are vulnerable to CVE-2026-42208 (sql injection); pinned
+# at v1.83.7-stable. cosign signing from v1.83.0 forward.
 #
 # verify on pull:
-#   cosign verify ghcr.io/berriai/litellm-database:main-v1.83.4-stable \
+#   cosign verify ghcr.io/berriai/litellm-database:main-v1.83.7-stable \
 #     --certificate-identity-regexp 'github.com/BerriAI/litellm' \
 #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
 model_list:
 
-  # primary: claude sonnet 4.5 via anthropic
+  # ============== semantic routes (app code references these) ==============
+
+  # default model for agent-runtime + ad-hoc agentic tasks. cheap, fast.
+  # decouples app code from upstream provider — re-route here, not in code.
+  - model_name: agent-default
+    litellm_params:
+      model: anthropic/claude-haiku-4-5-20251001
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  # bulk offline tasks (pseo body generation, batch enrichment).
+  # google ai studio free tier: ~1500 RPD on flash; data used for training
+  # (acceptable for synthetic page bodies). switch to paid once it's revenue.
+  - model_name: bulk-offline
+    litellm_params:
+      model: gemini/gemini-2.5-flash
+      api_key: os.environ/GEMINI_API_KEY
+
+  # ============== explicit-model routes (use when you need *that* model) ==============
+
+  # primary: claude sonnet (qualification, complex tool use)
   - model_name: claude-sonnet-4-5
     litellm_params:
       model: anthropic/claude-sonnet-4-5
       api_key: os.environ/ANTHROPIC_API_KEY
 
-  # smart: claude opus 4 for hard reasoning (qualification, self-evolution)
+  # smart: claude opus for hard reasoning (qualification, self-evolution)
   - model_name: claude-opus-4
     litellm_params:
       model: anthropic/claude-opus-4

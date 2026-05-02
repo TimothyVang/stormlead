@@ -117,7 +117,7 @@ services:
   #   cosign verify ghcr.io/berriai/litellm:main-stable --certificate-identity-regexp ...
 
   litellm:
-    image: ghcr.io/berriai/litellm-database:main-v1.83.4-stable
+    image: ghcr.io/berriai/litellm-database:main-v1.83.7-stable
     restart: unless-stopped
     depends_on:
       postgres:
@@ -126,7 +126,8 @@ services:
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-master-change-me}
       DATABASE_URL: "postgres://${POSTGRES_USER:-stormlead}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/litellm?sslmode=disable"
       STORE_MODEL_IN_DB: "True"
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY_REAL:-}  # real upstream key, only here
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY_REAL:-}  # real upstream anthropic key, only here
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}              # google ai studio free tier
     volumes:
       - ./../../litellm/config.yaml:/app/config.yaml:ro
     command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "2"]
