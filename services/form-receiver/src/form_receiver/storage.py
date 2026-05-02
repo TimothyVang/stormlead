@@ -114,4 +114,6 @@ async def emit_lead_captured(hatchet: Hatchet, lead_id: UUID) -> None:
     payload = {"lead_id": str(lead_id)}
     # hatchet-sdk's event push api: client.event.push(event_key, payload)
     hatchet.event.push("lead.captured", payload)
-    log.info("event.pushed", event="lead.captured", lead_id=str(lead_id))
+    # structlog's `event` positional means the log message; using it again
+    # as a kwarg collides. rename to `hatchet_event` for the payload-name field.
+    log.info("event.pushed", hatchet_event="lead.captured", lead_id=str(lead_id))

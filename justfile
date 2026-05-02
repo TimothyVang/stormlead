@@ -33,14 +33,22 @@ psql:
 
 # --- migrations + seed ---
 
+# migrate + seed run on the host (not in a container), so they need
+# DATABASE_URL_HOST (localhost:5433) instead of the in-container
+# DATABASE_URL (postgres:5432). same trick for both.
+#
+# init_db.py runs sqlalchemy.create_all first because 0001_initial.py
+# expects tables to already exist (it just sets up hypertables); then
+# alembic applies 0001 (idempotent via if_not_exists) + 0002.
 migrate:
-    cd libs/stormlead_db && uv run alembic upgrade head
+    DATABASE_URL="$DATABASE_URL_HOST" uv run python scripts/init_db.py
+    cd libs/stormlead_db && DATABASE_URL="$DATABASE_URL_HOST" uv run alembic upgrade head
 
 migrate-rev MSG:
-    cd libs/stormlead_db && uv run alembic revision --autogenerate -m "{{MSG}}"
+    cd libs/stormlead_db && DATABASE_URL="$DATABASE_URL_HOST" uv run alembic revision --autogenerate -m "{{MSG}}"
 
 seed:
-    uv run python scripts/seed_dev.py
+    DATABASE_URL="$DATABASE_URL_HOST" uv run python scripts/seed_dev.py
 
 # --- tests ---
 

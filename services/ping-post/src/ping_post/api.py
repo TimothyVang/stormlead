@@ -33,9 +33,11 @@ log = get_logger(__name__)
 hatchet = Hatchet(debug=False)
 
 
-@hatchet.workflow(on_events=["lead.qualified"])
+@hatchet.workflow(on_events=["lead.qualified", "lead.captured"])
 class PingPostWorkflow:
-    """fired when a lead.qualified hatchet event lands.
+    """fired on lead.qualified (prod path: agent-runtime qualified the lead)
+    or lead.captured (dev/smoke path: form-receiver emits straight through
+    while agent-runtime's qualify body is still a stub).
 
     upstream emitters: form-receiver (after consent + dedup), agent-runtime
     (after qualification scoring). both push the event directly via the

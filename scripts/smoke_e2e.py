@@ -151,7 +151,8 @@ async def main() -> None:
     try:
         _step("posting synthetic formbricks webhook")
         body = json.dumps(_synthetic_envelope()).encode()
-        webhook_id = "smoke-test-webhook"
+        # unique per run so consent_audits dedup doesn't suppress emission
+        webhook_id = f"smoke-test-webhook-{int(time.time())}"
         ts = str(int(time.time()))
         sig = _sign(webhook_id, ts, body)
         async with httpx.AsyncClient(timeout=15) as client:
