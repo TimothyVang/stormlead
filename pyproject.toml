@@ -12,6 +12,7 @@ members = [
     "services/ping-post",
     "services/storm-watcher",
     "services/agent-runtime",
+    "services/form-receiver",
 ]
 
 [tool.uv]

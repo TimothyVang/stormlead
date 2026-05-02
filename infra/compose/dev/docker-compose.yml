@@ -273,6 +273,26 @@ services:
       NWS_USER_AGENT: ${NWS_USER_AGENT}
       FEMA_API_BASE: ${FEMA_API_BASE}
 
+  form-receiver:
+    build:
+      context: ./../../..
+      dockerfile: services/form-receiver/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      hatchet-engine:
+        condition: service_started
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN}
+      HATCHET_CLIENT_HOST_PORT: ${HATCHET_CLIENT_HOST_PORT}
+      HATCHET_CLIENT_TLS_STRATEGY: none
+      FORMBRICKS_WEBHOOK_SECRET: ${FORMBRICKS_WEBHOOK_SECRET}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "8002:8000"
+
   agent-runtime:
     build:
       context: ./../../..
