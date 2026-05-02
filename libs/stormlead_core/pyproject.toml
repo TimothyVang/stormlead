@@ -6,7 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.9",
     "structlog>=24.4",
-    "celpy>=0.3",       # cel evaluator for buyer filters
+    "cel-python>=0.3",  # cel evaluator for buyer filters (imports as `celpy`)
     "shapely>=2.0",
     "pyproj>=3.7",
 ]
