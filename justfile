@@ -40,7 +40,7 @@ migrate-rev MSG:
     cd libs/stormlead_db && uv run alembic revision --autogenerate -m "{{MSG}}"
 
 seed:
-    uv run python scripts/seed_dev.py
+    @echo "TODO: scripts/seed_dev.py not yet implemented"
 
 # --- tests ---
 
@@ -52,39 +52,20 @@ test-watch:
 
 # --- smoke test: real lead → ping-post → buyer ---
 smoke:
-    uv run python scripts/smoke_e2e.py
+    @echo "TODO: scripts/smoke_e2e.py not yet implemented"
 
 # --- lint + format ---
 
 fmt:
-    uv run ruff format services libs scripts
-    uv run ruff check --fix services libs scripts
+    uv run ruff format services libs
+    uv run ruff check --fix services libs
 
 lint:
-    uv run ruff check services libs scripts
+    uv run ruff check services libs
     uv run mypy services libs
-
-# --- agent skills (hermes self-evolution) ---
-
-evolve-skills:
-    uv run python scripts/run_self_evolution.py
-
-# --- deploy ---
-
-deploy ENV:
-    @echo "deploying to {{ENV}}"
-    ./scripts/deploy.sh {{ENV}}
 
 # --- ops ---
 
 backup:
     docker compose -f infra/compose/dev/docker-compose.yml exec postgres \
         pg_dump -U stormlead stormlead | gzip > backups/dev-$(date +%Y%m%d-%H%M%S).sql.gz
-
-# replay a single lead through ping-post (debug)
-replay-lead LEAD_ID:
-    uv run python scripts/replay_lead.py {{LEAD_ID}}
-
-# warm the buyer cache + verify webhooks
-ping-buyers:
-    uv run python scripts/ping_buyers_health.py

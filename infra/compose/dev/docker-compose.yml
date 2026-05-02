@@ -256,60 +256,11 @@ services:
       - "8000:8000"
 
   # =========================================================================
-  # edge: caddy + coraza waf
-  # =========================================================================
-
-  caddy:
-    build:
-      context: ./../../caddy
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    volumes:
-      - ./../../caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./../../caddy/coraza.conf:/etc/caddy/coraza.conf:ro
-      - ./../../caddy/owasp_crs:/etc/caddy/owasp_crs:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    ports:
-      - "80:80"
-      - "443:443"
-    depends_on:
-      - landing
-      - ping-post
-      - form-receiver
-
-  # =========================================================================
-  # apps
-  # =========================================================================
-
-  landing:
-    build:
-      context: ./../../../apps/landing
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      DATABASE_URL: ${DATABASE_URL}
-      NEXT_PUBLIC_FORMBRICKS_API_HOST: http://localhost
-    ports:
-      - "3000:3000"
-
-  buyer-portal:
-    build:
-      context: ./../../../apps/buyer-portal
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      DATABASE_URL: ${DATABASE_URL}
-    ports:
-      - "3002:3000"
-
-  # =========================================================================
   # services (python)
   # =========================================================================
+  # NOTE: edge (caddy+coraza), apps (landing, buyer-portal), and stub services
+  # (form-receiver, voice-bridge, agent-runtime, enrich-worker) are not in
+  # this compose yet — their source isn't written. add them back as they ship.
 
   ping-post:
     build:
@@ -354,102 +305,8 @@ services:
       NWS_USER_AGENT: ${NWS_USER_AGENT}
       FEMA_API_BASE: ${FEMA_API_BASE}
 
-  form-receiver:
-    build:
-      context: ./../../..
-      dockerfile: services/form-receiver/Dockerfile
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-      nats:
-        condition: service_started
-    environment:
-      DATABASE_URL: ${DATABASE_URL}
-      NATS_URL: ${NATS_URL}
-      FORMBRICKS_WEBHOOK_SECRET: ${FORMBRICKS_WEBHOOK_SECRET}
-      S3_ENDPOINT: ${S3_ENDPOINT}
-      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
-      S3_SECRET_KEY: ${S3_SECRET_KEY}
-    ports:
-      - "8002:8000"
-
-  voice-bridge:
-    build:
-      context: ./../../..
-      dockerfile: services/voice-bridge/Dockerfile
-    restart: unless-stopped
-    depends_on:
-      nats:
-        condition: service_started
-      litellm:
-        condition: service_started
-    environment:
-      LITELLM_PROXY_URL: ${LITELLM_PROXY_URL}
-      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL}
-      ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN}
-      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
-      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
-      LANGFUSE_HOST: ${LANGFUSE_HOST}
-    ports:
-      - "8080:8080"
-
-  agent-runtime:
-    build:
-      context: ./../../..
-      dockerfile: services/agent-runtime/Dockerfile
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-      nats:
-        condition: service_started
-      hatchet-engine:
-        condition: service_started
-      litellm:
-        condition: service_started
-      langfuse-web:
-        condition: service_started
-    environment:
-      DATABASE_URL: ${DATABASE_URL}
-      NATS_URL: ${NATS_URL}
-      HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN}
-      HATCHET_CLIENT_HOST_PORT: ${HATCHET_CLIENT_HOST_PORT}
-      HATCHET_CLIENT_TLS_STRATEGY: none
-      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL}
-      ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
-      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
-      LANGFUSE_HOST: ${LANGFUSE_HOST}
-      POSTGRES_MCP_URL: http://postgres-mcp:8000
-
-  enrich-worker:
-    build:
-      context: ./../../..
-      dockerfile: services/enrich-worker/Dockerfile
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-      nats:
-        condition: service_started
-      hatchet-engine:
-        condition: service_started
-    environment:
-      DATABASE_URL: ${DATABASE_URL}
-      NATS_URL: ${NATS_URL}
-      HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN}
-      HATCHET_CLIENT_HOST_PORT: ${HATCHET_CLIENT_HOST_PORT}
-      HATCHET_CLIENT_TLS_STRATEGY: none
-      S3_ENDPOINT: ${S3_ENDPOINT}
-      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
-      S3_SECRET_KEY: ${S3_SECRET_KEY}
-
 volumes:
   postgres_data:
   nats_data:
   seaweedfs_data:
   clickhouse_data:
-  caddy_data:
-  caddy_config:

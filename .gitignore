@@ -32,3 +32,6 @@ volumes/
 .terraform/
 *.tfstate*
 .envrc
+
+# wsl ntfs alternate-data-stream artifacts
+*:Zone.Identifier

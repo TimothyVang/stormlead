@@ -20,7 +20,6 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from hatchet_sdk import Context, Hatchet
-from hatchet_sdk.clients.run_event_listener import StepRunEventType
 
 from stormlead_core import Lead, configure_logging, get_logger
 from stormlead_db import LeadRow, get_session
