@@ -21,12 +21,15 @@ model_list:
       api_key: os.environ/ANTHROPIC_API_KEY
 
   # bulk offline tasks (pseo body generation, batch enrichment).
-  # google ai studio free tier: ~1500 RPD on flash; data used for training
-  # (acceptable for synthetic page bodies). switch to paid once it's revenue.
+  # currently routed to haiku — same upstream as agent-default. the
+  # semantic name is preserved so we can re-target this route to gemini /
+  # groq / a self-hosted model when the marginal cost of bulk generation
+  # actually matters (~$25 for a 50k-page pseo build at haiku rates;
+  # not enough to justify a second provider yet).
   - model_name: bulk-offline
     litellm_params:
-      model: gemini/gemini-2.5-flash
-      api_key: os.environ/GEMINI_API_KEY
+      model: anthropic/claude-haiku-4-5-20251001
+      api_key: os.environ/ANTHROPIC_API_KEY
 
   # ============== explicit-model routes (use when you need *that* model) ==============
 
