@@ -18,6 +18,7 @@ the **ping-post engine** in `services/ping-post/`. nothing forkable exists for t
 services/
   ping-post/                fastapi, the auction engine + cel filters
   storm-watcher/            tropycal/nws/fema pollers, hatchet cron
+  agent-runtime/            claude-agent-sdk workers: qualify_lead (opus, oauth) + hermes_self_evolution (weekly cron)
 
 libs/
   stormlead_core/           shared pydantic models, cel evaluator wrapper
@@ -39,7 +40,7 @@ scripts/                    (placeholder) one-shot ops
 .github/workflows/          (placeholder) ci/cd
 ```
 
-unimplemented yet (will return as they ship): `apps/landing`, `apps/buyer-portal`, `services/form-receiver`, `services/voice-bridge`, `services/agent-runtime`, `services/enrich-worker`.
+unimplemented yet (will return as they ship): `apps/landing`, `apps/buyer-portal`, `services/form-receiver`, `services/voice-bridge`, `services/enrich-worker`.
 
 ## quickstart (wsl2)
 

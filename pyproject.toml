@@ -11,6 +11,7 @@ members = [
     "libs/stormlead_db",
     "services/ping-post",
     "services/storm-watcher",
+    "services/agent-runtime",
 ]
 
 [tool.uv]

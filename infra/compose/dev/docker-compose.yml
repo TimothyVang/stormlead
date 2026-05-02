@@ -273,6 +273,36 @@ services:
       NWS_USER_AGENT: ${NWS_USER_AGENT}
       FEMA_API_BASE: ${FEMA_API_BASE}
 
+  agent-runtime:
+    build:
+      context: ./../../..
+      dockerfile: services/agent-runtime/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      hatchet-engine:
+        condition: service_started
+      litellm:
+        condition: service_started
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN}
+      HATCHET_CLIENT_HOST_PORT: ${HATCHET_CLIENT_HOST_PORT}
+      HATCHET_CLIENT_TLS_STRATEGY: none
+      # litellm path (haiku, virtual key) — used by future bulk workloads
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      LITELLM_PROXY_URL: ${LITELLM_PROXY_URL}
+      # oauth path (opus, claude.ai pro/max subscription) — used by hermes
+      # + complex qualification. see docs/research/2026-05-agent-auth-patterns.md.
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      # langfuse direct (oauth path bypasses litellm tracing)
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
+      LANGFUSE_HOST: ${LANGFUSE_HOST}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
 volumes:
   postgres_data:
   clickhouse_data:
