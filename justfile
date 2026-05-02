@@ -12,24 +12,24 @@ default:
 
 # bring up the wsl2 dev stack
 up:
-    docker compose -f infra/compose/dev/docker-compose.yml up -d
+    docker compose --env-file .env -f infra/compose/dev/docker-compose.yml up -d
     @echo "stack up. langfuse: http://localhost:3001  hatchet: http://localhost:8080  litellm: http://localhost:4000"
 
 # tear it down
 down:
-    docker compose -f infra/compose/dev/docker-compose.yml down
+    docker compose --env-file .env -f infra/compose/dev/docker-compose.yml down
 
 # nuke volumes too (destructive, dev only)
 nuke:
-    docker compose -f infra/compose/dev/docker-compose.yml down -v
+    docker compose --env-file .env -f infra/compose/dev/docker-compose.yml down -v
 
 # tail logs for one service
 logs SERVICE:
-    docker compose -f infra/compose/dev/docker-compose.yml logs -f {{SERVICE}}
+    docker compose --env-file .env -f infra/compose/dev/docker-compose.yml logs -f {{SERVICE}}
 
 # psql into the db
 psql:
-    docker compose -f infra/compose/dev/docker-compose.yml exec postgres psql -U stormlead -d stormlead
+    docker compose --env-file .env -f infra/compose/dev/docker-compose.yml exec postgres psql -U stormlead -d stormlead
 
 # --- migrations + seed ---
 
@@ -67,5 +67,5 @@ lint:
 # --- ops ---
 
 backup:
-    docker compose -f infra/compose/dev/docker-compose.yml exec postgres \
+    docker compose --env-file .env -f infra/compose/dev/docker-compose.yml exec postgres \
         pg_dump -U stormlead stormlead | gzip > backups/dev-$(date +%Y%m%d-%H%M%S).sql.gz

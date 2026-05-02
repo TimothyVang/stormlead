@@ -12,9 +12,11 @@ steps:
   2. build a synthetic formbricks `responseFinished` envelope.
   3. sign it with FORMBRICKS_WEBHOOK_SECRET via the standard-webhooks algo.
   4. POST to http://localhost:8002/webhooks/formbricks; expect 200.
-  5. poll postgres for the lead row (max 5s).
-  6. wait up to 10s for at least one buyer listener to receive a webhook.
-  7. print structured result + exit 0; on any failure exit 1.
+     form-receiver's 200 response carries the persisted lead_id, so no
+     host-side postgres connection is needed (and avoids the
+     remapped-host-port DSN dance).
+  5. wait up to 10s for at least one buyer listener to receive a webhook.
+  6. print structured result + exit 0; on any failure exit 1.
 
 run: uv run python scripts/smoke_e2e.py
 """
@@ -33,9 +35,6 @@ from typing import Any
 
 import httpx
 from aiohttp import web
-from sqlalchemy import select
-
-from stormlead_db import LeadRow, get_session
 
 
 FORM_RECEIVER_URL = os.environ.get(
@@ -48,7 +47,6 @@ SECRET = os.environ.get(
 )
 SYNTHETIC_PHONE = "+15125550199"  # distinct from the seed lead's +15125550100
 
-LEAD_POLL_TIMEOUT_S = 5
 WEBHOOK_LISTENER_TIMEOUT_S = 10
 
 
@@ -120,19 +118,6 @@ def _synthetic_envelope() -> dict[str, Any]:
     }
 
 
-async def _poll_for_lead(phone: str, timeout_s: int = LEAD_POLL_TIMEOUT_S) -> str | None:
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        async with get_session() as s:
-            row = (
-                await s.execute(select(LeadRow.id).where(LeadRow.phone_e164 == phone))
-            ).first()
-            if row:
-                return str(row.id)
-        await asyncio.sleep(0.5)
-    return None
-
-
 async def _wait_for_buyer_hit(timeout_s: int = WEBHOOK_LISTENER_TIMEOUT_S) -> bool:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -183,13 +168,10 @@ async def main() -> None:
         if r.status_code != 200:
             _fail("post-webhook", f"status={r.status_code} body={r.text}")
         payload = r.json()
-        _ok(f"status={payload.get('status')} lead_id={payload.get('lead_id')}")
-
-        _step(f"polling postgres for lead row (phone={SYNTHETIC_PHONE})")
-        lead_id = await _poll_for_lead(SYNTHETIC_PHONE)
+        lead_id = payload.get("lead_id")
         if not lead_id:
-            _fail("poll-lead", f"no lead row within {LEAD_POLL_TIMEOUT_S}s")
-        _ok(f"lead_id={lead_id}")
+            _fail("post-webhook", f"200 but no lead_id in body: {payload}")
+        _ok(f"status={payload.get('status')} lead_id={lead_id}")
 
         _step(f"waiting for buyer webhook (max {WEBHOOK_LISTENER_TIMEOUT_S}s)")
         hit = await _wait_for_buyer_hit()
