@@ -24,11 +24,11 @@ libs/
   stormlead_db/             sqlalchemy + alembic migrations
 
 infra/
-  compose/dev/              docker-compose for wsl2
+  compose/dev/              docker-compose for wsl2 (12 services post-cuts)
   compose/prod/             (placeholder) docker-compose for hetzner
   caddy/                    caddyfile + coraza waf rules (re-add when apps land)
   litellm/                  config.yaml (pinned image, cosign-verified)
-  openbao/                  (placeholder) policies + bootstrap
+  openbao/                  (deferred) see infra/openbao/README.md
   sql/                      bootstrap sql (postgis, timescale, pgvector)
 
 docs/
@@ -66,11 +66,13 @@ prod compose + deploy script are placeholders (`infra/compose/prod/`, `.github/w
 
 ## known traps (read these)
 
-1. **litellm**: pinned to a known-good image sha after the march 2026 supply-chain attack. do not `pip install litellm` anywhere. only the cosign-verified docker image.
+1. **litellm**: pinned to a known-good image sha after the march 2026 supply-chain attack. do not `pip install litellm` anywhere. only the cosign-verified docker image. (current pin v1.83.4 is now CVE'd — bump to v1.83.7-stable; see `docs/research/2026-05-stack-improvements.md`.)
 2. **claude agent sdk** ignores `ANTHROPIC_BASE_URL` from the bundled cli — set `cli_path` explicitly when `services/agent-runtime/` lands.
-3. **postgres mcp**: anthropic's reference server is archived + exploitable. we use `crystaldba/postgres-mcp-pro` behind a read-only role.
+3. **postgres mcp**: anthropic's reference server is archived + exploitable. we use `crystaldba/postgres-mcp-pro` behind a read-only role. (pin a specific tag, not `:latest`.)
 4. **suna**: not used. agent loop is direct on claude agent sdk + litellm. ~200 loc, no supabase.
 5. **rust**: not used. python everywhere. rewrite ping-post hot path in go later if we cross 500 leads/sec sustained.
+6. **hetzner region**: deploy to ashburn (us-east) or hillsboro (us-west). a falkenstein/helsinki box adds 150–200ms rtt to every buyer ping/post — eats the auction's <5s budget. see `docs/research/2026-05-architectural-fit.md`.
+7. **nats / seaweedfs / openbao not in v1 compose**: cut after architectural-fit research. hatchet handles durable workflows on postgres; hetzner object storage replaces seaweedfs in prod; sops-encrypted `.env.prod` replaces openbao until 2nd operator. re-add any of these when a concrete need surfaces, not before.
 
 ## license
 
