@@ -31,15 +31,15 @@ model_list:
   # ============== explicit-model routes (use when you need *that* model) ==============
 
   # primary: claude sonnet (qualification, complex tool use)
-  - model_name: claude-sonnet-4-5
+  - model_name: claude-sonnet-4-6
     litellm_params:
-      model: anthropic/claude-sonnet-4-5
+      model: anthropic/claude-sonnet-4-6
       api_key: os.environ/ANTHROPIC_API_KEY
 
-  # smart: claude opus for hard reasoning (qualification, self-evolution)
-  - model_name: claude-opus-4
+  # smart: claude opus 4.7 for hard reasoning (qualification, self-evolution)
+  - model_name: claude-opus-4-7
     litellm_params:
-      model: anthropic/claude-opus-4
+      model: anthropic/claude-opus-4-7
       api_key: os.environ/ANTHROPIC_API_KEY
 
   # cheap: claude haiku for high-volume classification (lead scoring)
@@ -51,20 +51,20 @@ model_list:
   # vision: claude with image input for damage classification
   - model_name: claude-vision
     litellm_params:
-      model: anthropic/claude-sonnet-4-5
+      model: anthropic/claude-sonnet-4-6
       api_key: os.environ/ANTHROPIC_API_KEY
 
   # fallback: openrouter (uncomment + add key if you want failover)
-  # - model_name: claude-sonnet-4-5-or
+  # - model_name: claude-sonnet-4-6-or
   #   litellm_params:
-  #     model: openrouter/anthropic/claude-sonnet-4-5
+  #     model: openrouter/anthropic/claude-sonnet-4-6
   #     api_key: os.environ/OPENROUTER_API_KEY
 
 # routing
 router_settings:
   routing_strategy: simple-shuffle
   fallbacks:
-    - claude-sonnet-4-5: [claude-haiku]   # cheap fallback if rate-limited
+    - claude-sonnet-4-6: [claude-haiku]   # cheap fallback if rate-limited
 
 # per-team budgets (postgres-backed)
 litellm_settings:
