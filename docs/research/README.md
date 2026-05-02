@@ -10,13 +10,19 @@ claude research artifacts that informed the scaffold's choices. the two `2026-05
 
 - **`2026-05-stack-improvements.md`** — *what changed since those docs were written, and what they don't address.* verification of time-sensitive claims (litellm cve, hatchet v1 rewrite, fcc one-to-one rule death) and a register of business-mechanics gaps neither prior doc covers (lead dedup, fraud scoring, buyer disputes, dnc scrub, billing). includes a sequenced action list.
 
-## superseded claims (read `stack-improvements.md` for current truth)
+- **`2026-05-architectural-fit.md`** — *is the chosen architecture the best fit for this business?* open research comparing 9 alternatives + an empirical hunt for what production lead-marketplace operators actually run. verdict: bones right, dressing over-engineered for v1. records the tier-1 cuts (drop nats, seaweedfs, openbao) and the hetzner-us-region decision, plus tier-2 spikes (dbos transact vs hatchet v1) deferred until agent-runtime work begins.
+
+## superseded claims (read `stack-improvements.md` and `architectural-fit.md` for current truth)
 
 - **litellm pin v1.83.4-stable** → **v1.83.7-stable** (cve-2026-42208).
 - **hatchet v0.50.0 healthy** → legacy branch; v1 rewrite shipped mar 2025.
 - **fcc one-to-one consent rule = primary tcpa threat** → rule is dead (vacated jan 2025, fcc abandoned aug/sep 2025); pre-2023 pewc standard restored.
 - **`crystaldba/postgres-mcp:latest` ok** → pin a specific tag.
 - **tropycal actively maintained** → snyk classifies "inactive" since early 2025.
+- **nats event bus alongside hatchet** → cut for v1; hatchet handles durable workflows on postgres; cross-service events use hatchet triggers or postgres listen/notify.
+- **seaweedfs as self-hosted s3** → cut for v1; use hetzner object storage (~$5/mo, s3-compat). seaweedfs/minio re-enter when there's a concrete reason.
+- **openbao for secrets in v1** → deferred until 2nd operator. `.env` + sops-encrypted `.env.prod` is enough until then.
+- **hetzner falkenstein/helsinki ok for the auction endpoint** → deploy to ashburn (us-east) or hillsboro (us-west). eu→us rtt eats the auction budget.
 
 ## scaffold divergences from `forkable-stack.md` (deliberate)
 
