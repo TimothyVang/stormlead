@@ -40,7 +40,7 @@ migrate-rev MSG:
     cd libs/stormlead_db && uv run alembic revision --autogenerate -m "{{MSG}}"
 
 seed:
-    @echo "TODO: scripts/seed_dev.py not yet implemented"
+    uv run python scripts/seed_dev.py
 
 # --- tests ---
 

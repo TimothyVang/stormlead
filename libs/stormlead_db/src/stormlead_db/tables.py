@@ -248,3 +248,36 @@ class BillingEvent(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), index=True
     )
+
+
+# ============================================================================
+# tcpa consent audit (form-receiver writes one per formbricks webhook delivery)
+# ============================================================================
+
+
+class ConsentAudit(Base):
+    """tcpa-defensible audit row. one per formbricks webhook delivery.
+
+    primary key is the standard-webhooks `webhook-id` header so retries
+    are idempotent. raw_payload is the parsed envelope (jsonb) for
+    forensic replay; the denormalized columns are for fast lookup +
+    indexing without unwrapping json.
+    """
+
+    __tablename__ = "consent_audits"
+
+    webhook_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    lead_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("leads.id"), nullable=False, index=True
+    )
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    formbricks_response_id: Mapped[str] = mapped_column(Text)
+    page_url: Mapped[str] = mapped_column(Text)
+    ip: Mapped[str] = mapped_column(String(45))  # ipv4/v6
+    user_agent: Mapped[str] = mapped_column(Text)
+    consent_text: Mapped[str] = mapped_column(Text)
+    page_html_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    dwell_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    raw_payload: Mapped[dict] = mapped_column(JSONB)
