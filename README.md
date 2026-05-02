@@ -67,7 +67,7 @@ prod compose + deploy script are placeholders (`infra/compose/prod/`, `.github/w
 ## known traps (read these)
 
 1. **litellm**: pinned to a known-good image sha after the march 2026 supply-chain attack. do not `pip install litellm` anywhere. only the cosign-verified docker image. (current pin v1.83.4 is now CVE'd — bump to v1.83.7-stable; see `docs/research/2026-05-stack-improvements.md`.)
-2. **claude agent sdk** ignores `ANTHROPIC_BASE_URL` from the bundled cli — set `cli_path` explicitly when `services/agent-runtime/` lands.
+2. **claude agent sdk** ignores `ANTHROPIC_BASE_URL` from the bundled cli — set `cli_path` explicitly when `services/agent-runtime/` lands. two viable auth paths: (a) api key via litellm (default, full observability + cost caps), (b) `CLAUDE_CODE_OAUTH_TOKEN` for subscription-billed opus work that bypasses litellm. hybrid recommended; see `docs/research/2026-05-agent-auth-patterns.md`.
 3. **postgres mcp**: anthropic's reference server is archived + exploitable. we use `crystaldba/postgres-mcp-pro` behind a read-only role. (pin a specific tag, not `:latest`.)
 4. **suna**: not used. agent loop is direct on claude agent sdk + litellm. ~200 loc, no supabase.
 5. **rust**: not used. python everywhere. rewrite ping-post hot path in go later if we cross 500 leads/sec sustained.

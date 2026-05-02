@@ -12,6 +12,8 @@ claude research artifacts that informed the scaffold's choices. the two `2026-05
 
 - **`2026-05-architectural-fit.md`** — *is the chosen architecture the best fit for this business?* open research comparing 9 alternatives + an empirical hunt for what production lead-marketplace operators actually run. verdict: bones right, dressing over-engineered for v1. records the tier-1 cuts (drop nats, seaweedfs, openbao) and the hetzner-us-region decision, plus tier-2 spikes (dbos transact vs hatchet v1) deferred until agent-runtime work begins.
 
+- **`2026-05-agent-auth-patterns.md`** — *can agents use `CLAUDE_CODE_OAUTH_TOKEN` instead of an api key?* counterexample-driven correction of an earlier "officially no" answer. coleam00's linear-coding-agent-harness is the canonical reference. verdict: oauth is viable for single-operator low-volume opus work (hermes self-evolution, complex qualification); api+litellm stays for high-volume / latency-sensitive paths. hybrid is the recommended shape when agent-runtime is built.
+
 ## superseded claims (read `stack-improvements.md` and `architectural-fit.md` for current truth)
 
 - **litellm pin v1.83.4-stable** → **v1.83.7-stable** (cve-2026-42208).
@@ -23,6 +25,7 @@ claude research artifacts that informed the scaffold's choices. the two `2026-05
 - **seaweedfs as self-hosted s3** → cut for v1; use hetzner object storage (~$5/mo, s3-compat). seaweedfs/minio re-enter when there's a concrete reason.
 - **openbao for secrets in v1** → deferred until 2nd operator. `.env` + sops-encrypted `.env.prod` is enough until then.
 - **hetzner falkenstein/helsinki ok for the auction endpoint** → deploy to ashburn (us-east) or hillsboro (us-west). eu→us rtt eats the auction budget.
+- **agents need an api key; oauth not allowed** → over-conservative reading of the policy. for single-operator personal automation, `CLAUDE_CODE_OAUTH_TOKEN` (via `claude setup-token` + claude code cli) is viable. the prohibition is on offering claude.ai login *to end users*. see `agent-auth-patterns.md` for the hybrid recommendation.
 
 ## scaffold divergences from `forkable-stack.md` (deliberate)
 
