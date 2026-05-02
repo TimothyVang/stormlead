@@ -5,22 +5,21 @@ cron schedule (utc):
   fema declarations  every 30 min
   nhc atcf (tropycal) every 15 min during hurricane season (jun-nov)
 
-each tick: fetch -> dedupe by external_id -> upsert -> emit nats.
+each tick: fetch -> dedupe by external_id -> upsert. downstream consumers
+read via postgres listen/notify or a hatchet event trigger fan-out (when
+agent-runtime lands). nats was removed in commit cfb2c15 — see
+docs/research/2026-05-architectural-fit.md.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
-import os
 from datetime import datetime, timezone
-from uuid import uuid4
 
 from hatchet_sdk import Context, Hatchet
-from nats.aio.client import Client as NATSClient
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from stormlead_core import StormDetected, configure_logging, get_logger
+from stormlead_core import configure_logging, get_logger
 from stormlead_db import StormRow, get_session
 
 from storm_watcher.fema import fetch_recent_declarations, normalize_declaration
@@ -30,23 +29,6 @@ configure_logging()
 log = get_logger(__name__)
 
 hatchet = Hatchet(debug=False)
-
-
-async def _publish_storm_detected(storm) -> None:  # type: ignore[no-untyped-def]
-    nc = NATSClient()
-    await nc.connect(os.environ["NATS_URL"])
-    try:
-        evt = StormDetected(
-            event_id=uuid4(),
-            occurred_at=datetime.now(timezone.utc),
-            storm=storm,
-        )
-        await nc.publish(
-            f"storms.detected.{storm.source}",
-            json.dumps(evt.model_dump(mode="json")).encode(),
-        )
-    finally:
-        await nc.close()
 
 
 async def _upsert_storm(storm) -> bool:  # type: ignore[no-untyped-def]
@@ -97,7 +79,6 @@ class NwsCapPoller:
             try:
                 if await _upsert_storm(storm):
                     new_count += 1
-                    await _publish_storm_detected(storm)
             except Exception as e:  # noqa: BLE001
                 log.error("nws.upsert_failed", external_id=storm.external_id, error=str(e))
 
@@ -121,7 +102,6 @@ class FemaPoller:
             try:
                 if await _upsert_storm(storm):
                     new_count += 1
-                    await _publish_storm_detected(storm)
             except Exception as e:  # noqa: BLE001
                 log.error("fema.upsert_failed", external_id=storm.external_id, error=str(e))
 

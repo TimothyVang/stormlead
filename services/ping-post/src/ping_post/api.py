@@ -3,7 +3,7 @@
 http api:
   POST /v1/auction       sync auction for one lead (test/debug)
   GET  /healthz          liveness
-  GET  /readyz           readiness (db + nats reachable)
+  GET  /readyz           readiness (db reachable)
 
 hatchet workflow:
   ping_post_auction      durable; called by form-receiver and storm-watcher
@@ -35,11 +35,11 @@ hatchet = Hatchet(debug=False)
 
 @hatchet.workflow(on_events=["lead.qualified"])
 class PingPostWorkflow:
-    """fired by nats consumer when a lead is qualified.
+    """fired when a lead.qualified hatchet event lands.
 
-    NOTE: hatchet's python sdk currently expects events from its own engine.
-    we run a thin nats->hatchet bridge in the agent-runtime that translates
-    lead.qualified nats messages into hatchet workflow runs.
+    upstream emitters: form-receiver (after consent + dedup), agent-runtime
+    (after qualification scoring). both push the event directly via the
+    hatchet python sdk; no nats bridge.
     """
 
     @hatchet.step(timeout="30s", retries=3)

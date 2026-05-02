@@ -9,7 +9,6 @@ dependencies = [
     "celpy>=0.3",       # cel evaluator for buyer filters
     "shapely>=2.0",
     "pyproj>=3.7",
-    "nats-py>=2.9",
 ]
 
 [build-system]

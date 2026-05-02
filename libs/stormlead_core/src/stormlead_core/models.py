@@ -1,6 +1,7 @@
 """canonical pydantic models for stormlead.
 
-these are the wire format. db rows mirror them. nats messages serialize them.
+these are the wire format. db rows mirror them. event-bus payloads
+(hatchet events; postgres listen/notify in v1) serialize them.
 no service should redefine these.
 """
 

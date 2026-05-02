@@ -1,12 +1,14 @@
-"""nats event payloads. one envelope per stream subject.
+"""domain event envelopes. one type per logical event.
 
-subjects:
-  storms.detected.<source>
-  leads.captured.<source>
-  leads.qualified
-  leads.posted.<buyer_id>
-  leads.unsold
-  calls.started, calls.ended, calls.transcribed
+these are the canonical pydantic shapes for cross-service events. nats was
+removed in commit cfb2c15; consumers now use hatchet event triggers (when
+agent-runtime lands) or postgres listen/notify for v1.
+
+logical event topics (kept for documentation / future re-introduction):
+  storm.detected
+  lead.captured
+  lead.qualified | lead.rejected | lead.posted | lead.sold | lead.unsold
+  call.started | call.answered | call.ended | call.transcribed
 """
 
 from __future__ import annotations
