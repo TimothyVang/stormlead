@@ -164,3 +164,7 @@ def test_wallet_helpers_convert_cents_to_dollars() -> None:
     assert _buyer_can_afford_bid(buyer, 9999)
     assert not _buyer_can_afford_bid(buyer, 10000)
     assert _debit_amount(12550) == Decimal("125.5")
+
+
+def test_debit_amount_handles_zero_bid() -> None:
+    assert _debit_amount(0) == Decimal("0")
