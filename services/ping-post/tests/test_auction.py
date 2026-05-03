@@ -14,7 +14,7 @@ import pytest
 from stormlead_core import Buyer, BuyerStatus, DamageTier, Lead, LeadSource, LeadStatus
 from stormlead_core.filters import evaluate_filter
 
-from ping_post.auction import _avm_band, _pick_winner, _ping_payload, _sign_webhook
+from ping_post.auction import _avm_band, _buyer_can_afford_bid, _debit_amount, _pick_winner, _ping_payload, _sign_webhook
 from ping_post.auction import PingResponse
 
 
@@ -26,7 +26,7 @@ def _lead(state="FL", tier=DamageTier.TIER_3_ON_STRUCTURE, avm=400_000) -> Lead:
         status=LeadStatus.QUALIFIED,
         name="Jane Doe",
         phone_e164="+15125550100",
-        email="jane@example.com",
+        email="jane@stormlead.test",
         address_line1="100 Main St",
         city="Miami",
         state=state,
@@ -37,7 +37,7 @@ def _lead(state="FL", tier=DamageTier.TIER_3_ON_STRUCTURE, avm=400_000) -> Lead:
         consent_ip="1.2.3.4",
         consent_user_agent="Mozilla/5.0",
         consent_at=now,
-        page_url="https://example.com/quote",
+        page_url="https://stormlead.test/quote",
         page_html_hash="a" * 64,
         property_avm=Decimal(avm),
         qualification_score=0.92,
@@ -51,7 +51,7 @@ def _buyer(filter_expr="lead.state == 'FL'") -> Buyer:
         contact_email="ops@test.co",
         contact_phone_e164="+15125550199",
         status=BuyerStatus.ACTIVE,
-        webhook_url="https://buyer.example.com/leads",
+        webhook_url="https://buyer.stormlead.test/leads",
         webhook_secret="s3cret-test-only",
         bid_per_lead_t1_t2=Decimal("65.00"),
         bid_per_lead_t3=Decimal("180.00"),
@@ -140,3 +140,27 @@ def test_pick_winner_none_when_all_reject() -> None:
         PingResponse(b1, accepted=False, bid_cents=None, response_ms=120, status_code=200, body=None, error=None),
     ]
     assert _pick_winner(responses, buyers, DamageTier.TIER_1_BRANCHES) is None
+
+
+def test_pick_winner_skips_buyer_without_wallet_balance() -> None:
+    b1, b2 = uuid4(), uuid4()
+    broke = _buyer()
+    broke.deposit_balance = Decimal("25.00")
+    funded = _buyer()
+    funded.deposit_balance = Decimal("500.00")
+    buyers = {b1: broke, b2: funded}
+    responses = [
+        PingResponse(b1, accepted=True, bid_cents=15000, response_ms=90, status_code=200, body=None, error=None),
+        PingResponse(b2, accepted=True, bid_cents=10000, response_ms=140, status_code=200, body=None, error=None),
+    ]
+    winner = _pick_winner(responses, buyers, DamageTier.TIER_3_ON_STRUCTURE)
+    assert winner is not None
+    assert winner[0].buyer_id == b2
+
+
+def test_wallet_helpers_convert_cents_to_dollars() -> None:
+    buyer = _buyer()
+    buyer.deposit_balance = Decimal("99.99")
+    assert _buyer_can_afford_bid(buyer, 9999)
+    assert not _buyer_can_afford_bid(buyer, 10000)
+    assert _debit_amount(12550) == Decimal("125.5")

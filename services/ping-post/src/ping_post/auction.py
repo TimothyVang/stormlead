@@ -33,7 +33,7 @@ from stormlead_core import (
     evaluate_filter,
     get_logger,
 )
-from stormlead_db import BuyerRow, LeadRow, PingAttempt, PostResult, get_session
+from stormlead_db import BillingEvent, BuyerRow, LeadRow, PingAttempt, PostResult, get_session
 
 log = get_logger(__name__)
 
@@ -242,13 +242,27 @@ def _pick_winner(
     buyers_by_id: dict[UUID, Buyer],
     damage_tier: DamageTier | None,
 ) -> tuple[PingResponse, Buyer] | None:
-    accepting = [r for r in responses if r.accepted and r.bid_cents]
+    accepting = [
+        r
+        for r in responses
+        if r.accepted
+        and r.bid_cents
+        and _buyer_can_afford_bid(buyers_by_id[r.buyer_id], r.bid_cents)
+    ]
     if not accepting:
         return None
     # highest bid wins. ties broken by lowest response time (fastest buyer).
     accepting.sort(key=lambda r: (-(r.bid_cents or 0), r.response_ms))
     winner = accepting[0]
     return winner, buyers_by_id[winner.buyer_id]
+
+
+def _buyer_can_afford_bid(buyer: Buyer, bid_cents: int) -> bool:
+    return buyer.deposit_balance >= Decimal(bid_cents) / Decimal(100)
+
+
+def _debit_amount(bid_cents: int) -> Decimal:
+    return Decimal(bid_cents) / Decimal(100)
 
 
 async def _post_to_winner(
@@ -365,6 +379,23 @@ async def run_auction(lead: Lead) -> PingPostResult:
                 lead_row = await s.get(LeadRow, lead.id)
                 if lead_row:
                     lead_row.status = LeadStatus.SOLD.value if ok else LeadStatus.UNSOLD.value
+                buyer_row = await s.get(BuyerRow, buyer.id)
+                if ok and buyer_row:
+                    debit = _debit_amount(ping_resp.bid_cents or 0)
+                    buyer_row.deposit_balance -= debit
+                    buyer_row.lifetime_spend += debit
+                    s.add(
+                        BillingEvent(
+                            buyer_id=buyer.id,
+                            lead_id=lead.id,
+                            event_type="lead.posted",
+                            amount_cents=-(ping_resp.bid_cents or 0),
+                            metadata_json={
+                                "post_result_status_code": status,
+                                "exclusive": True,
+                            },
+                        )
+                    )
         else:
             async with get_session() as s:
                 lead_row = await s.get(LeadRow, lead.id)
