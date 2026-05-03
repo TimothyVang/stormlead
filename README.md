@@ -66,6 +66,13 @@ just test
 
 prod compose + deploy script are placeholders (`infra/compose/prod/`, `.github/workflows/`). add them when the first non-dev environment exists.
 
+## documentation map
+
+- `docs/research/README.md` — current business and product operating model. start with `implementation guide`, `self-hosted framework review`, `40 percent irr operating model`, and `lead quality guarantee, credits, refunds, and ai voice nurture`.
+- `docs/research/2026-05-architectural-fit.md` — architecture decisions and why v1 uses postgres, hatchet, fastapi, and hetzner us regions.
+- `docs/research/2026-05-stack-improvements.md` — active technical risk register and implementation corrections.
+- `docs/research/2026-05-forkable-stack.md` and `docs/research/2026-05-stack-audit.md` — preserved source research; use the newer docs when they conflict.
+
 ## known traps (read these)
 
 1. **litellm**: pinned to a known-good image sha after the march 2026 supply-chain attack. do not `pip install litellm` anywhere. only the cosign-verified docker image. (current pin v1.83.4 is now CVE'd — bump to v1.83.7-stable; see `docs/research/2026-05-stack-improvements.md`.)

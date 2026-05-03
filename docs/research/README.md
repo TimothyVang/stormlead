@@ -40,6 +40,150 @@ claude research artifacts that informed the scaffold's choices. the two `2026-05
 - **hetzner blocks port 25 outbound by default.** matters when email send lands.
 - **ultralytics yolov8/v11 = agpl-3.0.** if vision is added, use florence-2 / detectron2 / llava — not ultralytics.
 
+## implementation guide
+
+This guide turns the research and operating model into the next build sequence. use it as the source of truth when choosing what to implement next.
+
+### product outcome
+
+StormLead should become a self-hosted, buyer-funded lead marketplace:
+
+1. contractors prepay wallets.
+2. funded buyer territories decide where homeowner campaigns can run.
+3. homeowner forms, calls, and mailer responses create leads.
+4. leads are classified as class a, b, c, or d.
+5. only class a and class b leads route automatically.
+6. successful delivery debits the buyer wallet.
+7. invalid leads credit the wallet through documented return rules.
+8. daily buyer reports drive wallet refills.
+
+### current implemented base
+
+- `services/form-receiver`: captures consented form leads and writes consent audits.
+- `services/storm-watcher`: imports storm events from public sources.
+- `services/ping-post`: routes leads to buyers, posts winners, debits wallets, and records billing events.
+- `services/agent-runtime`: foundation for qualification and agent workflows.
+- `libs/stormlead_db`: postgres schema for storms, buyers, leads, ping attempts, post results, billing events, and consent audits.
+- `infra/compose/dev`: local development stack.
+
+### next build sequence
+
+Build these in order. do not build the buyer portal, full ai voice, or automated ad buying before this foundation is in place.
+
+1. buyer crm fields: sales stage, notes, next follow-up, services, target zips, exclusive zips, and low-balance threshold.
+2. buyer update, list, wallet, and summary endpoints.
+3. territory/service matching inside ping-post eligibility.
+4. daily cap and monthly budget enforcement before buyer selection.
+5. lead classification fields: class a, b, c, d plus qualification reason.
+6. campaign/source attribution fields on leads.
+7. admin kpi endpoint for prepaid cash, active buyers, lead revenue, returns, and campaign margin.
+8. buyer daily report endpoint.
+9. return request evidence workflow and status model.
+10. mailer csv export for manual vendor upload.
+11. low-wallet refill recommendation workflow.
+12. call tracking webhook ingestion.
+13. voice-bridge skeleton for consented ai voice qualification.
+14. payment/refill links after manual deposits prove buyer refill behavior.
+
+### first paid-launch gate
+
+Do not launch paid homeowner acquisition until all of these are true:
+
+- three funded buyers exist in one market.
+- each active buyer has accepted service zips, services, caps, lead prices, and return rules.
+- available wallet balance covers the planned campaign spend risk.
+- landing page and consent capture are tested.
+- call tracking works for the campaign.
+- ping-post can route a test lead to a funded buyer.
+- invalid lead credit flow works.
+- admin can see buyer wallets, sold leads, returned leads, and campaign source.
+- campaign budget cap and stop-loss rules are set.
+
+### edge-case matrix
+
+Handle these before the first paid launch. each one can create lost cash, buyer disputes, compliance exposure, or bad attribution if ignored.
+
+Buyer and wallet edge cases:
+
+- wallet balance changes between ping and post: re-check balance in the same transaction that writes `post_results` and `billing_events`.
+- two leads debit the same buyer at the same time: lock the buyer row or use an atomic conditional update so the wallet cannot go negative.
+- buyer becomes paused after ping but before post: re-check status before posting full pii.
+- buyer webhook accepts ping but fails post: do not debit wallet; mark lead unsold or retry another eligible buyer.
+- buyer webhook times out after receiving pii: store delivery attempt, do not double-post without idempotency key.
+- buyer has enough balance for one lead but not the agreed minimum territory coverage: allow routing but block new campaign spend.
+- buyer disputes too many valid leads: pause buyer or require manual review before more routing.
+
+Lead and routing edge cases:
+
+- same homeowner submits multiple forms from different pages: dedupe by normalized phone, address, storm id, and time window, not page hash alone.
+- same household has two valid decision-makers: keep one sellable household lead unless the service request is materially different.
+- lead is in a zip with no funded buyer: classify and nurture, but do not spend more or auto-route.
+- lead matches multiple exclusive buyers in the same zip: territory conflict must block activation or force manual routing.
+- lead is class c and buyer wants it anyway: require manual override and record that it was sold below guarantee class.
+- life-safety or downed power-line lead: show emergency guidance and route only after safety warning; do not let ai imply emergency services.
+- photos contain sensitive people, license plates, or unrelated interiors: store privately and limit buyer exposure to needed evidence.
+
+Campaign and attribution edge cases:
+
+- one call comes from a mailer but converts through a google landing page: preserve first-touch and last-touch attribution.
+- qr code is shared between neighbors: track campaign/zip-level attribution first; do not assume per-household identity unless per-recipient tracking exists.
+- storm alert false positive or wrong polygon: hold campaign in approval mode until storm severity and target zips are confirmed.
+- campaign creates leads faster than buyers can answer: throttle spend and route based on response-speed ranking.
+- cost per qualified lead spikes mid-day: pause or cap campaigns automatically when guardrails fail.
+
+Compliance and consent edge cases:
+
+- homeowner opts out after lead is sold: store suppression immediately and notify the buyer if contract requires downstream suppression.
+- homeowner asks who received their data: keep a disclosure log of buyer, timestamp, and delivery channel.
+- call recording state requires all-party consent: play recording disclosure before recording or disable recording in those states.
+- ai voice detects opt-out language mid-call: end nurture and mark suppression.
+- consent text changes between landing page versions: store exact consent text and page hash/version for each lead.
+
+Refund and return edge cases:
+
+- buyer requests cash refund while lead disputes are open: freeze refund calculation until disputes resolve.
+- buyer chargeback occurs after leads were delivered: pause buyer, freeze routing, and reconcile wallet manually.
+- approved return after buyer already received final refund: create payable credit or manual adjustment; do not silently change historical ledger.
+- denied return with strong buyer objection: escalate to manual review and record final decision notes.
+- duplicate return request for same `post_result`: enforce one active return request per post result.
+
+Operations edge cases:
+
+- postgres backup restore fails: no paid launch until restore has been tested.
+- hatchet workflow retries after partial success: workflow steps must be idempotent by lead id, post result id, and webhook id.
+- object storage upload fails for photos/transcripts: keep lead sellable only if the guarantee does not depend on that evidence.
+- caddy routes to unimplemented services in prod: remove or disable those routes before public deployment.
+- vendor outage for phone, sms, mail, or payment: queue retries where safe and block spend where conversion tracking is broken.
+
+### self-hosted architecture target
+
+Keep these systems self-hosted because they are the business record:
+
+- buyer crm.
+- buyer wallets.
+- lead and consent records.
+- lead classification and routing decisions.
+- campaign attribution.
+- return and credit decisions.
+- suppression and opt-out state.
+- buyer reports and kpis.
+
+Use vendors only for unavoidable network edges:
+
+- phone carrier access.
+- sms and call delivery.
+- payment rails.
+- google/meta ad delivery.
+- physical mail print/postage.
+- email relay.
+
+### documentation sections to read before coding
+
+- `self-hosted framework review`: self-hosted boundary and production-readiness gaps.
+- `40 percent irr operating model`: business model, unit economics, guardrails, rollout, and kpis.
+- `lead quality guarantee, credits, refunds, and ai voice nurture`: return policy, proof requirements, ai voice rules, and nurture design.
+- `automated storm mailers`: mailer targeting, creative rules, kpis, and v1 vendor flow.
+
 ## self-hosted framework review
 
 This section is the design review for the current self-hosted framework. it defines what must stay self-hosted, what can use vendors, and what is not yet implementation-ready.
