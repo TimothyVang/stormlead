@@ -40,6 +40,107 @@ claude research artifacts that informed the scaffold's choices. the two `2026-05
 - **hetzner blocks port 25 outbound by default.** matters when email send lands.
 - **ultralytics yolov8/v11 = agpl-3.0.** if vision is added, use florence-2 / detectron2 / llava — not ultralytics.
 
+## self-hosted framework review
+
+This section is the design review for the current self-hosted framework. it defines what must stay self-hosted, what can use vendors, and what is not yet implementation-ready.
+
+### current verdict
+
+The framework is directionally sound for a single-operator storm/tree lead marketplace because it keeps the legally sensitive state under stormlead control:
+
+- homeowner leads and pii in postgres.
+- consent audit in postgres.
+- buyer wallets and billing events in postgres.
+- return/credit decisions in the stormlead ledger.
+- lead routing decisions in ping-post.
+- storm detection in storm-watcher.
+- qualification/nurture workflows under hatchet.
+
+The design should not attempt to self-host everything. phone carriers, payment rails, ad platforms, and physical mail delivery are external networks by nature. stormlead should self-host the decisioning, audit trail, routing, and reporting layers while using vendors only for unavoidable network edges.
+
+### self-hosted boundary
+
+Must be self-hosted:
+
+- buyer crm and wallet state.
+- lead capture records.
+- consent audit trail.
+- campaign attribution records.
+- lead qualification class and scoring.
+- ping-post routing and buyer selection.
+- billing ledger and return decisions.
+- suppression and opt-out state.
+- ai voice transcript summaries and decision outputs.
+- admin kpis and buyer reports.
+
+Can use vendors:
+
+- phone numbers, calling, sms, and carrier connectivity.
+- card/ach payment processing.
+- google/meta ad delivery.
+- direct-mail print and postage.
+- email relay.
+- object storage if configured as private, encrypted, and controlled by stormlead.
+
+Should not be vendor-owned:
+
+- source of truth for consent.
+- source of truth for wallet balances.
+- source of truth for whether a lead was valid, returned, or credited.
+- source of truth for buyer territories and routing eligibility.
+- only copy of call transcripts or lead evidence.
+
+### system-of-record map
+
+- postgres: primary system of record for buyers, leads, consent, wallets, billing events, returns, campaigns, suppressions, and kpis.
+- object storage: evidence store for photos, mailer exports, call recordings, transcripts, and audit snapshots.
+- hatchet: workflow scheduler and retry layer, not the permanent business record.
+- caddy: edge routing, tls, waf, and public/private boundary.
+- ping-post: lead auction, wallet affordability check, delivery, debit, and post-result write path.
+- form-receiver: consented homeowner capture and consent audit write path.
+- storm-watcher: storm event ingestion and campaign trigger candidate source.
+- agent-runtime: qualification, summaries, nurture decisions, and operator-assist logic.
+
+### production-readiness gaps
+
+The current code and docs are not yet a deployable revenue system until these gaps are closed:
+
+- prod compose and deploy script still need to be built.
+- caddy references `landing`, `buyer-portal`, and `voice-bridge`, but those services are not implemented or included in compose.
+- buyer crm fields and territory/service matching are not yet implemented.
+- lead classification fields for class a/b/c/d are not yet implemented.
+- campaign/source attribution fields are not yet implemented.
+- return request evidence workflow is documented but not modeled as a table.
+- ai voice nurture is documented but `voice-bridge` is not implemented.
+- call tracking ingestion is not implemented.
+- mailer csv export and campaign records are not implemented.
+- admin kpi and buyer report endpoints are not implemented.
+- low-wallet alerts and refill workflows are not implemented.
+- cash refund workflow is documented but not integrated with a payment provider.
+
+### design risks to keep explicit
+
+- **monolithic docs risk**: this README now contains strategy, compliance policy, product requirements, and rollout planning. keep it as the single source until first launch, then split into dedicated docs when the sections stabilize.
+- **legal/compliance risk**: ai voice, sms, call recording, and refund terms need counsel review before production use.
+- **cash-flow risk**: cash refunds should be limited; ordinary bad leads should become wallet credits to preserve campaign working capital.
+- **buyer-trust risk**: refund/credit rules must be enforced consistently or contractors will stop refilling.
+- **campaign-spend risk**: paid homeowner acquisition must be blocked when funded buyer coverage is missing.
+- **ops-surface risk**: fully self-hosted telephony should be deferred; use a carrier vendor until lead economics are proven.
+
+### implementation readiness gate
+
+The framework is ready for first paid launch only when all of these are true:
+
+- at least three funded buyers exist in one target market.
+- active buyers have territories, services, caps, wallet balances, and accepted credit terms.
+- lead capture records campaign source, consent, address, and phone.
+- only class a and class b leads can route automatically.
+- ping-post checks wallet, territory, service, status, and caps before delivery.
+- approved returns credit wallets and denied returns record a reason.
+- admin can see wallet-backed revenue, active buyers, sold leads, returns, and campaign margin.
+- caddy routes only implemented public services.
+- prod compose runs the implemented service set with no public database/admin ports.
+
 ## defensive breach-intel workflow
 
 Purpose: maintain a defensive-only exposure monitoring workflow for company-owned or explicitly authorized domains, customers, vendors, and infrastructure. this workflow must not be used for lead generation, contact enrichment, ad targeting, profiling, or marketing outreach.
