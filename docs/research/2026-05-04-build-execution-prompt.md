@@ -1,6 +1,6 @@
 # Build execution prompt (task-by-task with checklists)
 
-Use this prompt in your coding agent (Codex/Claude Code/etc.) to execute the Stormlead build in implementation order.
+Use this prompt in your coding agent to execute the Stormlead build in implementation order.
 
 ---
 

@@ -21,7 +21,7 @@ If `/qc main` is invoked while on a feature branch with uncommitted changes, car
 - Never use `--allow-empty` unless explicitly requested.
 - Never force-push or use `--force-with-lease`.
 - Never edit git config or set committer identity.
-- Never add AI attribution lines such as `Co-Authored-By: Claude`, `Generated with Claude Code`, or equivalent AI watermarks.
+- Never add AI attribution lines, AI coauthor trailers, or equivalent AI watermarks.
 - Never stage likely secrets or junk without asking first, including `.env`, `.env.*`, credentials, keys, large binaries, `node_modules`, `__pycache__`, build outputs, and unfamiliar generated files.
 
 ## Step 0 - Verify GitHub CLI When Needed
@@ -85,7 +85,7 @@ If there are no changes, do not create an empty commit. Tell the user there is n
 
 Before drafting the message, check for project-specific rules in this order and stop at the first hit:
 
-1. `CLAUDE.md` at repo root.
+1. `AGENTS.md` at repo root.
 2. `CONTRIBUTING.md`.
 3. `.gitmessage` or `commit.template` in `.git/config`.
 4. Recent commit log.

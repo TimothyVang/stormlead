@@ -44,6 +44,115 @@ scripts/                    (placeholder) one-shot ops
 
 unimplemented yet (will return as they ship): `apps/landing`, `apps/buyer-portal`, `services/voice-bridge`.
 
+## visual map
+
+### system architecture
+
+```mermaid
+flowchart LR
+  subgraph Sources["storm and lead sources"]
+    Storms["NWS / FEMA / Tropycal"]
+    Forms["Formbricks webhook<br/>synthetic local leads"]
+  end
+
+  subgraph Services["python services"]
+    Watcher["storm-watcher"]
+    Receiver["form-receiver"]
+    Enrich["enrich-worker"]
+    Agent["agent-runtime<br/>LiteLLM routed"]
+    PingPost["ping-post<br/>auction + admin"]
+  end
+
+  subgraph Control["control and data plane"]
+    Hatchet["Hatchet workflows"]
+    Postgres["Postgres<br/>PostGIS + Timescale + pgvector"]
+    LiteLLM["LiteLLM proxy"]
+  end
+
+  subgraph Proof["local proof surfaces"]
+    Admin["/admin dashboard"]
+    Playwright["headed Playwright / Cowork"]
+    Evidence["ignored testing/runs evidence"]
+  end
+
+  Storms --> Watcher
+  Forms --> Receiver
+  Receiver --> Hatchet
+  Watcher --> Hatchet
+  Hatchet --> Enrich
+  Hatchet --> Agent
+  Hatchet --> PingPost
+  Agent --> LiteLLM
+  Enrich --> Postgres
+  Agent --> Postgres
+  PingPost --> Postgres
+  PingPost --> Admin
+  Admin --> Playwright
+  Playwright --> Evidence
+```
+
+### lead lifecycle
+
+```mermaid
+flowchart TD
+  Captured["lead captured<br/>signed webhook"] --> Enriched["lead enriched"]
+  Enriched --> Qualified["agent qualified"]
+  Enriched --> Rejected["rejected low quality"]
+  Qualified --> Auction["ping-post auction"]
+  Auction --> Sold["sold to local buyer listener"]
+  Auction --> Unsold["unsold no buyer"]
+  Sold --> ReturnReview["return request + admin review"]
+  ReturnReview --> Credited["approved credit flow"]
+  Unsold --> Nurture["no-contact local nurture proof"]
+  Rejected --> Nurture
+  Nurture --> Evidence["audit timeline + evidence manifest"]
+  Credited --> Evidence
+```
+
+### local agent and tool routing
+
+```mermaid
+flowchart LR
+  subgraph Agents["coding agents"]
+    OpenCode["OpenCode"]
+    Codex["Codex CLI / IDE"]
+  end
+
+  subgraph Config["repo config"]
+    AgentGuide["AGENTS.md"]
+    OpenCodeConfig["opencode.json"]
+    CodexConfig[".codex/config.toml"]
+  end
+
+  subgraph MCP["MCP servers"]
+    StormleadMcp["StormLead Local Ops MCP"]
+    DockerMcp["Docker MCP Gateway"]
+    KubernetesMcp["Kubernetes MCP Gateway"]
+  end
+
+  subgraph LocalOnly["local-only targets"]
+    AdminApi["admin APIs"]
+    Scripts["smoke + V1 simulation scripts"]
+    Artifacts["testing/runs artifacts"]
+    Docker["local Docker Compose"]
+  end
+
+  OpenCode --> AgentGuide
+  Codex --> AgentGuide
+  OpenCode --> OpenCodeConfig
+  Codex --> CodexConfig
+  OpenCodeConfig --> StormleadMcp
+  OpenCodeConfig --> DockerMcp
+  OpenCodeConfig --> KubernetesMcp
+  CodexConfig --> StormleadMcp
+  CodexConfig --> DockerMcp
+  CodexConfig --> KubernetesMcp
+  StormleadMcp --> AdminApi
+  StormleadMcp --> Scripts
+  StormleadMcp --> Artifacts
+  DockerMcp --> Docker
+```
+
 ## quickstart (wsl2)
 
 ```bash
