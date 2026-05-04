@@ -10,6 +10,7 @@ from decimal import Decimal
 from uuid import uuid4
 
 from ping_post.auction import (
+    _delivery_idempotency_key,
     PingResponse,
     _avm_band,
     _buyer_can_afford_bid,
@@ -17,6 +18,7 @@ from ping_post.auction import (
     _debit_amount,
     _pick_winner,
     _ping_payload,
+    _should_retry_post,
     _sign_webhook,
 )
 from stormlead_core import Buyer, BuyerStatus, DamageTier, Lead, LeadClass, LeadSource, LeadStatus
@@ -97,6 +99,30 @@ def test_sign_webhook_is_deterministic() -> None:
     b = _sign_webhook("k", "1700000000", b'{"x":1}')
     assert a == b
     assert a.startswith("v1,")
+
+
+def test_delivery_idempotency_key_is_stable() -> None:
+    lead_id = uuid4()
+    buyer_id = uuid4()
+    a = _delivery_idempotency_key(lead_id, buyer_id, 12000)
+    b = _delivery_idempotency_key(lead_id, buyer_id, 12000)
+    assert a == b
+    assert len(a) == 64
+
+
+def test_delivery_idempotency_key_changes_when_bid_changes() -> None:
+    lead_id = uuid4()
+    buyer_id = uuid4()
+    assert _delivery_idempotency_key(lead_id, buyer_id, 9000) != _delivery_idempotency_key(
+        lead_id, buyer_id, 9100
+    )
+
+
+def test_should_retry_post_for_5xx_and_429() -> None:
+    assert _should_retry_post(500, None)
+    assert _should_retry_post(503, None)
+    assert _should_retry_post(429, None)
+    assert not _should_retry_post(400, None)
 
 
 def test_filter_matches_state() -> None:
