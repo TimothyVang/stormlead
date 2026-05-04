@@ -22,7 +22,7 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 import httpx
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 from stormlead_core import (
     Buyer,
     DamageTier,
@@ -32,7 +32,15 @@ from stormlead_core import (
     evaluate_filter,
     get_logger,
 )
-from stormlead_db import BillingEvent, BuyerRow, LeadRow, PingAttempt, PostResult, get_session
+from stormlead_db import (
+    BillingEvent,
+    BuyerRow,
+    LeadRow,
+    PingAttempt,
+    PostResult,
+    finalize_post_attempt,
+    get_session,
+)
 
 log = get_logger(__name__)
 
@@ -330,72 +338,6 @@ def _debit_amount(bid_cents: int) -> Decimal:
     return Decimal(bid_cents) / Decimal(100)
 
 
-async def _reserve_buyer_wallet(
-    buyer_id: UUID,
-    lead_id: UUID,
-    bid_cents: int,
-) -> bool:
-    debit = _debit_amount(bid_cents)
-    async with get_session() as s:
-        result = await s.execute(
-            update(BuyerRow)
-            .where(
-                BuyerRow.id == buyer_id,
-                BuyerRow.status == "active",
-                BuyerRow.deposit_balance >= debit,
-            )
-            .values(
-                deposit_balance=BuyerRow.deposit_balance - debit,
-                lifetime_spend=BuyerRow.lifetime_spend + debit,
-            )
-        )
-        if result.rowcount != 1:
-            log.warning(
-                "buyer.wallet_reserve_rejected",
-                buyer_id=str(buyer_id),
-                lead_id=str(lead_id),
-                bid_cents=bid_cents,
-            )
-            return False
-        s.add(
-            BillingEvent(
-                buyer_id=buyer_id,
-                lead_id=lead_id,
-                event_type="lead.reserved",
-                amount_cents=-bid_cents,
-                metadata_json={"exclusive": True},
-            )
-        )
-        return True
-
-
-async def _credit_failed_delivery(
-    buyer_id: UUID,
-    lead_id: UUID,
-    bid_cents: int,
-    status: int | None,
-) -> None:
-    credit = _debit_amount(bid_cents)
-    async with get_session() as s:
-        await s.execute(
-            update(BuyerRow)
-            .where(BuyerRow.id == buyer_id)
-            .values(
-                deposit_balance=BuyerRow.deposit_balance + credit,
-                lifetime_spend=BuyerRow.lifetime_spend - credit,
-            )
-        )
-        s.add(
-            BillingEvent(
-                buyer_id=buyer_id,
-                lead_id=lead_id,
-                event_type="lead.delivery_failed_credit",
-                amount_cents=bid_cents,
-                metadata_json={"post_result_status_code": status},
-            )
-        )
-
-
 async def _post_to_winner(
     client: httpx.AsyncClient,
     buyer: Buyer,
@@ -534,30 +476,27 @@ async def run_auction(lead: Lead) -> PingPostResult:
         if winner_pair:
             ping_resp, buyer = winner_pair
             bid_cents = ping_resp.bid_cents or 0
-            reserved = await _reserve_buyer_wallet(buyer.id, lead.id, bid_cents)
-            if reserved:
-                winning_buyer_id = buyer.id
-                winning_bid = bid_cents
-                ok, status, body = await _post_to_winner(client, buyer, lead, bid_cents)
-            else:
-                ok, status, body = False, None, "buyer wallet/status changed before post"
+            ok, status, body = await _post_to_winner(client, buyer, lead, bid_cents)
+            post_attempt_key = _delivery_idempotency_key(lead.id, buyer.id, bid_cents)
 
             async with get_session() as s:
-                s.add(
-                    PostResult(
-                        lead_id=lead.id,
-                        buyer_id=buyer.id,
-                        bid_cents=bid_cents,
-                        delivered=ok,
-                        response_status_code=status,
-                        response_body=body,
-                    )
+                finalize = await finalize_post_attempt(
+                    s,
+                    lead_id=lead.id,
+                    buyer_id=buyer.id,
+                    bid_cents=bid_cents,
+                    post_attempt_key=post_attempt_key,
+                    delivery_ok=ok,
+                    response_status_code=status,
+                    response_body=body,
                 )
                 # update lead status
                 lead_row = await s.get(LeadRow, lead.id)
                 if lead_row:
-                    lead_row.status = LeadStatus.SOLD.value if ok else LeadStatus.UNSOLD.value
-                if ok:
+                    lead_row.status = LeadStatus.SOLD.value if finalize.delivered else LeadStatus.UNSOLD.value
+                if finalize.delivered:
+                    winning_buyer_id = buyer.id
+                    winning_bid = bid_cents
                     s.add(
                         BillingEvent(
                             buyer_id=buyer.id,
@@ -568,11 +507,10 @@ async def run_auction(lead: Lead) -> PingPostResult:
                                 "reserved_cents": bid_cents,
                                 "post_result_status_code": status,
                                 "exclusive": True,
+                                "post_attempt_key": post_attempt_key,
                             },
                         )
                     )
-            if reserved and not ok:
-                await _credit_failed_delivery(buyer.id, lead.id, bid_cents, status)
         else:
             async with get_session() as s:
                 lead_row = await s.get(LeadRow, lead.id)

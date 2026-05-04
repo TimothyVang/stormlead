@@ -239,6 +239,7 @@ class PostResult(Base):
     buyer_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("buyers.id"), index=True
     )
+    post_attempt_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     bid_cents: Mapped[int] = mapped_column(BigInteger)
     delivered: Mapped[bool] = mapped_column(Boolean, default=False)
     response_status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
