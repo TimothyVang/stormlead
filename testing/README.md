@@ -13,22 +13,29 @@ Latest browser workflow target: `GET /admin` from the `ping-post` FastAPI app.
 
 The browser workflow does not mock backend JSON calls. It creates, activates/funds, deposits into, and reviews a real buyer through the admin UI against the running API and database.
 
-## Human-Style Operator Runs
+## StormLead Cowork Mode
 
-Playwright workflows now write timestamped evidence folders under `testing/runs/`.
+Playwright workflows now run as StormLead Cowork Mode: Request -> Analysis -> Plan -> Review/Approve -> Execute -> Verify. The browser shows a Cowork panel with task, analysis, plan, current action, typed notes, verification status, output paths, a visible cursor, and highlighted UI elements.
+
+Workflow definitions live under `tests/playwright/workflows/`. The first workflow is `paid-pilot-admin-review`, which creates, activates/funds, deposits into, and reviews a real buyer through the admin UI.
+
+Each run writes timestamped evidence folders under `testing/runs/`.
 
 Each run includes:
 
 - `screenshots/` - step-by-step screenshots with cursor/highlight overlays.
-- `logs/operator-log.md` - timestamped operator comments.
+- `plan.md` - request, analysis, plan, inputs, and outputs.
+- `logs/cowork-log.md` - timestamped Cowork comments.
 - `logs/assertions.json` - assertions that passed.
 - `reviews/review.md` - product review notes and follow-up gaps.
 
 Use `npm run test:playwright -- --project=chromium` for repeatable automated evidence.
 
-Use `npm run demo:admin` for a visible browser demo that stays open until you close it or stop the saved process IDs in `testing/logs/live-demo-pids.txt`.
+Use `npm run cowork:admin` for a visible browser demo that stays open until you close it.
 
-Use `npm run demo:admin:record` to run the live demo in non-persistent recording mode.
+Use `npm run cowork:admin:record` to run the live demo in non-persistent recording mode.
+
+`npm run demo:admin` and `npm run demo:admin:record` are compatibility aliases for the Cowork commands.
 
 Use `npm run evidence:clean` to preview generated evidence cleanup. Use `npm run evidence:clean:apply` to remove ignored generated evidence while preserving the tracked `.gitkeep` placeholders.
 

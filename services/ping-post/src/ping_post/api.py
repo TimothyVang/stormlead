@@ -17,7 +17,7 @@ import asyncio
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -26,7 +26,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from hatchet_sdk import Context, Hatchet
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import and_, func, select
+from sqlalchemy import Integer, and_, func, select
 from stormlead_core import BuyerSalesStage, BuyerStatus, Lead, configure_logging, get_logger
 from stormlead_db import BillingEvent, BuyerRow, LeadRow, PingAttempt, PostResult, get_session
 
@@ -862,9 +862,9 @@ async def normalized_kpis(
     if market_state and market_zip:
         raise HTTPException(400, 'choose either market_state or market_zip, not both')
     if start_at and start_at.tzinfo is None:
-        start_at = start_at.replace(tzinfo=timezone.utc)
+        start_at = start_at.replace(tzinfo=UTC)
     if end_at and end_at.tzinfo is None:
-        end_at = end_at.replace(tzinfo=timezone.utc)
+        end_at = end_at.replace(tzinfo=UTC)
 
     lead_filters = []
     if market_state:
