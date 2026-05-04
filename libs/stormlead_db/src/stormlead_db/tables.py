@@ -209,7 +209,7 @@ class LeadStateTransition(Base):
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     lead_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("leads.id"), index=True)
     from_state: Mapped[str] = mapped_column(String(32))
-    to_state: Mapped[str] = mapped_column(String(32), index=True)
+    to_state: Mapped[str] = mapped_column(String(32))
     event_type: Mapped[str] = mapped_column(String(64), index=True)
     task_name: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     workflow_run_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)

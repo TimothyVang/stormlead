@@ -72,6 +72,7 @@ prod compose + deploy script are placeholders (`infra/compose/prod/`, `.github/w
 
 - `docs/research/README.md` — current business and product operating model. start with `implementation guide`, `self-hosted framework review`, `40 percent irr operating model`, and `lead quality guarantee, credits, refunds, and ai voice nurture`.
 - `docs/research/2026-05-architectural-fit.md` — architecture decisions and why v1 uses postgres, hatchet, fastapi, and hetzner us regions.
+- `docs/research/visual-agentic-workflow-runbook.md` — admin workflow timeline, review actions, KPI semantics, and Cowork evidence manifests.
 - `docs/research/2026-05-stack-improvements.md` — active technical risk register and implementation corrections.
 - `docs/research/2026-05-forkable-stack.md` and `docs/research/2026-05-stack-audit.md` — preserved source research; use the newer docs when they conflict.
 

@@ -70,23 +70,45 @@ Structured metrics are emitted through `stormlead_core.emit_metric` and can be s
 
 Each metric includes `correlation_id`; lead-scoped metrics include `lead_id`.
 
+## Visual Admin Workflow
+
+The admin UI now exposes the audited workflow without adding a separate frontend:
+
+1. `GET /v1/admin/workflow-kpis` computes workflow KPI cards from `lead_state_transitions`, `ping_attempts`, and `post_results`.
+2. `GET /v1/admin/workflow-runs/recent` groups recent audited lead runs by lead/workflow run.
+3. `GET /v1/admin/leads/{lead_id}/timeline` renders redacted timeline events from append-only transition rows.
+4. `POST /v1/admin/leads/{lead_id}/review` records `hold`, `review`, or `approve` operator actions as admin audit events.
+5. Cowork/Playwright runs write `testing/runs/<run_id>/evidence.json` with workflow metadata, subject IDs, assertions, observations, and artifact paths.
+
+Payload summaries are PII/secret redacted at the helper/API/UI boundary. Direct prompt text, raw payloads, secrets, consent details, emails, phone numbers, and query-string URLs are not rendered in the timeline.
+
+Hatchet remains the workflow engine for this milestone. n8n is deferred to non-critical operator automations; Temporal is deferred until workflow scale or replay complexity justifies a migration.
+
 ## Validation Snapshot
 
 Passed in this workspace:
 
 ```powershell
 uv sync --all-packages
+docker compose --env-file .env.example -f infra/compose/dev/docker-compose.yml config --quiet
+$env:DATABASE_URL="postgresql+psycopg://stormlead:change-me-in-openbao@localhost:5433/stormlead"
+uv run python scripts/init_db.py
+Push-Location libs/stormlead_db; uv run alembic upgrade head; Pop-Location
 uv run ruff check services libs scripts/replay_lead.py
 uv run ruff format --check services libs scripts/replay_lead.py
 uv run pytest -q services libs
 uv run mypy services libs
+npm run test:playwright -- --project=chromium --reporter=line
+npm run cowork:admin:record
 ```
 
 Latest results:
 
 ```
-60 passed, 48 warnings
+62 passed, 48 warnings
 Success: no issues found in 50 source files
+npm run test:playwright -- --project=chromium --reporter=line: 1 passed
+npm run cowork:admin:record: passed and wrote evidence.json
 ```
 
 Mypy note: the project configuration type-checks source files while ignoring untyped Hatchet decorator/worker entrypoint modules and existing service tests. Runtime workflow functions and shared libraries remain checked.

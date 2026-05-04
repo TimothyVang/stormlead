@@ -155,9 +155,17 @@ async def qualify_lead(context: Context) -> dict[str, Any]:
             task_name="agent_runtime.qualify_lead",
             workflow_run_id=envelope.run_id,
             payload={
+                "damage_tier": parsed["damage_tier"],
                 "qualification_score": parsed["qualification_score"],
                 "lead_class": row.lead_class,
                 "rejection_reason": parsed["rejection_reason"],
+                "reasoning_summary": _reasoning_summary(parsed["reasoning"]),
+                "model_used": str(usage["model_used"]),
+                "fallback_used": bool(usage["fallback_used"]),
+                "duration_ms": int(usage["duration_ms"]),
+                "estimated_input_tokens": int(usage["estimated_input_tokens"]),
+                "estimated_output_tokens": int(usage["estimated_output_tokens"]),
+                "estimated_cost_usd": float(usage["estimated_cost_usd"]),
             },
         )
 
@@ -228,3 +236,12 @@ def _class_from_score(score: float) -> str:
     if score >= 0.3:
         return LeadClass.C.value
     return LeadClass.D.value
+
+
+def _reasoning_summary(value: str, *, limit: int = 320) -> str:
+    summary = re.sub(r"\s+", " ", value).strip()
+    summary = re.sub(
+        r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", "[redacted-email]", summary, flags=re.I
+    )
+    summary = re.sub(r"\+\d{8,15}", "[redacted-phone]", summary)
+    return summary[:limit]

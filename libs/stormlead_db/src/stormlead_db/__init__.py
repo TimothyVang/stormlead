@@ -10,12 +10,17 @@ from stormlead_db.tables import (
     StormRow,
 )
 from stormlead_db.transitions import (
+    LeadRunSummary,
+    LeadTimelineEvent,
     TransitionWriteResult,
     build_transition_idempotency_key,
     has_active_transition,
     latest_state,
     latest_transition,
+    list_lead_timeline,
+    list_recent_lead_runs,
     record_transition,
+    summarize_transition_payload,
 )
 
 __all__ = [
@@ -23,7 +28,9 @@ __all__ = [
     "BuyerRow",
     "ConsentAudit",
     "LeadRow",
+    "LeadRunSummary",
     "LeadStateTransition",
+    "LeadTimelineEvent",
     "PingAttempt",
     "PostResult",
     "StormRow",
@@ -34,5 +41,8 @@ __all__ = [
     "has_active_transition",
     "latest_state",
     "latest_transition",
+    "list_lead_timeline",
+    "list_recent_lead_runs",
     "record_transition",
+    "summarize_transition_payload",
 ]

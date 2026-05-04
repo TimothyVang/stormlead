@@ -6,11 +6,13 @@ const baseURL = process.env.STORMLEAD_ADMIN_URL ?? 'http://127.0.0.1:8003';
 const keepOpen = process.env.STORMLEAD_KEEP_BROWSER_OPEN !== '0';
 const planReviewMs = Number(process.env.COWORK_PLAN_REVIEW_MS ?? 6000);
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-const runDir = join('testing', 'runs', `${stamp}-paid-pilot-admin-review-live`);
+const runId = `${stamp}-paid-pilot-admin-review-live`;
+const runDir = join('testing', 'runs', runId);
 const screenshotsDir = join(runDir, 'screenshots');
 const logsDir = join(runDir, 'logs');
 const reviewsDir = join(runDir, 'reviews');
 const videosDir = join('testing', 'videos', 'live-admin-cowork');
+const evidencePath = join(runDir, 'evidence.json');
 
 mkdirSync(screenshotsDir, { recursive: true });
 mkdirSync(logsDir, { recursive: true });
@@ -255,8 +257,9 @@ await page.screenshot({ path: join(screenshotsDir, '03-real-buyer-roster-reviewe
 await cowork('Evidence saved; browser ready for review', 'evidence', `Artifacts are under ${runDir}.`);
 await typeCoworkNote('Final review: full setup was performed through the browser UI against real backend and database state.');
 
+const assertions = [{ workflow: workflow.name, company, targetZip, buyerId, passed: true }];
 writeFileSync(join(logsDir, 'cowork-log.md'), logLines.join('\n') + '\n');
-writeFileSync(join(logsDir, 'assertions.json'), JSON.stringify([{ workflow: workflow.name, company, targetZip, buyerId, passed: true }], null, 2));
+writeFileSync(join(logsDir, 'assertions.json'), JSON.stringify(assertions, null, 2));
 writeFileSync(
   join(reviewsDir, 'review.md'),
   [
@@ -270,10 +273,42 @@ writeFileSync(
     '',
   ].join('\n'),
 );
+writeFileSync(
+  evidencePath,
+  JSON.stringify(
+    {
+      schema_version: 1,
+      run_id: runId,
+      workflow: {
+        name: workflow.name,
+        slug: 'paid-pilot-admin-review-live',
+        objective: workflow.objective,
+        app_path: '/admin',
+      },
+      status: 'passed',
+      generated_at: new Date().toISOString(),
+      subject_ids: { buyer_id: buyerId },
+      lead_id: null,
+      artifacts: {
+        plan: join(runDir, 'plan.md'),
+        log: join(logsDir, 'cowork-log.md'),
+        assertions: join(logsDir, 'assertions.json'),
+        review: join(reviewsDir, 'review.md'),
+        screenshots_dir: screenshotsDir,
+        video_dir: videosDir,
+      },
+      observations: logLines,
+      assertions,
+    },
+    null,
+    2,
+  ) + '\n',
+);
 
-console.log('StormLead Cowork demo is open. Review the visible browser window.');
+console.log(keepOpen ? 'StormLead Cowork demo is open. Review the visible browser window.' : 'StormLead Cowork recording completed.');
 console.log(`Run folder: ${runDir}`);
-console.log(`Video is recording under ${videosDir} until the browser closes.`);
+console.log(`Evidence manifest: ${evidencePath}`);
+console.log(`Video output directory: ${videosDir}`);
 
 if (keepOpen) {
   await new Promise(() => {});

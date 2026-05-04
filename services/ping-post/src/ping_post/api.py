@@ -20,15 +20,36 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from hatchet_sdk import Context, Hatchet
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import Integer, and_, func, select, text
-from stormlead_core import BuyerSalesStage, BuyerStatus, Lead, configure_logging, get_logger
-from stormlead_db import BillingEvent, BuyerRow, LeadRow, PingAttempt, PostResult, get_session
+from stormlead_core import (
+    BuyerSalesStage,
+    BuyerStatus,
+    Lead,
+    PipelineState,
+    configure_logging,
+    get_logger,
+)
+from stormlead_db import (
+    BillingEvent,
+    BuyerRow,
+    LeadRow,
+    LeadStateTransition,
+    PingAttempt,
+    PostResult,
+    build_transition_idempotency_key,
+    get_session,
+    latest_state,
+    list_lead_timeline,
+    list_recent_lead_runs,
+    record_transition,
+    summarize_transition_payload,
+)
 
 from ping_post.auction import run_auction
 
@@ -43,6 +64,7 @@ VALID_RETURN_REASONS = {
     "spam",
     "job_already_completed",
 }
+VALID_REVIEW_ACTIONS = {"approve", "hold", "review"}
 
 
 class KpiThresholdConfig(BaseModel):
@@ -163,6 +185,21 @@ class ReturnLeadRequest(BaseModel):
             allowed = ", ".join(sorted(VALID_RETURN_REASONS))
             raise ValueError(f"reason must be one of: {allowed}")
         return value
+
+
+class LeadReviewRequest(BaseModel):
+    action: str = Field(min_length=1)
+    notes: str | None = Field(default=None, max_length=1000)
+    operator: str = Field(default="local-admin", min_length=1, max_length=128)
+
+    @field_validator("action")
+    @classmethod
+    def action_must_be_valid(cls, value: str) -> str:
+        action = value.strip().lower()
+        if action not in VALID_REVIEW_ACTIONS:
+            allowed = ", ".join(sorted(VALID_REVIEW_ACTIONS))
+            raise ValueError(f"action must be one of: {allowed}")
+        return action
 
 
 hatchet = Hatchet(debug=False)
@@ -300,9 +337,18 @@ async def admin() -> str:
     button:hover { filter: brightness(1.08); }
     .actions { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1rem; }
     .status { border-left: 4px solid #38bdf8; margin: 1rem 0; padding: .75rem 1rem; white-space: pre-wrap; }
+    .muted { color: #94a3b8; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .85rem; }
+    .timeline { display: grid; gap: .75rem; margin-top: 1rem; }
+    .timeline-event { background: #020617; border: 1px solid #334155; border-left: 4px solid #38bdf8; border-radius: 10px; padding: .85rem; }
+    .timeline-event.review { border-left-color: #facc15; }
+    .timeline-event.attention { border-left-color: #fb7185; }
+    .payload { background: #0f172a; border-radius: 8px; color: #cbd5e1; overflow: auto; padding: .75rem; }
     table { width: 100%; border-collapse: collapse; overflow: hidden; }
     th, td { padding: 0.75rem; border-bottom: 1px solid #334155; text-align: left; }
     th { color: #93c5fd; }
+    tr[data-lead-id] { cursor: pointer; }
+    tr[data-lead-id]:hover { background: #1e293b; }
   </style>
 </head>
 <body>
@@ -313,6 +359,36 @@ async def admin() -> str:
     <h2>Cowork Workflow Controls</h2>
     <p>Create a real buyer, activate/fund it, then verify dashboard KPIs and roster state.</p>
     <div class="status" id="workflow-status">Ready. No mock data is used.</div>
+  </section>
+
+  <h2>Agentic Workflow KPIs</h2>
+  <section class="grid" id="workflow-kpis"></section>
+
+  <section class="panel" aria-label="workflow timeline">
+    <h2>Lead Workflow Timeline</h2>
+    <p class="muted">Inspect append-only state transitions, agent decisions, review actions, and redacted payload summaries from real database audit rows.</p>
+    <form id="timeline-form" aria-label="load lead timeline form">
+      <div class="form-grid">
+        <label>Lead ID <input name="lead_id" id="timeline-lead-id" placeholder="Paste a lead UUID" /></label>
+        <label>Review Notes <input name="notes" id="review-notes" value="Reviewed in StormLead admin timeline." /></label>
+      </div>
+      <div class="actions">
+        <button type="submit">Load Timeline</button>
+        <button type="button" class="secondary" id="review-hold">Hold For Review</button>
+        <button type="button" class="secondary" id="review-approve">Approve / Clear Hold</button>
+      </div>
+    </form>
+    <div id="timeline-summary" class="status">Select a lead from Recent Workflow Runs or paste a lead UUID.</div>
+    <div class="timeline" id="timeline"></div>
+  </section>
+
+  <section class="panel" aria-label="recent workflow runs">
+    <h2>Recent Workflow Runs</h2>
+    <p class="muted">Rows are grouped from lead_state_transitions and can be opened in the timeline.</p>
+    <table aria-label="workflow runs">
+      <thead><tr><th>Updated</th><th>State</th><th>Status</th><th>Events</th><th>Latest Event</th><th>Lead ID</th></tr></thead>
+      <tbody id="workflow-runs"></tbody>
+    </table>
   </section>
 
   <form id="buyer-form" aria-label="create buyer form">
@@ -382,6 +458,8 @@ async def admin() -> str:
     const money = cents => `$${(cents / 100).toFixed(2)}`;
     const statusBox = document.querySelector('#workflow-status');
     const setStatus = msg => { statusBox.textContent = msg; };
+    const htmlEscapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+    const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, ch => htmlEscapeMap[ch]);
     const list = value => value.split(',').map(v => v.trim()).filter(Boolean);
     const formJson = form => Object.fromEntries(new FormData(form).entries());
     const api = async (path, options = {}) => {
@@ -392,13 +470,87 @@ async def admin() -> str:
       return data;
     };
 
+    const metricValue = metric => {
+      if (metric.value === null || metric.value === undefined) return 'n/a';
+      if (metric.unit === 'ratio') return `${(Number(metric.value) * 100).toFixed(1)}%`;
+      if (metric.unit === 'usd') return `$${Number(metric.value).toFixed(4)}`;
+      return `${metric.value}`;
+    };
+
+    const metricDetail = metric => {
+      if (metric.reason) return metric.reason;
+      if (metric.unit === 'ratio') return `${metric.numerator}/${metric.denominator}`;
+      return metric.unit || '';
+    };
+
+    function renderWorkflowKpis(data) {
+      const metrics = data.metrics || [];
+      document.querySelector('#workflow-kpis').innerHTML = metrics.length ? metrics.map(metric => `
+        <div class="card">
+          <div>${escapeHtml(metric.label)}</div>
+          <div class="metric">${escapeHtml(metricValue(metric))}</div>
+          <div class="muted">${escapeHtml(metricDetail(metric))}</div>
+        </div>`).join('') : '<div class="muted">No workflow KPIs are available yet.</div>';
+    }
+
+    function renderWorkflowRuns(runs) {
+      const tbody = document.querySelector('#workflow-runs');
+      if (!runs.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="muted">No audited lead workflow runs yet.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = runs.map(run => `
+        <tr data-lead-id="${escapeHtml(run.lead_id)}">
+          <td>${escapeHtml(new Date(run.updated_at).toLocaleString())}</td>
+          <td>${escapeHtml(run.current_state)}</td>
+          <td>${escapeHtml(run.status)}</td>
+          <td>${escapeHtml(run.event_count)}</td>
+          <td>${escapeHtml(run.latest_event_type)}</td>
+          <td class="mono">${escapeHtml(run.lead_id)}</td>
+        </tr>`).join('');
+      tbody.querySelectorAll('tr[data-lead-id]').forEach(row => {
+        row.addEventListener('click', async () => {
+          const leadId = row.getAttribute('data-lead-id');
+          document.querySelector('#timeline-lead-id').value = leadId;
+          await loadTimeline(leadId);
+        });
+      });
+    }
+
+    function renderTimeline(data) {
+      const lead = data.lead || {};
+      document.querySelector('#timeline-summary').textContent = `Lead ${data.lead_id}\nCurrent state: ${data.current_state}\nStatus: ${lead.status || 'unknown'} | Service: ${lead.requested_service || 'unknown'} | Class: ${lead.lead_class || 'unknown'} | Hold: ${lead.hold_for_review ? 'yes' : 'no'}`;
+      const events = data.events || [];
+      document.querySelector('#timeline').innerHTML = events.length ? events.map(event => {
+        const isReview = event.event_type.startsWith('admin.review');
+        const attention = !['succeeded', 'reviewed'].includes(event.status);
+        const classes = ['timeline-event', isReview ? 'review' : '', attention ? 'attention' : ''].filter(Boolean).join(' ');
+        const payload = JSON.stringify(event.payload_summary || {}, null, 2);
+        return `
+          <article class="${classes}">
+            <strong>${escapeHtml(event.sequence)}. ${escapeHtml(event.event_type)}</strong>
+            <div class="muted">${escapeHtml(event.from_state)} -> ${escapeHtml(event.to_state)} | ${escapeHtml(event.status)} | ${escapeHtml(event.created_at)}</div>
+            <div class="muted mono">${escapeHtml(event.task_name || 'manual')} ${event.workflow_run_id ? `| run ${escapeHtml(event.workflow_run_id)}` : ''}</div>
+            <pre class="payload">${escapeHtml(payload)}</pre>
+          </article>`;
+      }).join('') : '<div class="status">This lead has no audited transition rows yet.</div>';
+    }
+
+    async function loadTimeline(leadId) {
+      if (!leadId) return;
+      setStatus(`Loading real audit timeline for lead ${leadId}...`);
+      const data = await api(`/v1/admin/leads/${encodeURIComponent(leadId)}/timeline`);
+      renderTimeline(data);
+      setStatus(`Timeline loaded from lead_state_transitions. Events: ${(data.events || []).length}`);
+    }
+
     async function load() {
-      const [summaryRes, buyersRes] = await Promise.all([
-        fetch('/v1/admin/kpis'),
-        fetch('/v1/buyers'),
+      const [summary, buyers, workflowKpis, workflowRuns] = await Promise.all([
+        api('/v1/admin/kpis'),
+        api('/v1/buyers'),
+        api('/v1/admin/workflow-kpis'),
+        api('/v1/admin/workflow-runs/recent'),
       ]);
-      const summary = await summaryRes.json();
-      const buyers = await buyersRes.json();
       document.querySelector('#kpis').innerHTML = [
         ['Prepaid cash', money(summary.prepaid_cash_cents)],
         ['Active buyers', summary.active_buyers],
@@ -412,6 +564,8 @@ async def admin() -> str:
           <td>${money(b.deposit_balance_cents)}</td><td>${b.services.join(', ')}</td>
           <td>${b.target_zips.join(', ')}</td><td>${money(b.low_balance_threshold_cents)}</td><td>${b.buyer_id}</td>
         </tr>`).join('');
+      renderWorkflowKpis(workflowKpis);
+      renderWorkflowRuns(workflowRuns.runs || []);
       setStatus(`Dashboard loaded from real APIs. Buyers: ${buyers.buyers.length}`);
     }
 
@@ -465,6 +619,32 @@ async def admin() -> str:
       await load();
       setStatus(`Deposit recorded. New wallet: ${money(wallet.deposit_balance_cents)}.`);
     });
+
+    document.querySelector('#timeline-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const raw = formJson(event.currentTarget);
+      await loadTimeline(raw.lead_id.trim());
+    });
+
+    async function reviewLead(action) {
+      const leadId = document.querySelector('#timeline-lead-id').value.trim();
+      if (!leadId) {
+        setStatus('Paste or select a lead ID before recording a review action.');
+        return;
+      }
+      const notes = document.querySelector('#review-notes').value;
+      setStatus(`Recording ${action} review action for ${leadId}...`);
+      await api(`/v1/admin/leads/${encodeURIComponent(leadId)}/review`, {
+        method: 'POST',
+        body: JSON.stringify({ action, notes, operator: 'local-admin' }),
+      });
+      await loadTimeline(leadId);
+      await load();
+      setStatus(`Review action recorded for ${leadId}. Timeline refreshed from audit rows.`);
+    }
+
+    document.querySelector('#review-hold').addEventListener('click', () => reviewLead('hold'));
+    document.querySelector('#review-approve').addEventListener('click', () => reviewLead('approve'));
 
     load().catch(err => {
       document.body.insertAdjacentHTML('beforeend', `<pre role="alert">${err}</pre>`);
@@ -616,6 +796,225 @@ async def admin_kpis() -> dict[str, Any]:
         log.error("admin.kpis_failed", error=str(e))
         raise HTTPException(
             500, "admin kpis could not be loaded; retry after checking database health"
+        ) from e
+
+
+@app.get("/v1/admin/workflow-kpis")
+async def admin_workflow_kpis() -> dict[str, Any]:
+    try:
+        async with get_session() as s:
+            transition_rows = (
+                await s.execute(
+                    select(LeadStateTransition.event_type, func.count(LeadStateTransition.id))
+                    .select_from(LeadStateTransition)
+                    .group_by(LeadStateTransition.event_type)
+                )
+            ).all()
+            status_rows = (
+                await s.execute(
+                    select(LeadStateTransition.status, func.count(LeadStateTransition.id))
+                    .select_from(LeadStateTransition)
+                    .group_by(LeadStateTransition.status)
+                )
+            ).all()
+            total_pings = await s.scalar(select(func.count(PingAttempt.id)))
+            accepted_pings = await s.scalar(
+                select(func.count(PingAttempt.id)).where(PingAttempt.accepted.is_(True))
+            )
+            delivered_posts = await s.scalar(
+                select(func.count(PostResult.id)).where(PostResult.delivered.is_(True))
+            )
+            returned_posts = await s.scalar(
+                select(func.count(PostResult.id)).where(PostResult.returned.is_(True))
+            )
+            agent_payloads = (
+                (
+                    await s.execute(
+                        select(LeadStateTransition.payload_json).where(
+                            LeadStateTransition.task_name == "agent_runtime.qualify_lead"
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+        transition_counts = {str(event): int(count) for event, count in transition_rows}
+        status_counts = {str(status): int(count) for status, count in status_rows}
+        captured = transition_counts.get("lead.captured", 0)
+        enriched = transition_counts.get("lead.enriched", 0)
+        qualified = transition_counts.get("lead.qualified", 0)
+        rejected = transition_counts.get("lead.rejected", 0)
+        auctioned = transition_counts.get("lead.auctioned", 0)
+        sold = transition_counts.get("lead.sold", 0)
+        unsold = transition_counts.get("lead.unsold", 0)
+        nurtured = transition_counts.get("lead.nurtured", 0)
+        agent_cost_usd = _sum_agent_cost(agent_payloads)
+        cost_denominator = qualified + rejected
+
+        return {
+            "metrics": [
+                _count_metric("lead_throughput", "Lead throughput", captured, "leads"),
+                _ratio_metric(
+                    "enrichment_success_rate",
+                    "Enrichment success",
+                    enriched,
+                    captured,
+                    "No captured leads have been audited yet",
+                ),
+                _ratio_metric(
+                    "qualification_acceptance_rate",
+                    "Qualification acceptance",
+                    qualified,
+                    qualified + rejected,
+                    "No qualification decisions have been audited yet",
+                ),
+                _ratio_metric(
+                    "auction_win_rate",
+                    "Auction win rate",
+                    sold,
+                    auctioned,
+                    "No auctioned leads have been audited yet",
+                ),
+                _ratio_metric(
+                    "buyer_acceptance_rate",
+                    "Buyer acceptance",
+                    int(accepted_pings or 0),
+                    int(total_pings or 0),
+                    "No buyer pings have been recorded yet",
+                ),
+                _count_metric("sold_leads", "Sold leads", sold, "leads"),
+                _count_metric("unsold_leads", "Unsold leads", unsold, "leads"),
+                _ratio_metric(
+                    "nurture_recovery_rate",
+                    "Nurture recovery",
+                    nurtured,
+                    unsold + rejected,
+                    "No unsold or rejected leads are available for nurture yet",
+                ),
+                _money_metric(
+                    "estimated_cost_per_qualified_lead",
+                    "Est. cost / qualified decision",
+                    agent_cost_usd / cost_denominator if cost_denominator else None,
+                    "No qualification-cost payloads have been audited yet"
+                    if not cost_denominator
+                    else None,
+                ),
+                _ratio_metric(
+                    "return_rate",
+                    "Return rate",
+                    int(returned_posts or 0),
+                    int(delivered_posts or 0),
+                    "No delivered posts have been recorded yet",
+                ),
+            ],
+            "transition_counts": transition_counts,
+            "status_counts": status_counts,
+        }
+    except Exception as e:
+        log.error("admin.workflow_kpis_failed", error=str(e))
+        raise HTTPException(
+            500, "workflow kpis could not be loaded; retry after checking database health"
+        ) from e
+
+
+@app.get("/v1/admin/workflow-runs/recent")
+async def recent_workflow_runs(limit: int = Query(default=20, ge=1, le=100)) -> dict[str, Any]:
+    try:
+        async with get_session() as s:
+            runs = await list_recent_lead_runs(s, limit=limit)
+        return {"runs": [run.as_dict() for run in runs]}
+    except Exception as e:
+        log.error("admin.workflow_runs_failed", error=str(e))
+        raise HTTPException(
+            500, "workflow runs could not be loaded; retry after checking database health"
+        ) from e
+
+
+@app.get("/v1/admin/leads/{lead_id}/timeline")
+async def lead_timeline(
+    lead_id: UUID, limit: int = Query(default=100, ge=1, le=250)
+) -> dict[str, Any]:
+    try:
+        async with get_session() as s:
+            lead = await s.get(LeadRow, lead_id)
+            if lead is None:
+                raise HTTPException(404, "lead not found; verify the lead id and try again")
+            events = await list_lead_timeline(s, lead_id, limit=limit)
+            current_state = events[-1].to_state if events else lead.status
+            return {
+                "lead_id": str(lead_id),
+                "current_state": current_state,
+                "lead": _lead_admin_summary(lead),
+                "events": [event.as_dict() for event in events],
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("admin.lead_timeline_failed", lead_id=str(lead_id), error=str(e))
+        raise HTTPException(
+            500, "lead timeline could not be loaded; retry after checking database health"
+        ) from e
+
+
+@app.post("/v1/admin/leads/{lead_id}/review")
+async def review_lead(lead_id: UUID, payload: LeadReviewRequest) -> dict[str, Any]:
+    try:
+        async with get_session() as s:
+            lead = await s.get(LeadRow, lead_id)
+            if lead is None:
+                raise HTTPException(404, "lead not found; verify the lead id and try again")
+            if payload.action in {"hold", "review"}:
+                lead.hold_for_review = True
+            if payload.action == "approve":
+                lead.hold_for_review = False
+
+            current_state = await latest_state(s, lead_id)
+            if current_state is None:
+                current_state = _pipeline_state_or_captured(lead.status)
+            event_type = f"admin.review.{payload.action}"
+            result = await record_transition(
+                s,
+                lead_id=lead_id,
+                from_state=None,
+                to_state=current_state,
+                event_type=event_type,
+                task_name="admin.review_action",
+                status="reviewed",
+                idempotency_key=build_transition_idempotency_key(
+                    lead_id=lead_id,
+                    from_state=None,
+                    to_state=current_state,
+                    event_type=event_type,
+                    task_name="admin.review_action",
+                    version=f"review:{uuid4()}",
+                ),
+                payload={
+                    "action": payload.action,
+                    "operator": payload.operator,
+                    "notes": payload.notes,
+                    "hold_for_review": lead.hold_for_review,
+                },
+            )
+            await s.flush()
+            transition = result.transition
+            return {
+                "lead_id": str(lead_id),
+                "action": payload.action,
+                "hold_for_review": lead.hold_for_review,
+                "timeline_event": {
+                    "id": str(transition.id),
+                    "event_type": transition.event_type,
+                    "status": transition.status,
+                    "payload_summary": summarize_transition_payload(transition.payload_json),
+                },
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("admin.lead_review_failed", lead_id=str(lead_id), error=str(e))
+        raise HTTPException(
+            500, "lead review action could not be recorded; retry after checking database health"
         ) from e
 
 
@@ -775,6 +1174,52 @@ def _window_clause(start_at: datetime | None, end_at: datetime | None):
 
 def _normalize_ratio(numerator: int, denominator: int) -> float:
     return round((numerator / denominator), 4) if denominator else 0.0
+
+
+def _count_metric(key: str, label: str, value: int, unit: str) -> dict[str, Any]:
+    return {
+        "key": key,
+        "label": label,
+        "value": value,
+        "unit": unit,
+        "reason": None,
+    }
+
+
+def _ratio_metric(
+    key: str, label: str, numerator: int, denominator: int, no_data_reason: str
+) -> dict[str, Any]:
+    return {
+        "key": key,
+        "label": label,
+        "value": _normalize_ratio(numerator, denominator) if denominator else None,
+        "unit": "ratio",
+        "numerator": numerator,
+        "denominator": denominator,
+        "reason": None if denominator else no_data_reason,
+    }
+
+
+def _money_metric(
+    key: str, label: str, value: float | None, no_data_reason: str | None
+) -> dict[str, Any]:
+    return {
+        "key": key,
+        "label": label,
+        "value": round(value, 6) if value is not None else None,
+        "unit": "usd",
+        "reason": no_data_reason,
+    }
+
+
+def _sum_agent_cost(payloads: list[dict[str, Any]]) -> float:
+    total = 0.0
+    for payload in payloads:
+        try:
+            total += float(payload.get("estimated_cost_usd") or 0)
+        except (TypeError, ValueError):
+            continue
+    return total
 
 
 @app.get("/v1/admin/launch-readiness")
@@ -1062,6 +1507,29 @@ def _normalize_string_list(values: list[str]) -> list[str]:
             normalized.append(item)
             seen.add(item)
     return normalized
+
+
+def _pipeline_state_or_captured(status: str) -> PipelineState:
+    try:
+        return PipelineState(status)
+    except ValueError:
+        return PipelineState.CAPTURED
+
+
+def _lead_admin_summary(lead: LeadRow) -> dict[str, Any]:
+    return {
+        "status": lead.status,
+        "state": lead.state,
+        "zip": lead.zip,
+        "requested_service": lead.requested_service,
+        "damage_tier": lead.damage_tier,
+        "lead_class": lead.lead_class,
+        "qualification_score": lead.qualification_score,
+        "hold_for_review": lead.hold_for_review,
+        "blocked_for_fraud": lead.blocked_for_fraud,
+        "created_at": lead.created_at.isoformat() if lead.created_at else None,
+        "updated_at": lead.updated_at.isoformat() if lead.updated_at else None,
+    }
 
 
 async def _assert_no_exclusive_zip_conflict(

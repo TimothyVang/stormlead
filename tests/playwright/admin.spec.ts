@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { existsSync, readFileSync } from 'node:fs';
 
 import { CoworkRun } from './helpers/cowork';
 import { paidPilotAdminReviewWorkflow } from './workflows/paid-pilot-admin-review.workflow';
@@ -20,6 +21,9 @@ test('cowork creates, funds, and reviews real paid-pilot admin dashboard data', 
 
   await expect(page.getByRole('heading', { name: 'StormLead Admin' })).toBeVisible();
   await expect(page.getByText('Paid-pilot control surface')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Agentic Workflow KPIs' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Lead Workflow Timeline' })).toBeVisible();
+  await expect(page.getByRole('table', { name: 'workflow runs' })).toBeVisible();
 
   await cowork.update('Loaded real admin dashboard', 'load', 'The real admin shell and API-backed widgets are visible.');
   await cowork.moveTo('h1', 'Confirm the real admin surface loaded.');
@@ -35,6 +39,7 @@ test('cowork creates, funds, and reviews real paid-pilot admin dashboard data', 
   await page.getByRole('button', { name: 'Create Real Buyer' }).click();
   await expect(page.locator('#selected-buyer-id')).not.toHaveValue('');
   const buyerId = await page.locator('#selected-buyer-id').inputValue();
+  cowork.setSubjectId('buyer_id', buyerId);
   await cowork.update('Created real buyer through UI', 'create', `Created ${company} (${buyerId}) by submitting the real admin form.`);
   cowork.observe(`Created real buyer ${buyerId} (${company}) through the admin UI.`);
   await cowork.screenshot('real-buyer-created', 'Real buyer was created by submitting the browser form.');
@@ -82,4 +87,8 @@ test('cowork creates, funds, and reviews real paid-pilot admin dashboard data', 
   await cowork.screenshot('real-buyer-roster-reviewed', 'Real buyer row reviewed with cursor/highlight evidence.');
 
   await cowork.finish();
+  expect(existsSync(cowork.evidencePath)).toBeTruthy();
+  const evidence = JSON.parse(readFileSync(cowork.evidencePath, 'utf8'));
+  expect(evidence.run_id).toBe(cowork.runId);
+  expect(evidence.subject_ids.buyer_id).toBe(buyerId);
 });

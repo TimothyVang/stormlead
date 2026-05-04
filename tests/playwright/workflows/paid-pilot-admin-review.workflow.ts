@@ -10,6 +10,7 @@ export const paidPilotAdminReviewWorkflow = {
   ],
   outputs: [
     'testing/runs/<timestamp>-paid-pilot-admin-review/plan.md',
+    'testing/runs/<timestamp>-paid-pilot-admin-review/evidence.json',
     'testing/runs/<timestamp>-paid-pilot-admin-review/logs/cowork-log.md',
     'testing/runs/<timestamp>-paid-pilot-admin-review/logs/assertions.json',
     'testing/runs/<timestamp>-paid-pilot-admin-review/reviews/review.md',

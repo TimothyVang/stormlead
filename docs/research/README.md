@@ -16,6 +16,8 @@ claude research artifacts that informed the scaffold's choices. the two `2026-05
 
 - **`2026-05-04-visual-agentic-workflow-execution-prompt.md`** — execution prompt for the next visual workflow milestone: admin lead timeline, Playwright artifact linking, agent decision trace visibility, KPI/SLO dashboard, and future n8n/Temporal decision path.
 
+- **`visual-agentic-workflow-runbook.md`** — operator runbook for the admin workflow timeline, review actions, workflow KPI semantics, Cowork evidence manifests, and the Hatchet-vs-n8n/Temporal decision path.
+
 ## superseded claims (read `stack-improvements.md` and `architectural-fit.md` for current truth)
 
 - **litellm pin v1.83.4-stable** → **v1.83.7-stable** (cve-2026-42208).

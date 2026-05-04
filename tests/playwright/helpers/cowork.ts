@@ -17,15 +17,18 @@ export type CoworkWorkflow = {
 };
 
 export class CoworkRun {
+  readonly runId: string;
   readonly runDir: string;
   readonly screenshotsDir: string;
   readonly logsDir: string;
   readonly reviewsDir: string;
+  readonly evidencePath: string;
 
   private step = 0;
   private readonly logLines: string[] = [];
   private readonly assertions: Record<string, unknown>[] = [];
   private readonly observations: string[] = [];
+  private readonly subjectIds: Record<string, string> = {};
 
   constructor(
     private readonly page: Page,
@@ -33,14 +36,17 @@ export class CoworkRun {
     readonly workflow: CoworkWorkflow,
   ) {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    this.runDir = join('testing', 'runs', `${stamp}-${workflow.slug}`);
+    this.runId = `${stamp}-${workflow.slug}`;
+    this.runDir = join('testing', 'runs', this.runId);
     this.screenshotsDir = join(this.runDir, 'screenshots');
     this.logsDir = join(this.runDir, 'logs');
     this.reviewsDir = join(this.runDir, 'reviews');
+    this.evidencePath = join(this.runDir, 'evidence.json');
     mkdirSync(this.screenshotsDir, { recursive: true });
     mkdirSync(this.logsDir, { recursive: true });
     mkdirSync(this.reviewsDir, { recursive: true });
     this.note(`Playwright test: ${testInfo.title}`);
+    this.note(`Run ID: ${this.runId}`);
     this.note(`Run folder: ${this.runDir}`);
     this.writePlan();
   }
@@ -54,6 +60,11 @@ export class CoworkRun {
   observe(message: string): void {
     this.observations.push(message);
     this.note(`Observation: ${message}`);
+  }
+
+  setSubjectId(kind: string, id: string): void {
+    this.subjectIds[kind] = id;
+    this.note(`Subject ${kind}: ${id}`);
   }
 
   async installPanel(): Promise<void> {
@@ -265,7 +276,37 @@ export class CoworkRun {
       '',
     ].join('\n');
     writeFileSync(join(this.reviewsDir, 'review.md'), review);
+    this.writeEvidenceManifest();
     this.note(`Review written: ${join(this.reviewsDir, 'review.md')}`);
+    this.note(`Evidence manifest written: ${this.evidencePath}`);
+  }
+
+  private writeEvidenceManifest(): void {
+    const artifacts = {
+      plan: join(this.runDir, 'plan.md'),
+      log: join(this.logsDir, 'cowork-log.md'),
+      assertions: join(this.logsDir, 'assertions.json'),
+      review: join(this.reviewsDir, 'review.md'),
+      screenshots_dir: this.screenshotsDir,
+    };
+    const manifest = {
+      schema_version: 1,
+      run_id: this.runId,
+      workflow: {
+        name: this.workflow.name,
+        slug: this.workflow.slug,
+        objective: this.workflow.objective,
+        app_path: this.workflow.appPath,
+      },
+      status: 'passed',
+      generated_at: new Date().toISOString(),
+      subject_ids: this.subjectIds,
+      lead_id: this.subjectIds.lead_id ?? null,
+      artifacts,
+      observations: this.observations,
+      assertions: this.assertions,
+    };
+    writeFileSync(this.evidencePath, JSON.stringify(manifest, null, 2) + '\n');
   }
 
   private writePlan(): void {
