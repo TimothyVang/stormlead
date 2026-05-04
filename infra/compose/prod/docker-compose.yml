@@ -1,0 +1,265 @@
+name: stormlead-prod
+
+services:
+  postgres:
+    image: timescale/timescaledb-ha:pg16-ts2.17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?set in secrets manager}
+      POSTGRES_USER: ${POSTGRES_USER:?set in secrets manager}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in secrets manager}
+      TZ: UTC
+      PGTZ: UTC
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=timescaledb,pg_stat_statements
+      - -c
+      - max_connections=300
+      - -c
+      - shared_buffers=1024MB
+      - -c
+      - timezone=UTC
+    volumes:
+      - postgres_data:/home/postgres/pgdata/data
+      - ./../../sql/01-extensions.sql:/docker-entrypoint-initdb.d/01-extensions.sql:ro
+      - ./../../sql/02-roles.sql:/docker-entrypoint-initdb.d/02-roles.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7.2.5-alpine
+    restart: unless-stopped
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
+
+  rabbitmq:
+    image: rabbitmq:3.13.7-management
+    hostname: rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:?set in secrets manager}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:?set in secrets manager}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmqctl", "status"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  hatchet-migration:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-migrate:v0.85.3
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/hatchet?sslmode=disable"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  hatchet-setup-config:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-admin:v0.85.3
+    command: /hatchet/hatchet-admin quickstart --skip certs --generated-config-dir /hatchet/config --overwrite=false
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/hatchet?sslmode=disable"
+      SERVER_MSGQUEUE_RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/
+      SERVER_GRPC_BIND_ADDRESS: "0.0.0.0"
+      SERVER_DEFAULT_ENGINE_VERSION: "V1"
+      SERVER_INTERNAL_CLIENT_INTERNAL_GRPC_BROADCAST_ADDRESS: hatchet-engine:7070
+    volumes:
+      - hatchet_certs:/hatchet/certs
+      - hatchet_config:/hatchet/config
+    depends_on:
+      hatchet-migration:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+
+  hatchet-engine:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-engine:v0.85.3
+    command: /hatchet/hatchet-engine --config /hatchet/config
+    restart: on-failure
+    depends_on:
+      hatchet-setup-config:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/hatchet?sslmode=disable"
+    volumes:
+      - hatchet_certs:/hatchet/certs
+      - hatchet_config:/hatchet/config
+
+  hatchet-dashboard:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-dashboard:v0.85.3
+    command: sh ./entrypoint.sh --config /hatchet/config
+    restart: on-failure
+    depends_on:
+      hatchet-setup-config:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/hatchet?sslmode=disable"
+    volumes:
+      - hatchet_certs:/hatchet/certs
+      - hatchet_config:/hatchet/config
+
+  litellm:
+    image: ghcr.io/berriai/litellm-database:main-v1.83.7-stable
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set in secrets manager}
+      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/litellm?sslmode=disable"
+      STORE_MODEL_IN_DB: "True"
+    volumes:
+      - ./../../litellm/config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "2"]
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3.18-alpine
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: langfuse
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set in secrets manager}
+      TZ: UTC
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3.63.1
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_started
+      redis:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/langfuse
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: ${LANGFUSE_S3_EVENT_UPLOAD_BUCKET}
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: ${LANGFUSE_S3_EVENT_UPLOAD_REGION}
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${OBJSTORE_ACCESS_KEY}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${OBJSTORE_SECRET_KEY}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: ${S3_ENDPOINT}
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      SALT: ${LANGFUSE_SALT}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY}
+
+  langfuse-web:
+    image: langfuse/langfuse:3.63.1
+    restart: unless-stopped
+    depends_on:
+      langfuse-worker:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/langfuse
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: ${LANGFUSE_S3_EVENT_UPLOAD_BUCKET}
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: ${LANGFUSE_S3_EVENT_UPLOAD_REGION}
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${OBJSTORE_ACCESS_KEY}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${OBJSTORE_SECRET_KEY}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: ${S3_ENDPOINT}
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+      NEXTAUTH_URL: ${NEXTAUTH_URL}
+      SALT: ${LANGFUSE_SALT}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY}
+      TELEMETRY_ENABLED: "false"
+
+  postgres-mcp:
+    image: crystaldba/postgres-mcp:0.1.14
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL_RO}
+    command: ["--access-mode=restricted"]
+
+  ping-post:
+    image: ghcr.io/stormlead/ping-post:2026.05.0
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      hatchet-engine:
+        condition: service_started
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN}
+      HATCHET_CLIENT_HOST_PORT: ${HATCHET_CLIENT_HOST_PORT}
+      HATCHET_CLIENT_TLS_STRATEGY: none
+
+  storm-watcher:
+    image: ghcr.io/stormlead/storm-watcher:2026.05.0
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      hatchet-engine:
+        condition: service_started
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN}
+      HATCHET_CLIENT_HOST_PORT: ${HATCHET_CLIENT_HOST_PORT}
+      HATCHET_CLIENT_TLS_STRATEGY: none
+      NWS_USER_AGENT: ${NWS_USER_AGENT}
+      FEMA_API_BASE: ${FEMA_API_BASE}
+
+  form-receiver:
+    image: ghcr.io/stormlead/form-receiver:2026.05.0
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      hatchet-engine:
+        condition: service_started
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN}
+      HATCHET_CLIENT_HOST_PORT: ${HATCHET_CLIENT_HOST_PORT}
+      HATCHET_CLIENT_TLS_STRATEGY: none
+      FORMBRICKS_WEBHOOK_SECRET: ${FORMBRICKS_WEBHOOK_SECRET}
+
+  agent-runtime:
+    image: ghcr.io/stormlead/agent-runtime:2026.05.0
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      hatchet-engine:
+        condition: service_started
+      litellm:
+        condition: service_started
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN}
+      HATCHET_CLIENT_HOST_PORT: ${HATCHET_CLIENT_HOST_PORT}
+      HATCHET_CLIENT_TLS_STRATEGY: none
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      LITELLM_PROXY_URL: ${LITELLM_PROXY_URL}
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
+      LANGFUSE_HOST: ${LANGFUSE_HOST}
+
+volumes:
+  postgres_data:
+  clickhouse_data:
+  rabbitmq_data:
+  hatchet_config:
+  hatchet_certs:
