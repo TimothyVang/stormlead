@@ -12,6 +12,7 @@ import pytest
 from form_receiver.schemas import (
     ConsentExtractionError,
     FormbricksEnvelope,
+    SuppressionRequest,
     extract_consent,
 )
 from stormlead_core.dedup import (
@@ -20,7 +21,13 @@ from stormlead_core.dedup import (
 )
 
 
-def _envelope(answers: dict, *, ttc: dict | None = None) -> FormbricksEnvelope:
+def _envelope(
+    answers: dict,
+    *,
+    ttc: dict | None = None,
+    contact_attributes: dict | None = None,
+    variables: dict | None = None,
+) -> FormbricksEnvelope:
     return FormbricksEnvelope.model_validate(
         {
             "event": "responseFinished",
@@ -30,11 +37,13 @@ def _envelope(answers: dict, *, ttc: dict | None = None) -> FormbricksEnvelope:
                 "surveyId": "survey_test",
                 "data": answers,
                 "ttc": ttc or {},
+                "contactAttributes": contact_attributes or {},
                 "meta": {
                     "url": "http://localhost:3000/test",
                     "userAgent": "Mozilla/5.0 (test)",
                 },
                 "finished": True,
+                "variables": variables or {},
             },
         }
     )
@@ -156,6 +165,43 @@ def test_extract_invalid_email_dropped_silently() -> None:
     )
     out = extract_consent(e)
     assert out.email is None  # phone is the primary identifier
+
+
+def test_extract_campaign_attribution_from_hidden_fields() -> None:
+    e = _envelope(
+        {
+            "name": "T",
+            "phone": "+15125550123",
+            "address_line1": "1",
+            "city": "A",
+            "state": "TX",
+            "zip": "78701",
+            "consent_text": "x",
+            "requested_service": "tree_removal",
+            "utm_source": "google_lsa",
+        },
+        contact_attributes={"campaign_id": "spring-storm-austin"},
+        variables={"last_touch_source": "retargeting"},
+    )
+    out = extract_consent(e)
+    assert out.requested_service == "tree_removal"
+    assert out.campaign_id == "spring-storm-austin"
+    assert out.campaign_source == "google_lsa"
+    assert out.first_touch_source == "google_lsa"
+    assert out.last_touch_source == "retargeting"
+
+
+def test_suppression_request_requires_contact() -> None:
+    with pytest.raises(ValueError):
+        SuppressionRequest.model_validate({})
+
+
+def test_suppression_request_normalizes_contact() -> None:
+    request = SuppressionRequest.model_validate(
+        {"phone": "(512) 555-0123", "email": "USER@Example.COM"}
+    )
+    assert request.phone == "+15125550123"
+    assert request.email == "USER@example.com"
 
 
 def test_duplicate_window_normalizes_phone_and_address() -> None:

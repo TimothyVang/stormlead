@@ -48,7 +48,7 @@ services:
       # host:container — host port remapped to avoid collisions with other
       # local docker projects on 5432. inside the docker network services
       # still reach `postgres:5432`.
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-stormlead} -d ${POSTGRES_DB:-stormlead}"]
       interval: 5s
@@ -62,7 +62,7 @@ services:
     ports:
       # host port remapped from 6379 to avoid collisions with other local
       # docker projects. internal services still reach `redis:6379`.
-      - "6380:6379"
+      - "127.0.0.1:6380:6379"
 
   # NOTE: nats removed (deferred). hatchet provides durable workflows on
   # postgres; cross-service events use hatchet triggers or postgres
@@ -143,7 +143,7 @@ services:
       hatchet-migration:
         condition: service_completed_successfully
     ports:
-      - "7077:7070"  # host:container — internal grpc on 7070
+      - "127.0.0.1:7077:7070"  # host:container — internal grpc on 7070
     environment:
       DATABASE_URL: "postgres://${POSTGRES_USER:-stormlead}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/hatchet?sslmode=disable"
       SERVER_GRPC_BIND_ADDRESS: "0.0.0.0"
@@ -157,7 +157,7 @@ services:
     image: ghcr.io/hatchet-dev/hatchet/hatchet-dashboard:v0.85.3
     command: sh ./entrypoint.sh --config /hatchet/config
     ports:
-      - "8080:80"
+      - "127.0.0.1:8080:80"
     restart: on-failure
     depends_on:
       hatchet-setup-config:
@@ -192,7 +192,7 @@ services:
       - ./../../litellm/config.yaml:/app/config.yaml:ro
     command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "2"]
     ports:
-      - "4000:4000"
+      - "127.0.0.1:4000:4000"
 
   # =========================================================================
   # langfuse v3: postgres + clickhouse + redis + s3
@@ -279,7 +279,7 @@ services:
       LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:-Stormlead Admin}
       LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD}
     ports:
-      - "3001:3000"
+      - "127.0.0.1:3001:3000"
 
   # NOTE: openbao deferred. secret rotation is a 2-operator problem;
   # use sops-encrypted .env.prod (age key) until then. see
@@ -291,6 +291,7 @@ services:
 
   postgres-mcp:
     # NOT the archived anthropic reference server.
+    # Set POSTGRES_MCP_IMAGE to a pinned non-latest tag before paid launch.
     # crystaldba/postgres-mcp-pro: read+write, parameterized, maintained.
     image: crystaldba/postgres-mcp:latest
     restart: unless-stopped
@@ -303,14 +304,13 @@ services:
       DATABASE_URI: ${DATABASE_URL_RO}
     command: ["--access-mode=restricted"]
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
 
   # =========================================================================
   # services (python)
   # =========================================================================
-  # NOTE: edge (caddy+coraza), apps (landing, buyer-portal), and stub services
-  # (form-receiver, voice-bridge, agent-runtime, enrich-worker) are not in
-  # this compose yet — their source isn't written. add them back as they ship.
+  # NOTE: landing, buyer-portal, and voice-bridge are intentionally absent until
+  # their source exists. Caddy fails closed for those routes.
 
   ping-post:
     build:
@@ -331,7 +331,7 @@ services:
     ports:
       # host port remapped from 8001 to avoid collisions with other local
       # docker projects. smoke_e2e.py + manual curl tests use 8003.
-      - "8003:8000"
+      - "127.0.0.1:8003:8000"
     # so the auction's POST-to-buyer can reach a host-bound listener
     # (smoke_e2e.py runs in-process aiohttp on the host's :9999); seed
     # buyers point at host.docker.internal. linux/wsl2 needs the
@@ -373,9 +373,10 @@ services:
       HATCHET_CLIENT_HOST_PORT: ${HATCHET_CLIENT_HOST_PORT}
       HATCHET_CLIENT_TLS_STRATEGY: none
       FORMBRICKS_WEBHOOK_SECRET: ${FORMBRICKS_WEBHOOK_SECRET}
+      FORM_RECEIVER_MAX_WEBHOOK_BODY_BYTES: ${FORM_RECEIVER_MAX_WEBHOOK_BODY_BYTES:-262144}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:
-      - "8002:8000"
+      - "127.0.0.1:8002:8000"
 
   enrich-worker:
     build:
@@ -393,6 +394,7 @@ services:
       HATCHET_CLIENT_HOST_PORT: ${HATCHET_CLIENT_HOST_PORT}
       HATCHET_CLIENT_TLS_STRATEGY: none
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      STORMLEAD_COMMERCIAL_LAUNCH_APPROVED: ${STORMLEAD_COMMERCIAL_LAUNCH_APPROVED:-false}
 
   agent-runtime:
     build:

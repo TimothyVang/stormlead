@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
 
+from ping_post.api import _recommended_refill_cents
 from ping_post.auction import (
     PingResponse,
     _avm_band,
@@ -310,3 +311,29 @@ def test_low_score_or_cd_class_goes_to_manual_review() -> None:
     ok2, reason2 = _lead_can_enter_auction(lead2)
     assert not ok2
     assert reason2 == "class_requires_review"
+
+
+def test_recommended_refill_is_zero_above_threshold() -> None:
+    assert (
+        _recommended_refill_cents(
+            balance_cents=20_000,
+            threshold_cents=15_000,
+            monthly_budget_cents=100_000,
+            delivered_today=2,
+            gross_spend_today_cents=20_000,
+        )
+        == 0
+    )
+
+
+def test_recommended_refill_uses_largest_buffer_below_threshold() -> None:
+    assert (
+        _recommended_refill_cents(
+            balance_cents=5_000,
+            threshold_cents=15_000,
+            monthly_budget_cents=100_000,
+            delivered_today=2,
+            gross_spend_today_cents=20_000,
+        )
+        == 30_000
+    )

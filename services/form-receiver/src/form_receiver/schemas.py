@@ -18,7 +18,7 @@ from typing import Any
 
 import phonenumbers
 from email_validator import EmailNotValidError, validate_email
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class FormbricksMeta(BaseModel):
@@ -81,6 +81,42 @@ class ExtractedConsent(BaseModel):
     page_html_sha256: str | None = None
     dwell_ms: int | None = None
 
+    # campaign and buyer-routing attribution from hidden form fields/contact attrs
+    requested_service: str | None = None
+    campaign_id: str | None = None
+    campaign_source: str | None = None
+    first_touch_source: str | None = None
+    last_touch_source: str | None = None
+
+
+class SuppressionRequest(BaseModel):
+    """Consumer opt-out request used by the local privacy endpoint."""
+
+    phone: str | None = Field(default=None, min_length=7, max_length=32)
+    email: str | None = Field(default=None, max_length=255)
+    reason: str = Field(default="consumer_opt_out", min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def require_contact(self) -> SuppressionRequest:
+        if not self.phone and not self.email:
+            raise ValueError("phone or email is required")
+        return self
+
+    @field_validator("phone")
+    @classmethod
+    def normalize_phone(cls, value: str | None) -> str | None:
+        return _e164(value) if value else None
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str | None) -> str | None:
+        if not value:
+            return None
+        try:
+            return validate_email(value, check_deliverability=False).normalized
+        except EmailNotValidError as e:
+            raise ValueError("email is invalid") from e
+
 
 class ConsentExtractionError(ValueError):
     """raised when required consent fields are missing or invalid."""
@@ -110,6 +146,23 @@ def _valid_email(email_raw: str | None) -> str | None:
         return validate_email(email_raw, check_deliverability=False).normalized
     except EmailNotValidError:
         return None  # silently drop invalid email; phone is the primary identifier
+
+
+def _optional_text(*values: Any) -> str | None:
+    for value in values:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped:
+                return stripped
+    return None
+
+
+def _hidden_value(envelope: FormbricksEnvelope, answers: dict[str, Any], key: str) -> str | None:
+    return _optional_text(
+        answers.get(key),
+        envelope.data.contactAttributes.get(key),
+        envelope.data.variables.get(key),
+    )
 
 
 def extract_consent(envelope: FormbricksEnvelope) -> ExtractedConsent:
@@ -145,6 +198,19 @@ def extract_consent(envelope: FormbricksEnvelope) -> ExtractedConsent:
         if ttc_total > 0:
             dwell_ms = ttc_total
 
+    campaign_source = _optional_text(
+        _hidden_value(envelope, answers, "campaign_source"),
+        _hidden_value(envelope, answers, "utm_source"),
+    )
+    first_touch_source = _optional_text(
+        _hidden_value(envelope, answers, "first_touch_source"),
+        campaign_source,
+    )
+    last_touch_source = _optional_text(
+        _hidden_value(envelope, answers, "last_touch_source"),
+        campaign_source,
+    )
+
     return ExtractedConsent(
         formbricks_response_id=envelope.data.id,
         page_url=meta.url,
@@ -159,4 +225,15 @@ def extract_consent(envelope: FormbricksEnvelope) -> ExtractedConsent:
         zip=zip_,
         page_html_sha256=page_html_sha256,
         dwell_ms=dwell_ms,
+        requested_service=_optional_text(
+            _hidden_value(envelope, answers, "requested_service"),
+            _hidden_value(envelope, answers, "service"),
+        ),
+        campaign_id=_optional_text(
+            _hidden_value(envelope, answers, "campaign_id"),
+            _hidden_value(envelope, answers, "utm_campaign"),
+        ),
+        campaign_source=campaign_source,
+        first_touch_source=first_touch_source,
+        last_touch_source=last_touch_source,
     )

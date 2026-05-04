@@ -10,10 +10,10 @@
     # order crowdsec first
 }
 
-# ---- public-facing landing pages (pseo) ----
+# ---- public-facing implemented routes only ----
 :80 {
-    @has_form path /api/lead/*
-    handle @has_form {
+    @form_receiver path /api/lead/* /webhooks/formbricks /privacy /terms /v1/privacy/opt-out
+    handle @form_receiver {
         coraza_waf {
             load_owasp_crs
             directives `
@@ -26,17 +26,8 @@
         reverse_proxy form-receiver:8000
     }
 
-    handle /webhooks/formbricks {
-        reverse_proxy form-receiver:8000
-    }
-
-    handle /webhooks/jambonz {
-        reverse_proxy voice-bridge:8080
-    }
-
-    # all other public traffic to the next.js landing app
     handle {
-        reverse_proxy landing:3000
+        respond "StormLead public landing/voice routes are not implemented in V1 local readiness" 404
     }
 
     log {
@@ -69,8 +60,12 @@
         reverse_proxy langfuse-web:3000
     }
 
-    handle /buyers/* {
-        uri strip_prefix /buyers
-        reverse_proxy buyer-portal:3000
+    handle /ping-post/* {
+        uri strip_prefix /ping-post
+        reverse_proxy ping-post:8000
+    }
+
+    handle {
+        respond "StormLead internal route not implemented" 404
     }
 }

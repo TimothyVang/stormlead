@@ -7,7 +7,9 @@ from stormlead_db.tables import (
     LeadStateTransition,
     PingAttempt,
     PostResult,
+    ReturnRequest,
     StormRow,
+    SuppressionEntry,
 )
 from stormlead_db.transitions import (
     LeadRunSummary,
@@ -33,7 +35,9 @@ __all__ = [
     "LeadTimelineEvent",
     "PingAttempt",
     "PostResult",
+    "ReturnRequest",
     "StormRow",
+    "SuppressionEntry",
     "TransitionWriteResult",
     "build_transition_idempotency_key",
     "get_engine",

@@ -330,6 +330,36 @@ async def _buyer_within_caps(buyer: Buyer) -> bool:
     return Decimal(int(month_spend or 0)) / Decimal(100) < buyer.monthly_budget
 
 
+async def _sold_delivery_for_lead(lead_id: UUID) -> PostResult | None:
+    async with get_session() as s:
+        return (
+            (
+                await s.execute(
+                    select(PostResult)
+                    .where(PostResult.lead_id == lead_id, PostResult.delivered.is_(True))
+                    .order_by(PostResult.created_at.desc())
+                )
+            )
+            .scalars()
+            .first()
+        )
+
+
+async def _delivery_result_by_key(delivery_idempotency_key: str) -> PostResult | None:
+    async with get_session() as s:
+        return (
+            (
+                await s.execute(
+                    select(PostResult).where(
+                        PostResult.delivery_idempotency_key == delivery_idempotency_key
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+
+
 async def _record_pings(
     lead_id: UUID,
     payload: dict,
@@ -477,6 +507,7 @@ async def _post_to_winner(
     buyer: Buyer,
     lead: Lead,
     bid_cents: int,
+    delivery_idempotency_key: str,
 ) -> tuple[bool, int | None, str | None]:
     """deliver full lead with PII to winning buyer. signed."""
     body = json.dumps(
@@ -508,13 +539,12 @@ async def _post_to_winner(
         }
     ).encode()
     ts = str(int(time.time()))
-    idempotency_key = _delivery_idempotency_key(lead.id, buyer.id, bid_cents)
     headers = {
         "Content-Type": "application/json",
         "Webhook-Timestamp": ts,
         "Webhook-Signature": _sign_webhook(buyer.webhook_secret, ts, body),
         "Webhook-Id": str(uuid4()),
-        "Idempotency-Key": idempotency_key,
+        "Idempotency-Key": delivery_idempotency_key,
         "X-Stormlead-Mode": "post",
     }
     for attempt in range(1, POST_MAX_ATTEMPTS + 1):
@@ -602,6 +632,24 @@ async def run_auction(lead: Lead) -> PingPostResult:
             damage_tier=lead.damage_tier,
         )
 
+    existing_sale = await _sold_delivery_for_lead(lead.id)
+    if existing_sale is not None:
+        log.info(
+            "auction.idempotent_sold_skip",
+            lead_id=str(lead.id),
+            buyer_id=str(existing_sale.buyer_id),
+        )
+        return PingPostResult(
+            event_id=uuid4(),
+            occurred_at=datetime.now(UTC),
+            lead_id=lead.id,
+            pinged_buyer_ids=[],
+            winning_buyer_id=existing_sale.buyer_id,
+            winning_bid_cents=existing_sale.bid_cents,
+            duration_ms=int((time.perf_counter() - started) * 1000),
+            damage_tier=lead.damage_tier,
+        )
+
     buyers = await _select_eligible_buyers(lead)
     await _record_pipeline_transition(
         lead.id,
@@ -671,11 +719,32 @@ async def run_auction(lead: Lead) -> PingPostResult:
         if winner_pair:
             ping_resp, buyer = winner_pair
             bid_cents = ping_resp.bid_cents or 0
+            delivery_idempotency_key = _delivery_idempotency_key(lead.id, buyer.id, bid_cents)
+            existing_delivery = await _delivery_result_by_key(delivery_idempotency_key)
+            if existing_delivery is not None:
+                log.info(
+                    "delivery.idempotent_key_skip",
+                    lead_id=str(lead.id),
+                    buyer_id=str(buyer.id),
+                    post_result_id=str(existing_delivery.id),
+                )
+                return PingPostResult(
+                    event_id=uuid4(),
+                    occurred_at=datetime.now(UTC),
+                    lead_id=lead.id,
+                    pinged_buyer_ids=[b.id for b in buyers],
+                    winning_buyer_id=buyer.id if existing_delivery.delivered else None,
+                    winning_bid_cents=bid_cents if existing_delivery.delivered else None,
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                    damage_tier=lead.damage_tier,
+                )
             reserved = await _reserve_buyer_wallet(buyer.id, lead.id, bid_cents)
             if reserved:
                 winning_buyer_id = buyer.id
                 winning_bid = bid_cents
-                ok, status, body = await _post_to_winner(client, buyer, lead, bid_cents)
+                ok, status, body = await _post_to_winner(
+                    client, buyer, lead, bid_cents, delivery_idempotency_key
+                )
             else:
                 ok, status, body = False, None, "buyer wallet/status changed before post"
 
@@ -684,6 +753,7 @@ async def run_auction(lead: Lead) -> PingPostResult:
                     PostResult(
                         lead_id=lead.id,
                         buyer_id=buyer.id,
+                        delivery_idempotency_key=delivery_idempotency_key,
                         bid_cents=bid_cents,
                         delivered=ok,
                         response_status_code=status,
@@ -725,6 +795,7 @@ async def run_auction(lead: Lead) -> PingPostResult:
                                 "reserved_cents": bid_cents,
                                 "post_result_status_code": status,
                                 "exclusive": True,
+                                "delivery_idempotency_key": delivery_idempotency_key,
                             },
                         )
                     )

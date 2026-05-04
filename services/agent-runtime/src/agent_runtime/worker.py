@@ -11,6 +11,7 @@ model calls are routed through LiteLLM by agent_runtime.execution.
 from __future__ import annotations
 
 import asyncio
+from typing import Any, cast
 
 from hatchet_sdk import Context, Hatchet
 from stormlead_core import configure_logging, get_logger
@@ -23,35 +24,97 @@ configure_logging()
 log = get_logger(__name__)
 
 hatchet = Hatchet(debug=False)
+_supports_legacy_hatchet_worker = hasattr(hatchet, "step")
 
 
-@hatchet.workflow(name="qualify-lead", on_events=["lead.enriched"])
-class QualifyLead:
-    @hatchet.step(timeout="120s", retries=2)
-    async def step(self, context: Context) -> dict:
-        return await qualify_lead(context)
+class _ContextAdapter:
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self.workflow_input = payload
 
 
-@hatchet.workflow(name="nurture-lead", on_events=["lead.unsold", "lead.rejected"])
-class NurtureLead:
-    @hatchet.step(timeout="60s", retries=2)
-    async def step(self, context: Context) -> dict:
-        return await nurture_lead(context)
+def _payload(task_input: Any, context: Context) -> dict[str, Any]:
+    if isinstance(task_input, dict):
+        return task_input
+    model_dump = getattr(task_input, "model_dump", None)
+    if callable(model_dump):
+        dumped = model_dump()
+        if isinstance(dumped, dict) and dumped:
+            return dumped
+    workflow_input = getattr(context, "workflow_input", None)
+    payload = workflow_input() if callable(workflow_input) else workflow_input
+    return payload if isinstance(payload, dict) else {}
 
 
-@hatchet.workflow(name="hermes-self-evolution", on_crons=["0 9 * * 1"])  # mondays 09:00 utc
-class HermesSelfEvolution:
-    @hatchet.step(timeout="600s", retries=1)
-    async def step(self, context: Context) -> dict:
-        return await hermes_self_evolution(context)
+if _supports_legacy_hatchet_worker:
+
+    @hatchet.workflow(name="qualify-lead", on_events=["lead.enriched"])
+    class QualifyLead:
+        @hatchet.step(timeout="120s", retries=2)
+        async def step(self, context: Context) -> dict:
+            return await qualify_lead(context)
+
+    @hatchet.workflow(name="nurture-lead", on_events=["lead.unsold", "lead.rejected"])
+    class NurtureLead:
+        @hatchet.step(timeout="60s", retries=2)
+        async def step(self, context: Context) -> dict:
+            return await nurture_lead(context)
+
+    @hatchet.workflow(name="hermes-self-evolution", on_crons=["0 9 * * 1"])
+    class HermesSelfEvolution:
+        @hatchet.step(timeout="600s", retries=1)
+        async def step(self, context: Context) -> dict:
+            return await hermes_self_evolution(context)
+
+else:
+
+    @hatchet.task(
+        name="qualify-lead",
+        on_events=["lead.enriched"],
+        execution_timeout="120s",
+        retries=2,
+    )
+    async def qualify_lead_task(task_input: Any, context: Context) -> dict:
+        adapted = _ContextAdapter(_payload(task_input, context))
+        return await qualify_lead(cast(Context, adapted))
+
+    @hatchet.task(
+        name="nurture-lead",
+        on_events=["lead.unsold", "lead.rejected"],
+        execution_timeout="60s",
+        retries=2,
+    )
+    async def nurture_lead_task(task_input: Any, context: Context) -> dict:
+        adapted = _ContextAdapter(_payload(task_input, context))
+        return await nurture_lead(cast(Context, adapted))
+
+    @hatchet.task(
+        name="hermes-self-evolution",
+        on_crons=["0 9 * * 1"],
+        execution_timeout="600s",
+        retries=1,
+    )
+    async def hermes_self_evolution_task(task_input: Any, context: Context) -> dict:
+        adapted = _ContextAdapter(_payload(task_input, context))
+        return await hermes_self_evolution(cast(Context, adapted))
 
 
 def main() -> None:
-    worker = hatchet.worker("agent-runtime", max_runs=4)
-    worker.register_workflow(QualifyLead())
-    worker.register_workflow(NurtureLead())
-    worker.register_workflow(HermesSelfEvolution())
-    asyncio.run(worker.async_start())
+    if _supports_legacy_hatchet_worker:
+        worker = hatchet.worker("agent-runtime", max_runs=4)
+        worker.register_workflow(QualifyLead())
+        worker.register_workflow(NurtureLead())
+        worker.register_workflow(HermesSelfEvolution())
+    else:
+        worker = hatchet.worker(
+            "agent-runtime",
+            slots=4,
+            workflows=[qualify_lead_task, nurture_lead_task, hermes_self_evolution_task],
+        )
+    async_start = getattr(worker, "async_start", None)
+    if callable(async_start):
+        asyncio.run(async_start())
+    else:
+        worker.start()
 
 
 if __name__ == "__main__":

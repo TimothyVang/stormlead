@@ -20,6 +20,7 @@ import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from hatchet_sdk import Hatchet
 from sqlalchemy import text as sa_text
 from stormlead_core import (
@@ -35,6 +36,7 @@ from stormlead_db import get_session
 from form_receiver.schemas import (
     ConsentExtractionError,
     FormbricksEnvelope,
+    SuppressionRequest,
     extract_consent,
 )
 from form_receiver.signatures import (
@@ -43,13 +45,20 @@ from form_receiver.signatures import (
     ReplayError,
     verify,
 )
-from form_receiver.storage import emit_lead_captured, record_audit, upsert_lead
+from form_receiver.storage import (
+    SuppressedLeadError,
+    emit_lead_captured,
+    record_audit,
+    record_suppression,
+    upsert_lead,
+)
 
 configure_logging()
 log = get_logger(__name__)
 
 
 _hatchet: Hatchet | None = None
+MAX_WEBHOOK_BODY_BYTES = int(os.getenv("FORM_RECEIVER_MAX_WEBHOOK_BODY_BYTES", "262144"))
 
 
 @asynccontextmanager
@@ -93,9 +102,55 @@ async def readyz() -> dict[str, str]:
     return {"status": "ready"}
 
 
+@app.get("/privacy", response_class=HTMLResponse)
+async def privacy() -> str:
+    return """
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>StormLead Privacy</title></head>
+<body><h1>StormLead Privacy</h1>
+<p>StormLead stores homeowner request details, consent text, page URL, IP address, user agent, and campaign attribution to document opt-in and route tree-service leads.</p>
+<p>Submit an opt-out through <code>POST /v1/privacy/opt-out</code>. Matching future captures are suppressed before lead persistence.</p>
+</body></html>
+"""
+
+
+@app.get("/terms", response_class=HTMLResponse)
+async def terms() -> str:
+    return """
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>StormLead Terms</title></head>
+<body><h1>StormLead Terms</h1>
+<p>Local V1 operation is for technical validation. Paid delivery requires verified buyer terms, consent review, and explicit operator approval before public launch.</p>
+</body></html>
+"""
+
+
+@app.post("/v1/privacy/opt-out")
+async def opt_out(payload: SuppressionRequest) -> dict[str, str | bool]:
+    suppression_id, created = await record_suppression(
+        phone_e164=payload.phone,
+        email=payload.email,
+        reason=payload.reason,
+        source="privacy_endpoint",
+    )
+    return {
+        "status": "suppressed",
+        "suppression_id": str(suppression_id),
+        "created": created,
+    }
+
+
 @app.post("/webhooks/formbricks")
 async def formbricks_webhook(request: Request) -> dict[str, str]:
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            declared_size = int(content_length)
+        except ValueError as e:
+            raise HTTPException(400, "invalid content-length header") from e
+        if declared_size > MAX_WEBHOOK_BODY_BYTES:
+            raise HTTPException(413, "webhook body exceeds configured size limit")
     raw_body = await request.body()
+    if len(raw_body) > MAX_WEBHOOK_BODY_BYTES:
+        raise HTTPException(413, "webhook body exceeds configured size limit")
     bind_correlation_id(request.headers.get("webhook-id"))
     secret = os.environ.get("FORMBRICKS_WEBHOOK_SECRET", "")
     if not secret:
@@ -142,7 +197,20 @@ async def formbricks_webhook(request: Request) -> dict[str, str]:
     webhook_id = request.headers["webhook-id"]
 
     # 4. persist + emit
-    lead_id = await upsert_lead(extracted, ip=ip)
+    try:
+        lead_id = await upsert_lead(extracted, ip=ip)
+    except SuppressedLeadError as e:
+        log.info(
+            "webhook.suppressed",
+            webhook_id=webhook_id,
+            suppression_id=str(e.suppression_id),
+            reason=e.reason,
+        )
+        return {
+            "status": "suppressed",
+            "suppression_id": str(e.suppression_id),
+            "reason": e.reason,
+        }
     was_new = await record_audit(
         webhook_id=webhook_id,
         lead_id=lead_id,

@@ -39,7 +39,7 @@ psql:
 #
 # init_db.py runs sqlalchemy.create_all first because 0001_initial.py
 # expects tables to already exist (it just sets up hypertables); then
-# alembic applies 0001 (idempotent via if_not_exists) + 0002.
+# alembic applies every idempotent migration through head.
 migrate:
     DATABASE_URL="$DATABASE_URL_HOST" uv run python scripts/init_db.py
     cd libs/stormlead_db && DATABASE_URL="$DATABASE_URL_HOST" uv run alembic upgrade head
@@ -58,7 +58,7 @@ test:
 test-watch:
     uv run pytest-watch -- -x -q services libs
 
-# --- smoke test: real lead → ping-post → buyer ---
+# --- smoke test: real lead → ping-post → buyer → return review → report ---
 smoke:
     uv run python scripts/smoke_e2e.py
 

@@ -5,6 +5,8 @@ import { join } from 'node:path';
 const baseURL = process.env.STORMLEAD_ADMIN_URL ?? 'http://127.0.0.1:8003';
 const keepOpen = process.env.STORMLEAD_KEEP_BROWSER_OPEN !== '0';
 const planReviewMs = Number(process.env.COWORK_PLAN_REVIEW_MS ?? 6000);
+const configuredSlowMoMs = Number(process.env.STORMLEAD_PLAYWRIGHT_SLOW_MO_MS ?? 500);
+const slowMoMs = Number.isFinite(configuredSlowMoMs) ? configuredSlowMoMs : 500;
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 const runId = `${stamp}-paid-pilot-admin-review-live`;
 const runDir = join('testing', 'runs', runId);
@@ -25,6 +27,7 @@ const workflow = {
   analysis: [
     'Use the real running app and database; do not mock responses.',
     'Perform setup through visible admin forms because the UI exists.',
+    'Keep the browser headed/visible for operator review.',
     'Verify KPIs and roster state after real create/update/deposit calls.',
   ],
   plan: [
@@ -70,7 +73,7 @@ log(`Starting real browser-operated workflow against ${baseURL}`);
 
 const browser = await chromium.launch({
   headless: false,
-  slowMo: 500,
+  slowMo: slowMoMs,
   args: ['--start-maximized'],
 });
 
@@ -287,6 +290,13 @@ writeFileSync(
       },
       status: 'passed',
       generated_at: new Date().toISOString(),
+      browser: {
+        engine: 'chromium',
+        headed: true,
+        headless: false,
+        slow_mo_ms: slowMoMs,
+        viewport: { width: 1440, height: 900 },
+      },
       subject_ids: { buyer_id: buyerId },
       lead_id: null,
       artifacts: {

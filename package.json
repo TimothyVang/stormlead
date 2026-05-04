@@ -3,8 +3,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test:playwright": "playwright test",
+    "test:playwright": "playwright test --headed --workers=1",
     "test:playwright:headed": "playwright test --headed --workers=1",
+    "test:playwright:ui": "playwright test --ui",
+    "test:playwright:debug": "playwright test --debug",
+    "show:playwright-report": "playwright show-report testing/playwright-report",
     "cowork:admin": "node scripts/live_admin_cowork.mjs",
     "cowork:admin:record": "cross-env STORMLEAD_KEEP_BROWSER_OPEN=0 node scripts/live_admin_cowork.mjs",
     "demo:admin": "npm run cowork:admin",

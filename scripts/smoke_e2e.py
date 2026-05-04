@@ -31,21 +31,49 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
 from aiohttp import web
 
-
-FORM_RECEIVER_URL = os.environ.get(
-    "FORM_RECEIVER_URL", "http://localhost:8002/webhooks/formbricks"
-)
+FORM_RECEIVER_URL = os.environ.get("FORM_RECEIVER_URL", "http://localhost:8002/webhooks/formbricks")
+PING_POST_URL = os.environ.get("PING_POST_URL", "http://localhost:8003")
 LISTENER_PORT = 9999
-SECRET = os.environ.get(
-    "FORMBRICKS_WEBHOOK_SECRET",
-    "whsec_" + base64.b64encode(b"smoke-test-secret-32-bytes-padded").decode(),
+LISTENER_HOST = os.environ.get("SMOKE_LISTENER_HOST", "127.0.0.1")
+
+
+def _env_file_value(file_name: str, key: str) -> str | None:
+    env_file = Path(file_name)
+    if not env_file.exists():
+        return None
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        if line.startswith(f"{key}="):
+            return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return None
+
+
+DEFAULT_SMOKE_SECRET = "whsec_" + base64.b64encode(b"smoke-test-secret-32-bytes-padded").decode()
+
+
+def _candidate_secrets() -> list[str]:
+    candidates = [
+        os.environ.get("FORMBRICKS_WEBHOOK_SECRET"),
+        _env_file_value(".env", "FORMBRICKS_WEBHOOK_SECRET"),
+        _env_file_value(".env.example", "FORMBRICKS_WEBHOOK_SECRET"),
+        DEFAULT_SMOKE_SECRET,
+    ]
+    unique = []
+    for candidate in candidates:
+        if candidate and candidate not in unique:
+            unique.append(candidate)
+    return unique
+
+
+SYNTHETIC_PHONE = os.environ.get(
+    "SMOKE_SYNTHETIC_PHONE",
+    f"+15125550{100 + (int(time.time()) % 100):03d}",
 )
-SYNTHETIC_PHONE = "+15125550199"  # distinct from the seed lead's +15125550100
 
 WEBHOOK_LISTENER_TIMEOUT_S = 10
 
@@ -57,7 +85,7 @@ def _make_handler(name: str):
     async def handler(request: web.Request) -> web.Response:
         try:
             body = await request.json()
-        except Exception:  # noqa: BLE001
+        except Exception:
             body = {}
         received[name].append({"headers": dict(request.headers), "body": body})
         return web.json_response({"accepted": True, "bid_cents": 5000})
@@ -71,19 +99,17 @@ async def _start_listeners() -> web.AppRunner:
     app.router.add_post("/buyer-b", _make_handler("buyer-b"))
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", LISTENER_PORT)
+    site = web.TCPSite(runner, LISTENER_HOST, LISTENER_PORT)
     await site.start()
     return runner
 
 
-def _sign(webhook_id: str, ts: str, body: bytes) -> str:
-    raw = SECRET.removeprefix("whsec_")
+def _sign(secret: str, webhook_id: str, ts: str, body: bytes) -> str:
+    raw = secret.removeprefix("whsec_")
     pad = "=" * (-len(raw) % 4)
     raw_secret = base64.b64decode(raw + pad)
     signed = f"{webhook_id}.{ts}.".encode() + body
-    sig = base64.b64encode(
-        hmac.new(raw_secret, signed, hashlib.sha256).digest()
-    ).decode()
+    sig = base64.b64encode(hmac.new(raw_secret, signed, hashlib.sha256).digest()).decode()
     return f"v1,{sig}"
 
 
@@ -103,10 +129,14 @@ def _synthetic_envelope() -> dict[str, Any]:
                 "state": "TX",
                 "zip": "78701",
                 "consent_text": (
-                    "I agree to be contacted by tree-removal contractors "
-                    "regarding storm damage."
+                    "I agree to be contacted by tree-removal contractors regarding storm damage."
                 ),
-                "page_html_sha256": "1" * 64,
+                "page_html_sha256": hashlib.sha256(str(time.time()).encode()).hexdigest(),
+                "requested_service": "tree_removal",
+                "campaign_id": "smoke-austin-v1",
+                "campaign_source": "local_smoke",
+                "first_touch_source": "local_smoke",
+                "last_touch_source": "local_smoke",
             },
             "ttc": {"name": 1500, "phone": 2200, "consent_text": 4500},
             "meta": {
@@ -127,6 +157,27 @@ async def _wait_for_buyer_hit(timeout_s: int = WEBHOOK_LISTENER_TIMEOUT_S) -> bo
     return False
 
 
+def _post_hits() -> list[dict[str, Any]]:
+    return [
+        hit
+        for hits in received.values()
+        for hit in hits
+        if hit["headers"].get("X-Stormlead-Mode") == "post"
+    ]
+
+
+async def _wait_for_buyer_post(
+    timeout_s: int = WEBHOOK_LISTENER_TIMEOUT_S,
+) -> dict[str, Any] | None:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        hits = _post_hits()
+        if hits:
+            return hits[0]
+        await asyncio.sleep(0.25)
+    return None
+
+
 def _step(name: str) -> None:
     print(f"[smoke] {name} … ", end="", flush=True)
 
@@ -145,7 +196,7 @@ async def main() -> None:
 
     _step("starting in-process buyer listeners")
     runner = await _start_listeners()
-    _ok(f"port {LISTENER_PORT}")
+    _ok(f"{LISTENER_HOST}:{LISTENER_PORT}")
 
     lead_id: str | None = None
     try:
@@ -154,18 +205,24 @@ async def main() -> None:
         # unique per run so consent_audits dedup doesn't suppress emission
         webhook_id = f"smoke-test-webhook-{int(time.time())}"
         ts = str(int(time.time()))
-        sig = _sign(webhook_id, ts, body)
         async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.post(
-                FORM_RECEIVER_URL,
-                content=body,
-                headers={
-                    "content-type": "application/json",
-                    "webhook-id": webhook_id,
-                    "webhook-timestamp": ts,
-                    "webhook-signature": sig,
-                },
-            )
+            r: httpx.Response | None = None
+            for secret in _candidate_secrets():
+                sig = _sign(secret, webhook_id, ts, body)
+                r = await client.post(
+                    FORM_RECEIVER_URL,
+                    content=body,
+                    headers={
+                        "content-type": "application/json",
+                        "webhook-id": webhook_id,
+                        "webhook-timestamp": ts,
+                        "webhook-signature": sig,
+                    },
+                )
+                if r.status_code != 401 or "signature mismatch" not in r.text:
+                    break
+        if r is None:
+            _fail("post-webhook", "no Formbricks signing secrets were available")
         if r.status_code != 200:
             _fail("post-webhook", f"status={r.status_code} body={r.text}")
         payload = r.json()
@@ -174,17 +231,126 @@ async def main() -> None:
             _fail("post-webhook", f"200 but no lead_id in body: {payload}")
         _ok(f"status={payload.get('status')} lead_id={lead_id}")
 
-        _step(f"waiting for buyer webhook (max {WEBHOOK_LISTENER_TIMEOUT_S}s)")
-        hit = await _wait_for_buyer_hit()
-        if not hit:
+        _step(f"waiting for buyer ping webhook (max {WEBHOOK_LISTENER_TIMEOUT_S}s)")
+        ping_hit = await _wait_for_buyer_hit()
+        if not ping_hit:
             _fail(
-                "buyer-webhook",
+                "buyer-ping-webhook",
                 f"neither buyer-a nor buyer-b received a webhook within "
                 f"{WEBHOOK_LISTENER_TIMEOUT_S}s — check ping-post worker, "
                 f"agent-runtime QualifyLead workflow, hatchet engine logs",
             )
         which = ", ".join(k for k, v in received.items() if v)
         _ok(f"hit by: {which}")
+
+        _step(f"waiting for winning buyer post (max {WEBHOOK_LISTENER_TIMEOUT_S}s)")
+        post_hit = await _wait_for_buyer_post()
+        if post_hit is None:
+            _fail(
+                "buyer-post-webhook",
+                "buyer ping occurred but no X-Stormlead-Mode=post delivery arrived",
+            )
+        post_body = post_hit["body"]
+        post_idempotency_key = post_hit["headers"].get("Idempotency-Key")
+        if not post_idempotency_key:
+            _fail("buyer-post-webhook", "post delivery did not include Idempotency-Key")
+        _ok(f"idempotency_key={post_idempotency_key[:12]}...")
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            _step("requesting invalid-lead return review")
+            return_response = await client.post(
+                f"{PING_POST_URL}/v1/leads/{lead_id}/return",
+                json={
+                    "reason": "duplicate",
+                    "notes": "Smoke test return request; local validation only.",
+                    "evidence": {"buyer_delivery_lead_id": post_body.get("lead_id")},
+                    "requested_by": "smoke-test-buyer",
+                },
+            )
+            if return_response.status_code != 200:
+                _fail(
+                    "return-request",
+                    f"status={return_response.status_code} body={return_response.text}",
+                )
+            return_payload = return_response.json()
+            return_request_id = return_payload.get("return_request_id")
+            if not return_request_id:
+                _fail("return-request", f"missing return_request_id: {return_payload}")
+            _ok(f"return_request_id={return_request_id}")
+
+            _step("approving return request and credit saga")
+            review_response = await client.post(
+                f"{PING_POST_URL}/v1/return-requests/{return_request_id}/review",
+                json={
+                    "action": "approve",
+                    "notes": "Approved by smoke test to validate credit audit path.",
+                    "operator": "smoke-e2e",
+                },
+            )
+            if review_response.status_code != 200:
+                _fail(
+                    "return-review",
+                    f"status={review_response.status_code} body={review_response.text}",
+                )
+            review_payload = review_response.json()
+            buyer_id = review_payload.get("buyer_id")
+            credited_cents = review_payload.get("credited_cents")
+            if not buyer_id or not credited_cents:
+                _fail("return-review", f"missing buyer_id/credited_cents: {review_payload}")
+            _ok(f"buyer_id={buyer_id} credited_cents={credited_cents}")
+
+            _step("loading buyer daily report")
+            report_response = await client.get(f"{PING_POST_URL}/v1/buyers/{buyer_id}/daily-report")
+            if report_response.status_code != 200:
+                _fail(
+                    "buyer-daily-report",
+                    f"status={report_response.status_code} body={report_response.text}",
+                )
+            report_payload = report_response.json()
+            if report_payload["delivery"]["pending_return_requests"] != 0:
+                _fail("buyer-daily-report", f"return request still pending: {report_payload}")
+            _ok("report loaded")
+
+            _step("loading admin lead timeline")
+            timeline_response = await client.get(
+                f"{PING_POST_URL}/v1/admin/leads/{lead_id}/timeline"
+            )
+            if timeline_response.status_code != 200:
+                _fail(
+                    "admin-timeline",
+                    f"status={timeline_response.status_code} body={timeline_response.text}",
+                )
+            event_types = [
+                event["event_type"] for event in timeline_response.json().get("events", [])
+            ]
+            for required in {
+                "lead.captured",
+                "lead.sold",
+                "lead.return_requested",
+                "lead.return_approved",
+            }:
+                if required not in event_types:
+                    _fail("admin-timeline", f"missing {required}; event_types={event_types}")
+            _ok(f"events={len(event_types)}")
+
+            _step("checking scoped launch-readiness endpoint")
+            readiness_response = await client.get(
+                f"{PING_POST_URL}/v1/admin/launch-readiness",
+                params={
+                    "market_zip": "78701",
+                    "service": "tree_removal",
+                    "campaign_budget_cents": 1000,
+                },
+            )
+            if readiness_response.status_code != 200:
+                _fail(
+                    "launch-readiness",
+                    f"status={readiness_response.status_code} body={readiness_response.text}",
+                )
+            readiness_payload = readiness_response.json()
+            if "technical_local_ready" not in readiness_payload:
+                _fail("launch-readiness", f"unexpected response: {readiness_payload}")
+            _ok(f"label={readiness_payload.get('readiness_label')}")
 
     finally:
         await runner.cleanup()

@@ -269,6 +269,7 @@ class PostResult(Base):
     buyer_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("buyers.id"), index=True
     )
+    delivery_idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     bid_cents: Mapped[int] = mapped_column(BigInteger)
     delivered: Mapped[bool] = mapped_column(Boolean, default=False)
     response_status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -277,6 +278,54 @@ class PostResult(Base):
     return_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), index=True
+    )
+
+    __table_args__ = (
+        Index(
+            "uq_post_results_delivery_idempotency_key",
+            "delivery_idempotency_key",
+            unique=True,
+            postgresql_where=text("delivery_idempotency_key IS NOT NULL"),
+        ),
+    )
+
+
+class ReturnRequest(Base):
+    """Buyer-submitted invalid-lead return request requiring review before credit."""
+
+    __tablename__ = "return_requests"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    post_result_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("post_results.id"), index=True
+    )
+    lead_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("leads.id"), index=True)
+    buyer_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("buyers.id"), index=True
+    )
+    reason: Mapped[str] = mapped_column(String(64), index=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    evidence_json: Mapped[dict] = mapped_column(JSONB, default=dict)
+    status: Mapped[str] = mapped_column(String(32), default="pending_review", index=True)
+    requested_by: Mapped[str] = mapped_column(String(128), default="buyer")
+    reviewed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    review_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), index=True
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending_review', 'held', 'approved', 'rejected')",
+            name="ck_return_requests_status",
+        ),
+        Index(
+            "uq_return_requests_active_post_result",
+            "post_result_id",
+            unique=True,
+            postgresql_where=text("status IN ('pending_review', 'held')"),
+        ),
     )
 
 
@@ -333,3 +382,44 @@ class ConsentAudit(Base):
     page_html_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     dwell_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     raw_payload: Mapped[dict] = mapped_column(JSONB)
+
+
+class SuppressionEntry(Base):
+    """Active opt-out/suppression entries checked before lead persistence."""
+
+    __tablename__ = "suppression_entries"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    phone_e164: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    reason: Mapped[str] = mapped_column(String(128), default="consumer_opt_out")
+    source: Mapped[str] = mapped_column(String(64), default="privacy_request")
+    status: Mapped[str] = mapped_column(String(32), default="active", index=True)
+    metadata_json: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), onupdate=text("now()")
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "phone_e164 IS NOT NULL OR email IS NOT NULL",
+            name="ck_suppression_entries_contact",
+        ),
+        Index("ix_suppression_entries_phone", "phone_e164"),
+        Index("ix_suppression_entries_email", "email"),
+        Index(
+            "uq_suppression_entries_phone_e164",
+            "phone_e164",
+            unique=True,
+            postgresql_where=text("phone_e164 IS NOT NULL"),
+        ),
+        Index(
+            "uq_suppression_entries_email",
+            "email",
+            unique=True,
+            postgresql_where=text("email IS NOT NULL"),
+        ),
+    )

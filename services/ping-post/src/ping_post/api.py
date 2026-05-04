@@ -19,7 +19,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 from fastapi import FastAPI, HTTPException, Query
@@ -42,6 +42,7 @@ from stormlead_db import (
     LeadStateTransition,
     PingAttempt,
     PostResult,
+    ReturnRequest,
     build_transition_idempotency_key,
     get_session,
     latest_state,
@@ -65,6 +66,8 @@ VALID_RETURN_REASONS = {
     "job_already_completed",
 }
 VALID_REVIEW_ACTIONS = {"approve", "hold", "review"}
+VALID_RETURN_REVIEW_ACTIONS = {"approve", "hold", "reject"}
+ACTIVE_RETURN_REQUEST_STATUSES = ("pending_review", "held")
 
 
 class KpiThresholdConfig(BaseModel):
@@ -177,6 +180,8 @@ class DepositRequest(BaseModel):
 class ReturnLeadRequest(BaseModel):
     reason: str = Field(min_length=1)
     notes: str | None = Field(default=None, max_length=1000)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    requested_by: str = Field(default="buyer", min_length=1, max_length=128)
 
     @field_validator("reason")
     @classmethod
@@ -185,6 +190,21 @@ class ReturnLeadRequest(BaseModel):
             allowed = ", ".join(sorted(VALID_RETURN_REASONS))
             raise ValueError(f"reason must be one of: {allowed}")
         return value
+
+
+class ReturnReviewRequest(BaseModel):
+    action: str = Field(min_length=1)
+    notes: str | None = Field(default=None, max_length=1000)
+    operator: str = Field(default="local-admin", min_length=1, max_length=128)
+
+    @field_validator("action")
+    @classmethod
+    def action_must_be_valid(cls, value: str) -> str:
+        action = value.strip().lower()
+        if action not in VALID_RETURN_REVIEW_ACTIONS:
+            allowed = ", ".join(sorted(VALID_RETURN_REVIEW_ACTIONS))
+            raise ValueError(f"action must be one of: {allowed}")
+        return action
 
 
 class LeadReviewRequest(BaseModel):
@@ -204,6 +224,24 @@ class LeadReviewRequest(BaseModel):
 
 hatchet = Hatchet(debug=False)
 _supports_legacy_hatchet_worker = hasattr(hatchet, "step")
+
+
+class _ContextAdapter:
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self.workflow_input = payload
+
+
+def _task_payload(task_input: Any, context: Context) -> dict[str, Any]:
+    if isinstance(task_input, dict):
+        return task_input
+    model_dump = getattr(task_input, "model_dump", None)
+    if callable(model_dump):
+        dumped = model_dump()
+        if isinstance(dumped, dict) and dumped:
+            return dumped
+    workflow_input = getattr(context, "workflow_input", None)
+    payload = workflow_input() if callable(workflow_input) else workflow_input
+    return payload if isinstance(payload, dict) else {}
 
 
 async def _auction_step(context: Context) -> dict[str, Any]:
@@ -239,11 +277,15 @@ if _supports_legacy_hatchet_worker:
 
 else:
 
-    class PingPostWorkflow:
-        """Placeholder so the API imports under Hatchet SDK versions with a different worker API."""
-
-        async def auction(self, context: Context) -> dict[str, Any]:
-            return await _auction_step(context)
+    @hatchet.task(
+        name="ping-post-auction",
+        on_events=["lead.qualified"],
+        execution_timeout="30s",
+        retries=3,
+    )
+    async def ping_post_auction_task(task_input: Any, context: Context) -> dict[str, Any]:
+        adapted = _ContextAdapter(_task_payload(task_input, context))
+        return await _auction_step(cast(Context, adapted))
 
 
 def _row_to_lead(row: LeadRow) -> Lead:
@@ -285,6 +327,10 @@ def _row_to_lead(row: LeadRow) -> Lead:
         first_touch_source=row.first_touch_source,
         last_touch_source=row.last_touch_source,
         rejection_reason=row.rejection_reason,
+        score=row.score,
+        score_reason=row.score_reason,
+        hold_for_review=row.hold_for_review,
+        blocked_for_fraud=row.blocked_for_fraud,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -296,9 +342,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if _supports_legacy_hatchet_worker:
         worker = hatchet.worker("ping-post-worker", max_runs=10)
         worker.register_workflow(PingPostWorkflow())
-        task = asyncio.create_task(worker.async_start())
     else:
-        log.warning("hatchet.worker_skipped", reason="unsupported_sdk_api")
+        worker = hatchet.worker(
+            "ping-post-worker",
+            slots=10,
+            workflows=[ping_post_auction_task],
+        )
+    async_start = getattr(worker, "async_start", None)
+    if callable(async_start):
+        task = asyncio.create_task(_start_hatchet_worker_async(async_start))
+    else:
+        task = asyncio.create_task(asyncio.to_thread(_start_hatchet_worker_sync, worker))
     log.info("startup.complete")
     try:
         yield
@@ -306,6 +360,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if task is not None:
             task.cancel()
         log.info("shutdown.complete")
+
+
+async def _start_hatchet_worker_async(async_start: Any) -> None:
+    try:
+        await async_start()
+    except asyncio.CancelledError:
+        raise
+    except BaseException as e:
+        log.error("hatchet.worker_start_failed", error=str(e))
+
+
+def _start_hatchet_worker_sync(worker: Any) -> None:
+    try:
+        worker.start()
+    except BaseException as e:
+        log.error("hatchet.worker_start_failed", error=str(e))
 
 
 app = FastAPI(title="stormlead ping-post", lifespan=lifespan)
@@ -1129,30 +1199,63 @@ async def return_lead(lead_id: UUID, payload: ReturnLeadRequest) -> dict[str, An
                 raise HTTPException(
                     409, "lead was already returned; check the existing return record"
                 )
-            buyer = await s.get(BuyerRow, result.buyer_id)
-            if buyer is None:
-                raise HTTPException(404, "buyer for this lead sale was not found; contact support")
-            credit = Decimal(result.bid_cents) / Decimal(100)
-            buyer.deposit_balance += credit
-            buyer.lifetime_spend -= credit
-            result.returned = True
-            result.return_reason = payload.reason
-            s.add(
-                BillingEvent(
-                    buyer_id=result.buyer_id,
-                    lead_id=lead_id,
-                    event_type="lead.returned",
-                    amount_cents=result.bid_cents,
-                    metadata_json={"reason": payload.reason, "notes": payload.notes},
+            active_request = (
+                (
+                    await s.execute(
+                        select(ReturnRequest)
+                        .where(
+                            ReturnRequest.post_result_id == result.id,
+                            ReturnRequest.status.in_(ACTIVE_RETURN_REQUEST_STATUSES),
+                        )
+                        .order_by(ReturnRequest.created_at.desc())
+                    )
                 )
+                .scalars()
+                .first()
+            )
+            if active_request is not None:
+                raise HTTPException(
+                    409,
+                    f"active return request already exists: {active_request.id}",
+                )
+
+            request = ReturnRequest(
+                post_result_id=result.id,
+                lead_id=lead_id,
+                buyer_id=result.buyer_id,
+                reason=payload.reason,
+                notes=payload.notes,
+                evidence_json=payload.evidence,
+                status="pending_review",
+                requested_by=payload.requested_by,
+            )
+            s.add(request)
+            current_state = await latest_state(s, lead_id) or PipelineState.SOLD
+            await record_transition(
+                s,
+                lead_id=lead_id,
+                from_state=None,
+                to_state=current_state,
+                event_type="lead.return_requested",
+                task_name="buyer.return_request",
+                status="pending_review",
+                payload={
+                    "return_request_id": str(request.id),
+                    "post_result_id": str(result.id),
+                    "buyer_id": str(result.buyer_id),
+                    "reason": payload.reason,
+                    "notes": payload.notes,
+                    "evidence_keys": sorted(payload.evidence.keys()),
+                },
             )
             await s.flush()
             return {
                 "lead_id": str(lead_id),
                 "buyer_id": str(result.buyer_id),
-                "credited_cents": result.bid_cents,
+                "return_request_id": str(request.id),
+                "status": request.status,
+                "credited_cents": 0,
                 "return_reason": payload.reason,
-                "wallet": _buyer_wallet_response(buyer),
             }
     except HTTPException:
         raise
@@ -1160,6 +1263,192 @@ async def return_lead(lead_id: UUID, payload: ReturnLeadRequest) -> dict[str, An
         log.error("lead.return_failed", lead_id=str(lead_id), error=str(e))
         raise HTTPException(
             500, "lead return could not be recorded; retry or contact support"
+        ) from e
+
+
+@app.post("/v1/return-requests/{return_request_id}/review")
+async def review_return_request(
+    return_request_id: UUID, payload: ReturnReviewRequest
+) -> dict[str, Any]:
+    try:
+        async with get_session() as s:
+            request = await s.get(ReturnRequest, return_request_id)
+            if request is None:
+                raise HTTPException(404, "return request not found; verify the id and try again")
+            if request.status in {"approved", "rejected"}:
+                raise HTTPException(409, f"return request is already {request.status}")
+            result = await s.get(PostResult, request.post_result_id)
+            if result is None:
+                raise HTTPException(404, "post result for this return request was not found")
+            buyer = await s.get(BuyerRow, request.buyer_id)
+            if buyer is None:
+                raise HTTPException(404, "buyer for this return request was not found")
+
+            request.reviewed_by = payload.operator
+            request.review_notes = payload.notes
+            request.reviewed_at = datetime.now(UTC)
+            credited_cents = 0
+            event_type = f"lead.return_{payload.action}ed"
+            if payload.action == "hold":
+                request.status = "held"
+                event_type = "lead.return_held"
+            elif payload.action == "reject":
+                request.status = "rejected"
+            else:
+                event_type = "lead.return_approved"
+                if result.returned:
+                    raise HTTPException(409, "lead sale has already been credited")
+                credit = Decimal(result.bid_cents) / Decimal(100)
+                buyer.deposit_balance += credit
+                buyer.lifetime_spend -= credit
+                result.returned = True
+                result.return_reason = request.reason
+                request.status = "approved"
+                credited_cents = result.bid_cents
+                s.add(
+                    BillingEvent(
+                        buyer_id=request.buyer_id,
+                        lead_id=request.lead_id,
+                        event_type="lead.returned",
+                        amount_cents=result.bid_cents,
+                        metadata_json={
+                            "return_request_id": str(request.id),
+                            "post_result_id": str(result.id),
+                            "reason": request.reason,
+                            "notes": request.notes,
+                            "review_notes": payload.notes,
+                            "operator": payload.operator,
+                        },
+                    )
+                )
+
+            current_state = await latest_state(s, request.lead_id) or PipelineState.SOLD
+            await record_transition(
+                s,
+                lead_id=request.lead_id,
+                from_state=None,
+                to_state=current_state,
+                event_type=event_type,
+                task_name="admin.return_review",
+                status=request.status,
+                payload={
+                    "return_request_id": str(request.id),
+                    "post_result_id": str(result.id),
+                    "buyer_id": str(request.buyer_id),
+                    "reason": request.reason,
+                    "action": payload.action,
+                    "operator": payload.operator,
+                    "credited_cents": credited_cents,
+                },
+            )
+            await s.flush()
+            return {
+                "return_request_id": str(request.id),
+                "lead_id": str(request.lead_id),
+                "buyer_id": str(request.buyer_id),
+                "status": request.status,
+                "credited_cents": credited_cents,
+                "wallet": _buyer_wallet_response(buyer),
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("return.review_failed", return_request_id=str(return_request_id), error=str(e))
+        raise HTTPException(
+            500, "return request review could not be recorded; retry or contact support"
+        ) from e
+
+
+@app.get("/v1/buyers/{buyer_id}/daily-report")
+async def buyer_daily_report(buyer_id: UUID) -> dict[str, Any]:
+    now = datetime.now(UTC)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    try:
+        async with get_session() as s:
+            buyer = await s.get(BuyerRow, buyer_id)
+            if buyer is None:
+                raise HTTPException(404, "buyer not found; verify the buyer id and try again")
+            delivered = await s.scalar(
+                select(func.count(PostResult.id)).where(
+                    PostResult.buyer_id == buyer_id,
+                    PostResult.delivered.is_(True),
+                    PostResult.created_at >= day_start,
+                )
+            )
+            gross_spend = await s.scalar(
+                select(func.coalesce(func.sum(PostResult.bid_cents), 0)).where(
+                    PostResult.buyer_id == buyer_id,
+                    PostResult.delivered.is_(True),
+                    PostResult.created_at >= day_start,
+                )
+            )
+            returned = await s.scalar(
+                select(func.count(PostResult.id)).where(
+                    PostResult.buyer_id == buyer_id,
+                    PostResult.delivered.is_(True),
+                    PostResult.returned.is_(True),
+                    PostResult.created_at >= day_start,
+                )
+            )
+            credits = await s.scalar(
+                select(func.coalesce(func.sum(BillingEvent.amount_cents), 0)).where(
+                    BillingEvent.buyer_id == buyer_id,
+                    BillingEvent.event_type == "lead.returned",
+                    BillingEvent.created_at >= day_start,
+                )
+            )
+            pending_returns = await s.scalar(
+                select(func.count(ReturnRequest.id)).where(
+                    ReturnRequest.buyer_id == buyer_id,
+                    ReturnRequest.status.in_(ACTIVE_RETURN_REQUEST_STATUSES),
+                )
+            )
+            recent_returns = (
+                (
+                    await s.execute(
+                        select(ReturnRequest)
+                        .where(ReturnRequest.buyer_id == buyer_id)
+                        .order_by(ReturnRequest.created_at.desc())
+                        .limit(10)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+            balance_cents = _decimal_to_cents(buyer.deposit_balance)
+            threshold_cents = _decimal_to_cents(buyer.low_balance_threshold)
+            refill_cents = _recommended_refill_cents(
+                balance_cents=balance_cents,
+                threshold_cents=threshold_cents,
+                monthly_budget_cents=_decimal_to_cents(buyer.monthly_budget),
+                delivered_today=int(delivered or 0),
+                gross_spend_today_cents=int(gross_spend or 0),
+            )
+            return {
+                "buyer": _buyer_wallet_response(buyer),
+                "window": {"start_at": day_start.isoformat(), "end_at": now.isoformat()},
+                "delivery": {
+                    "delivered_leads": int(delivered or 0),
+                    "gross_spend_cents": int(gross_spend or 0),
+                    "returned_leads": int(returned or 0),
+                    "approved_return_credits_cents": int(credits or 0),
+                    "pending_return_requests": int(pending_returns or 0),
+                    "daily_cap_remaining": max(buyer.daily_cap - int(delivered or 0), 0),
+                },
+                "wallet": {
+                    "low_balance_threshold_cents": threshold_cents,
+                    "below_threshold": balance_cents < threshold_cents,
+                    "recommended_refill_cents": refill_cents,
+                },
+                "recent_return_requests": [_return_request_response(row) for row in recent_returns],
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("buyer.daily_report_failed", buyer_id=str(buyer_id), error=str(e))
+        raise HTTPException(
+            500, "buyer daily report could not be loaded; retry after checking database health"
         ) from e
 
 
@@ -1222,57 +1511,145 @@ def _sum_agent_cost(payloads: list[dict[str, Any]]) -> float:
     return total
 
 
+def _recommended_refill_cents(
+    *,
+    balance_cents: int,
+    threshold_cents: int,
+    monthly_budget_cents: int,
+    delivered_today: int,
+    gross_spend_today_cents: int,
+) -> int:
+    if balance_cents >= threshold_cents:
+        return 0
+    average_bid_cents = gross_spend_today_cents // delivered_today if delivered_today else 0
+    three_lead_buffer_cents = average_bid_cents * 3
+    monthly_buffer_cents = monthly_budget_cents // 4
+    return max(threshold_cents - balance_cents, three_lead_buffer_cents, monthly_buffer_cents)
+
+
+def _return_request_response(request: ReturnRequest) -> dict[str, Any]:
+    return {
+        "return_request_id": str(request.id),
+        "post_result_id": str(request.post_result_id),
+        "lead_id": str(request.lead_id),
+        "buyer_id": str(request.buyer_id),
+        "reason": request.reason,
+        "status": request.status,
+        "requested_by": request.requested_by,
+        "reviewed_by": request.reviewed_by,
+        "created_at": request.created_at.isoformat() if request.created_at else None,
+        "reviewed_at": request.reviewed_at.isoformat() if request.reviewed_at else None,
+    }
+
+
 @app.get("/v1/admin/launch-readiness")
-async def launch_readiness() -> dict[str, Any]:
-    """Evaluate first paid-launch gates from docs/research/README.md."""
+async def launch_readiness(
+    market_state: str | None = Query(default=None, min_length=2, max_length=2),
+    market_zip: str | None = Query(default=None, min_length=3, max_length=10),
+    service: str | None = Query(default=None, min_length=1, max_length=64),
+    campaign_budget_cents: int = Query(default=100_000, ge=0),
+) -> dict[str, Any]:
+    """Evaluate local technical-readiness gates for a scoped paid-pilot launch."""
+    if market_state and market_zip:
+        raise HTTPException(400, "choose either market_state or market_zip, not both")
+
+    buyer_scope = [BuyerRow.status == BuyerStatus.ACTIVE.value, BuyerRow.deposit_balance > 0]
+    configured_scope = [
+        BuyerRow.status == BuyerStatus.ACTIVE.value,
+        BuyerRow.deposit_balance > 0,
+        func.jsonb_array_length(BuyerRow.target_zips) > 0,
+        func.jsonb_array_length(BuyerRow.services) > 0,
+        BuyerRow.daily_cap > 0,
+        BuyerRow.monthly_budget > 0,
+        BuyerRow.bid_per_lead_t1_t2 > 0,
+        BuyerRow.bid_per_lead_t3 > 0,
+    ]
+    lead_scope = []
+    if market_state:
+        lead_scope.append(LeadRow.state == market_state.upper())
+    if market_zip:
+        lead_scope.append(LeadRow.zip == market_zip)
+        buyer_scope.append(BuyerRow.target_zips.contains([market_zip]))
+        configured_scope.append(BuyerRow.target_zips.contains([market_zip]))
+    if service:
+        normalized_service = service.strip().lower()
+        lead_scope.append(LeadRow.requested_service == normalized_service)
+        buyer_scope.append(BuyerRow.services.contains([normalized_service]))
+        configured_scope.append(BuyerRow.services.contains([normalized_service]))
+
     try:
         async with get_session() as s:
             funded_buyers = await s.scalar(
-                select(func.count(BuyerRow.id)).where(
-                    BuyerRow.status == BuyerStatus.ACTIVE.value,
-                    BuyerRow.deposit_balance > 0,
-                )
+                select(func.count(BuyerRow.id)).where(and_(*buyer_scope))
             )
             configured_buyers = await s.scalar(
-                select(func.count(BuyerRow.id)).where(
-                    BuyerRow.status == BuyerStatus.ACTIVE.value,
-                    BuyerRow.deposit_balance > 0,
-                    func.jsonb_array_length(BuyerRow.target_zips) > 0,
-                    func.jsonb_array_length(BuyerRow.services) > 0,
-                    BuyerRow.daily_cap > 0,
-                    BuyerRow.monthly_budget > 0,
-                    BuyerRow.bid_per_lead_t1_t2 > 0,
-                    BuyerRow.bid_per_lead_t3 > 0,
-                )
+                select(func.count(BuyerRow.id)).where(and_(*configured_scope))
             )
             total_wallet_cents = await s.scalar(
                 select(func.coalesce(func.sum(BuyerRow.deposit_balance * 100), 0)).where(
-                    BuyerRow.status == BuyerStatus.ACTIVE.value
+                    and_(*buyer_scope)
                 )
             )
+            lead_ids_query = select(LeadRow.id)
+            if lead_scope:
+                lead_ids_query = lead_ids_query.where(and_(*lead_scope))
+            lead_ids_subq = lead_ids_query.subquery()
             delivered = await s.scalar(
-                select(func.count(PostResult.id)).where(PostResult.delivered.is_(True))
+                select(func.count(PostResult.id)).where(
+                    PostResult.delivered.is_(True),
+                    PostResult.lead_id.in_(select(lead_ids_subq.c.id)),
+                )
             )
             returned = await s.scalar(
-                select(func.count(PostResult.id)).where(PostResult.returned.is_(True))
+                select(func.count(PostResult.id)).where(
+                    PostResult.returned.is_(True),
+                    PostResult.lead_id.in_(select(lead_ids_subq.c.id)),
+                )
+            )
+            approved_return_requests = await s.scalar(
+                select(func.count(ReturnRequest.id)).where(
+                    ReturnRequest.status == "approved",
+                    ReturnRequest.lead_id.in_(select(lead_ids_subq.c.id)),
+                )
             )
             attributed_leads = await s.scalar(
                 select(func.count(LeadRow.id)).where(
                     LeadRow.campaign_source.is_not(None),
                     LeadRow.campaign_source != "",
+                    LeadRow.id.in_(select(lead_ids_subq.c.id)),
                 )
             )
 
-        checks = {
-            "three_funded_buyers_in_market": int(funded_buyers or 0) >= 3,
+        technical_checks = {
+            "three_funded_buyers_in_scope": int(funded_buyers or 0) >= 3,
             "buyers_have_services_zips_caps_and_prices": int(configured_buyers or 0) >= 3,
-            "wallet_balance_present_for_campaign_risk": int(total_wallet_cents or 0) >= 100_000,
+            "wallet_balance_covers_campaign_budget": int(total_wallet_cents or 0)
+            >= campaign_budget_cents,
             "ping_post_routed_test_lead": int(delivered or 0) > 0,
-            "invalid_lead_credit_flow_tested": int(returned or 0) > 0,
+            "return_review_credit_flow_tested": int(returned or 0) > 0
+            and int(approved_return_requests or 0) > 0,
             "campaign_source_attribution_visible": int(attributed_leads or 0) > 0,
         }
-        ready = all(checks.values())
+        commercial_approval = os.getenv("STORMLEAD_COMMERCIAL_LAUNCH_APPROVED") == "true"
+        checks = {
+            **technical_checks,
+            "commercial_launch_approval_present": commercial_approval,
+        }
+        technical_ready = all(technical_checks.values())
+        ready = technical_ready and commercial_approval
         return {
+            "scope": {
+                "market_state": market_state.upper() if market_state else None,
+                "market_zip": market_zip,
+                "service": service.strip().lower() if service else None,
+                "campaign_budget_cents": campaign_budget_cents,
+            },
+            "readiness_label": "commercial_paid_launch_ready"
+            if ready
+            else "technical_local_ready"
+            if technical_ready
+            else "not_ready",
+            "technical_local_ready": technical_ready,
             "ready_for_paid_launch": ready,
             "checks": checks,
             "metrics": {
@@ -1281,11 +1658,13 @@ async def launch_readiness() -> dict[str, Any]:
                 "active_wallet_total_cents": int(total_wallet_cents or 0),
                 "delivered_posts": int(delivered or 0),
                 "returned_posts": int(returned or 0),
+                "approved_return_requests": int(approved_return_requests or 0),
                 "attributed_leads": int(attributed_leads or 0),
             },
             "notes": [
-                "wallet_balance_present_for_campaign_risk uses a conservative $1,000 seed threshold",
-                "expand this endpoint with explicit landing/call-tracking test artifacts as those services ship",
+                "ready_for_paid_launch remains false unless STORMLEAD_COMMERCIAL_LAUNCH_APPROVED=true",
+                "market_state scopes lead evidence; market_zip additionally scopes buyer zip coverage",
+                "campaign_budget_cents defaults to a conservative $1,000 local validation threshold",
             ],
         }
     except Exception as e:
