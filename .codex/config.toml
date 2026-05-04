@@ -1,0 +1,29 @@
+# Project-scoped Codex configuration.
+# Codex loads this file only after the project is trusted.
+
+sandbox_mode = "workspace-write"
+approval_policy = "on-request"
+
+[mcp_servers.stormlead]
+command = "node"
+args = ["tools/mcp/stormlead-local-ops.mjs"]
+enabled = true
+required = false
+startup_timeout_sec = 15
+tool_timeout_sec = 600
+
+[mcp_servers.docker]
+command = "docker"
+args = ["mcp", "gateway", "run", "--profile", "stormlead_docker"]
+enabled = true
+required = false
+startup_timeout_sec = 15
+tool_timeout_sec = 60
+
+[mcp_servers.kubernetes]
+command = "docker"
+args = ["mcp", "gateway", "run", "--profile", "stormlead_kubernetes"]
+enabled = true
+required = false
+startup_timeout_sec = 15
+tool_timeout_sec = 60

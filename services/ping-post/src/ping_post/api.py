@@ -391,143 +391,215 @@ async def admin() -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>StormLead Admin</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 2rem; background: #0f172a; color: #e2e8f0; }
-    h1 { margin-bottom: 0.25rem; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin: 1.5rem 0; }
-    .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .8rem; }
-    .card, table, form, .panel { background: #111827; border: 1px solid #334155; border-radius: 12px; }
-    .card { padding: 1rem; }
-    .metric { font-size: 1.8rem; font-weight: 700; color: #38bdf8; }
-    form, .panel { padding: 1rem; margin: 1rem 0; }
-    label { display: grid; gap: .35rem; color: #bfdbfe; font-size: .9rem; }
-    input, select, textarea { background: #020617; border: 1px solid #475569; border-radius: 8px; color: #e2e8f0; padding: .65rem; }
-    textarea { min-height: 4rem; }
-    button { background: #0284c7; border: 0; border-radius: 10px; color: white; cursor: pointer; font-weight: 700; padding: .8rem 1rem; }
+    :root { color-scheme: dark; --bg: #020617; --panel: rgba(15, 23, 42, .88); --panel-2: rgba(17, 24, 39, .92); --border: #243449; --muted: #94a3b8; --text: #e5edf8; --accent: #38bdf8; --accent-2: #22c55e; --warn: #f59e0b; --danger: #fb7185; }
+    * { box-sizing: border-box; }
+    body { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; min-height: 100vh; background: radial-gradient(circle at top left, rgba(14, 165, 233, .24), transparent 34rem), linear-gradient(145deg, #020617 0%, #0f172a 48%, #111827 100%); color: var(--text); }
+    h1, h2 { letter-spacing: -.03em; margin: 0; }
+    h1 { font-size: clamp(2rem, 5vw, 4.4rem); line-height: .95; max-width: 880px; }
+    h2 { font-size: 1.15rem; }
+    p { line-height: 1.55; }
+    .admin-shell { width: min(1480px, calc(100% - 2rem)); margin: 0 auto; padding: 1.25rem 0 3rem; }
+    .hero { border: 1px solid rgba(56, 189, 248, .22); border-radius: 28px; padding: clamp(1.25rem, 4vw, 2.5rem); background: linear-gradient(135deg, rgba(12, 74, 110, .9), rgba(15, 23, 42, .72)); box-shadow: 0 22px 70px rgba(2, 6, 23, .45); }
+    .hero-top, .section-header, .toolbar { align-items: center; display: flex; flex-wrap: wrap; gap: .75rem; justify-content: space-between; }
+    .eyebrow { color: #7dd3fc; font-size: .78rem; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; }
+    .subtitle { color: #cbd5e1; font-size: 1.05rem; max-width: 760px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 1rem; margin: 1rem 0 1.5rem; }
+    .two-column { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(320px, .9fr); gap: 1rem; }
+    .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .85rem; }
+    .card, table, form, .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 18px; }
+    .card { min-height: 112px; overflow: hidden; padding: 1rem; position: relative; }
+    .card::after { background: linear-gradient(90deg, var(--accent), transparent); bottom: 0; content: ""; height: 3px; left: 0; position: absolute; right: 0; }
+    .metric { font-size: clamp(1.65rem, 4vw, 2.25rem); font-weight: 850; color: #e0f2fe; margin-top: .35rem; }
+    form, .panel { margin: 1rem 0; padding: 1rem; }
+    label { display: grid; gap: .4rem; color: #bfdbfe; font-size: .86rem; font-weight: 700; }
+    input, select, textarea { background: #030712; border: 1px solid #475569; border-radius: 11px; color: var(--text); min-height: 2.7rem; padding: .72rem .8rem; width: 100%; }
+    input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(56, 189, 248, .16); outline: none; }
+    textarea { min-height: 4.75rem; resize: vertical; }
+    button { background: linear-gradient(135deg, #0284c7, #0369a1); border: 0; border-radius: 999px; color: white; cursor: pointer; font-weight: 800; min-height: 2.75rem; padding: .75rem 1.05rem; }
     button.secondary { background: #334155; }
-    button:hover { filter: brightness(1.08); }
+    button.ghost { background: rgba(15, 23, 42, .65); border: 1px solid #475569; }
+    button:hover { filter: brightness(1.08); transform: translateY(-1px); }
+    button:disabled { cursor: wait; filter: grayscale(.4); opacity: .7; transform: none; }
     .actions { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1rem; }
-    .status { border-left: 4px solid #38bdf8; margin: 1rem 0; padding: .75rem 1rem; white-space: pre-wrap; }
-    .muted { color: #94a3b8; }
-    .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .85rem; }
+    .status { background: rgba(2, 6, 23, .62); border: 1px solid #334155; border-left: 5px solid var(--accent); border-radius: 14px; margin: 1rem 0; padding: .85rem 1rem; white-space: pre-wrap; }
+    .status.ok { border-left-color: var(--accent-2); }
+    .status.error { border-left-color: var(--danger); }
+    .muted { color: var(--muted); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .84rem; }
+    .pill { align-items: center; background: rgba(15, 23, 42, .76); border: 1px solid #334155; border-radius: 999px; color: #dbeafe; display: inline-flex; font-size: .78rem; font-weight: 800; gap: .35rem; padding: .35rem .65rem; }
+    .pill.ok { border-color: rgba(34, 197, 94, .55); color: #bbf7d0; }
+    .pill.warn { border-color: rgba(245, 158, 11, .6); color: #fde68a; }
+    .pill.danger { border-color: rgba(251, 113, 133, .55); color: #fecdd3; }
+    .readiness-grid { display: grid; gap: .75rem; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); margin-top: .9rem; }
+    .check-list { display: grid; gap: .45rem; margin-top: .9rem; }
+    .check-row { align-items: center; display: flex; gap: .5rem; justify-content: space-between; }
     .timeline { display: grid; gap: .75rem; margin-top: 1rem; }
-    .timeline-event { background: #020617; border: 1px solid #334155; border-left: 4px solid #38bdf8; border-radius: 10px; padding: .85rem; }
+    .timeline-event { background: #020617; border: 1px solid #334155; border-left: 4px solid var(--accent); border-radius: 14px; padding: .9rem; }
     .timeline-event.review { border-left-color: #facc15; }
-    .timeline-event.attention { border-left-color: #fb7185; }
-    .payload { background: #0f172a; border-radius: 8px; color: #cbd5e1; overflow: auto; padding: .75rem; }
-    table { width: 100%; border-collapse: collapse; overflow: hidden; }
-    th, td { padding: 0.75rem; border-bottom: 1px solid #334155; text-align: left; }
-    th { color: #93c5fd; }
-    tr[data-lead-id] { cursor: pointer; }
-    tr[data-lead-id]:hover { background: #1e293b; }
+    .timeline-event.attention { border-left-color: var(--danger); }
+    .payload { background: #0f172a; border-radius: 10px; color: #cbd5e1; overflow: auto; padding: .75rem; }
+    .table-wrap { border: 1px solid var(--border); border-radius: 18px; overflow-x: auto; }
+    table { border: 0; border-collapse: collapse; min-width: 780px; width: 100%; }
+    th, td { padding: 0.78rem; border-bottom: 1px solid #334155; text-align: left; vertical-align: top; }
+    th { background: rgba(15, 23, 42, .96); color: #93c5fd; position: sticky; top: 0; }
+    tr[data-lead-id], tr[data-buyer-id] { cursor: pointer; }
+    tr[data-lead-id]:hover, tr[data-buyer-id]:hover { background: #1e293b; }
+    @media (max-width: 900px) { .two-column { grid-template-columns: 1fr; } .admin-shell { width: min(100% - 1rem, 1480px); } .hero { border-radius: 20px; } }
   </style>
 </head>
 <body>
-  <h1>StormLead Admin</h1>
-  <p>Paid-pilot control surface</p>
-  <section class="grid" id="kpis"></section>
-  <section class="panel" aria-label="cowork workflow controls">
-    <h2>Cowork Workflow Controls</h2>
-    <p>Create a real buyer, activate/fund it, then verify dashboard KPIs and roster state.</p>
-    <div class="status" id="workflow-status">Ready. No mock data is used.</div>
-  </section>
+  <main class="admin-shell">
+    <section class="hero">
+      <div class="hero-top">
+        <span class="eyebrow">Local simulation operations</span>
+        <div class="toolbar">
+          <span class="pill ok">Synthetic data only</span>
+          <span class="pill danger">Commercial launch locked</span>
+          <button type="button" class="ghost" onclick="load()">Refresh Dashboard</button>
+        </div>
+      </div>
+      <h1>StormLead Admin</h1>
+      <p class="subtitle">Paid-pilot control surface for proving the local lead workflow, buyer wallet controls, returns, and audit timeline without contacting real homeowners or buyers.</p>
+    </section>
 
-  <h2>Agentic Workflow KPIs</h2>
-  <section class="grid" id="workflow-kpis"></section>
+    <section class="grid" id="kpis" aria-label="business kpis"></section>
 
-  <section class="panel" aria-label="workflow timeline">
-    <h2>Lead Workflow Timeline</h2>
-    <p class="muted">Inspect append-only state transitions, agent decisions, review actions, and redacted payload summaries from real database audit rows.</p>
-    <form id="timeline-form" aria-label="load lead timeline form">
+    <section class="panel" aria-label="launch readiness">
+      <div class="section-header">
+        <div>
+          <h2>Launch Readiness</h2>
+          <p class="muted">Separates local simulation readiness from technical paid-pilot gates and commercial approval.</p>
+        </div>
+        <span class="pill" id="readiness-label">loading</span>
+      </div>
+      <div id="readiness"></div>
+    </section>
+
+    <section class="panel" aria-label="cowork workflow controls">
+      <div class="section-header">
+        <div>
+          <h2>Cowork Workflow Controls</h2>
+          <p>Create a real buyer, activate/fund it, then verify dashboard KPIs and roster state.</p>
+        </div>
+      </div>
+      <div class="status" id="workflow-status">Ready. No mock data is used.</div>
+    </section>
+
+    <div class="two-column">
+      <section>
+        <div class="section-header"><h2>Agentic Workflow KPIs</h2></div>
+        <section class="grid" id="workflow-kpis"></section>
+
+        <section class="panel" aria-label="workflow timeline">
+          <h2>Lead Workflow Timeline</h2>
+          <p class="muted">Inspect append-only state transitions, agent decisions, review actions, and redacted payload summaries from real database audit rows.</p>
+          <form id="timeline-form" aria-label="load lead timeline form">
+            <div class="form-grid">
+              <label>Lead ID <input name="lead_id" id="timeline-lead-id" placeholder="Paste a lead UUID" /></label>
+              <label>Review Notes <input name="notes" id="review-notes" value="Reviewed in StormLead admin timeline." /></label>
+            </div>
+            <div class="actions">
+              <button type="submit">Load Timeline</button>
+              <button type="button" class="secondary" id="review-hold">Hold For Review</button>
+              <button type="button" class="secondary" id="review-approve">Approve / Clear Hold</button>
+            </div>
+          </form>
+          <div id="timeline-summary" class="status">Select a lead from Recent Workflow Runs or paste a lead UUID.</div>
+          <div class="timeline" id="timeline"></div>
+        </section>
+      </section>
+
+      <section>
+        <section class="panel" aria-label="recent workflow runs">
+          <h2>Recent Workflow Runs</h2>
+          <p class="muted">Rows are grouped from lead_state_transitions and can be opened in the timeline.</p>
+          <div class="table-wrap">
+            <table aria-label="workflow runs">
+              <thead><tr><th>Updated</th><th>State</th><th>Status</th><th>Events</th><th>Latest Event</th><th>Lead ID</th></tr></thead>
+              <tbody id="workflow-runs"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+    </div>
+
+    <form id="buyer-form" aria-label="create buyer form">
+      <div class="section-header"><h2>Create Buyer</h2><span class="pill">Step 1</span></div>
       <div class="form-grid">
-        <label>Lead ID <input name="lead_id" id="timeline-lead-id" placeholder="Paste a lead UUID" /></label>
-        <label>Review Notes <input name="notes" id="review-notes" value="Reviewed in StormLead admin timeline." /></label>
+        <label>Name <input name="name" value="Cowork Buyer" required /></label>
+        <label>Company <input name="company" value="Cowork Tree Pros" required /></label>
+        <label>Email <input name="contact_email" value="ops@cowork-tree.example" required /></label>
+        <label>Phone <input name="contact_phone_e164" value="+15125550199" required /></label>
+        <label>Webhook URL <input name="webhook_url" value="http://host.docker.internal:9999/cowork-buyer" required /></label>
+        <label>Webhook Secret <input name="webhook_secret" value="cowork-secret-minimum-16" required /></label>
+        <label>Tier 1/2 Bid <input name="bid_per_lead_t1_t2" value="75.00" required /></label>
+        <label>Tier 3 Bid <input name="bid_per_lead_t3" value="175.00" required /></label>
+        <label>Call Bid <input name="bid_per_call" value="100.00" required /></label>
+        <label>Filter <input name="filter_expression" value="lead.state == 'TX'" required /></label>
+        <label>Daily Cap <input name="daily_cap" value="25" required /></label>
+        <label>Monthly Budget <input name="monthly_budget" value="5000.00" required /></label>
+        <label>Initial Deposit <input name="deposit_balance" value="0.00" required /></label>
+        <label>Services <input name="services" value="tree_removal" required /></label>
+        <label>Target Zips <input name="target_zips" value="78701,78702" required /></label>
+        <label>Exclusive Zips <input name="exclusive_zips" value="" /></label>
+        <label>Low Balance Threshold <input name="low_balance_threshold" value="150.00" required /></label>
+        <label>Notes <textarea name="notes">Created from the real StormLead admin UI.</textarea></label>
       </div>
       <div class="actions">
-        <button type="submit">Load Timeline</button>
-        <button type="button" class="secondary" id="review-hold">Hold For Review</button>
-        <button type="button" class="secondary" id="review-approve">Approve / Clear Hold</button>
+        <button type="submit">Create Real Buyer</button>
       </div>
     </form>
-    <div id="timeline-summary" class="status">Select a lead from Recent Workflow Runs or paste a lead UUID.</div>
-    <div class="timeline" id="timeline"></div>
-  </section>
 
-  <section class="panel" aria-label="recent workflow runs">
-    <h2>Recent Workflow Runs</h2>
-    <p class="muted">Rows are grouped from lead_state_transitions and can be opened in the timeline.</p>
-    <table aria-label="workflow runs">
-      <thead><tr><th>Updated</th><th>State</th><th>Status</th><th>Events</th><th>Latest Event</th><th>Lead ID</th></tr></thead>
-      <tbody id="workflow-runs"></tbody>
-    </table>
-  </section>
+    <div class="two-column">
+      <form id="buyer-update-form" aria-label="update buyer form">
+        <div class="section-header"><h2>Activate / Fund Buyer</h2><span class="pill">Step 2</span></div>
+        <div class="form-grid">
+          <label>Buyer ID <input name="buyer_id" id="selected-buyer-id" required /></label>
+          <label>Status
+            <select name="status"><option value="active">active</option><option value="paused">paused</option><option value="pending_verification">pending_verification</option></select>
+          </label>
+          <label>Sales Stage
+            <select name="sales_stage"><option value="funded">funded</option><option value="prospect">prospect</option><option value="contacted">contacted</option><option value="agreement_sent">agreement_sent</option></select>
+          </label>
+          <label>Services <input name="services" value="tree_removal" /></label>
+          <label>Target Zips <input name="target_zips" value="78701,78702" /></label>
+        </div>
+        <div class="actions">
+          <button type="submit">Update Real Buyer</button>
+        </div>
+      </form>
 
-  <form id="buyer-form" aria-label="create buyer form">
-    <h2>Create Buyer</h2>
-    <div class="form-grid">
-      <label>Name <input name="name" value="Cowork Buyer" required /></label>
-      <label>Company <input name="company" value="Cowork Tree Pros" required /></label>
-      <label>Email <input name="contact_email" value="ops@cowork-tree.example" required /></label>
-      <label>Phone <input name="contact_phone_e164" value="+15125550199" required /></label>
-      <label>Webhook URL <input name="webhook_url" value="http://host.docker.internal:9999/cowork-buyer" required /></label>
-      <label>Webhook Secret <input name="webhook_secret" value="cowork-secret-minimum-16" required /></label>
-      <label>Tier 1/2 Bid <input name="bid_per_lead_t1_t2" value="75.00" required /></label>
-      <label>Tier 3 Bid <input name="bid_per_lead_t3" value="175.00" required /></label>
-      <label>Call Bid <input name="bid_per_call" value="100.00" required /></label>
-      <label>Filter <input name="filter_expression" value="lead.state == 'TX'" required /></label>
-      <label>Daily Cap <input name="daily_cap" value="25" required /></label>
-      <label>Monthly Budget <input name="monthly_budget" value="5000.00" required /></label>
-      <label>Initial Deposit <input name="deposit_balance" value="0.00" required /></label>
-      <label>Services <input name="services" value="tree_removal" required /></label>
-      <label>Target Zips <input name="target_zips" value="78701,78702" required /></label>
-      <label>Exclusive Zips <input name="exclusive_zips" value="" /></label>
-      <label>Low Balance Threshold <input name="low_balance_threshold" value="150.00" required /></label>
-      <label>Notes <textarea name="notes">Created from the real StormLead admin UI.</textarea></label>
+      <form id="deposit-form" aria-label="deposit form">
+        <div class="section-header"><h2>Add Deposit</h2><span class="pill">Step 3</span></div>
+        <div class="form-grid">
+          <label>Buyer ID <input name="buyer_id" id="deposit-buyer-id" required /></label>
+          <label>Amount Cents <input name="amount_cents" value="77700" required /></label>
+          <label>Reference <input name="external_reference" value="playwright-cowork-real-ui" /></label>
+        </div>
+        <div class="actions">
+          <button type="submit">Add Real Deposit</button>
+          <button type="button" class="secondary" onclick="load()">Refresh Dashboard</button>
+        </div>
+      </form>
     </div>
-    <div class="actions">
-      <button type="submit">Create Real Buyer</button>
-    </div>
-  </form>
 
-  <form id="buyer-update-form" aria-label="update buyer form">
-    <h2>Activate / Fund Buyer</h2>
-    <div class="form-grid">
-      <label>Buyer ID <input name="buyer_id" id="selected-buyer-id" required /></label>
-      <label>Status
-        <select name="status"><option value="active">active</option><option value="paused">paused</option><option value="pending_verification">pending_verification</option></select>
-      </label>
-      <label>Sales Stage
-        <select name="sales_stage"><option value="funded">funded</option><option value="prospect">prospect</option><option value="contacted">contacted</option><option value="agreement_sent">agreement_sent</option></select>
-      </label>
-      <label>Services <input name="services" value="tree_removal" /></label>
-      <label>Target Zips <input name="target_zips" value="78701,78702" /></label>
-    </div>
-    <div class="actions">
-      <button type="submit">Update Real Buyer</button>
-    </div>
-  </form>
-
-  <form id="deposit-form" aria-label="deposit form">
-    <h2>Add Deposit</h2>
-    <div class="form-grid">
-      <label>Buyer ID <input name="buyer_id" id="deposit-buyer-id" required /></label>
-      <label>Amount Cents <input name="amount_cents" value="77700" required /></label>
-      <label>Reference <input name="external_reference" value="playwright-cowork-real-ui" /></label>
-    </div>
-    <div class="actions">
-      <button type="submit">Add Real Deposit</button>
-      <button type="button" class="secondary" onclick="load()">Refresh Dashboard</button>
-    </div>
-  </form>
-
-  <h2>Buyers</h2>
-  <table aria-label="buyers">
-    <thead><tr><th>Company</th><th>Status</th><th>Stage</th><th>Wallet</th><th>Services</th><th>Zips</th><th>Low Balance</th><th>ID</th></tr></thead>
-    <tbody id="buyers"></tbody>
-  </table>
+    <section class="panel" aria-label="buyer roster">
+      <div class="section-header"><h2>Buyers</h2><span class="pill" id="buyer-count">loading</span></div>
+      <div class="table-wrap">
+        <table aria-label="buyers">
+          <thead><tr><th>Company</th><th>Status</th><th>Stage</th><th>Wallet</th><th>Services</th><th>Zips</th><th>Low Balance</th><th>ID</th></tr></thead>
+          <tbody id="buyers"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
   <script>
     const money = cents => `$${(cents / 100).toFixed(2)}`;
     const statusBox = document.querySelector('#workflow-status');
-    const setStatus = msg => { statusBox.textContent = msg; };
+    const setStatus = (msg, kind = '') => {
+      statusBox.textContent = msg;
+      statusBox.className = ['status', kind].filter(Boolean).join(' ');
+    };
     const htmlEscapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
     const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, ch => htmlEscapeMap[ch]);
     const list = value => value.split(',').map(v => v.trim()).filter(Boolean);
@@ -552,6 +624,29 @@ async def admin() -> str:
       if (metric.unit === 'ratio') return `${metric.numerator}/${metric.denominator}`;
       return metric.unit || '';
     };
+
+    const titleize = value => String(value || '').replaceAll('_', ' ');
+    const readinessClass = data => data.commercial_paid_launch_ready ? 'ok' : data.local_simulation_ready ? 'warn' : 'danger';
+
+    function renderReadiness(data) {
+      const label = document.querySelector('#readiness-label');
+      label.textContent = titleize(data.readiness_label);
+      label.className = `pill ${readinessClass(data)}`;
+      const metrics = data.metrics || {};
+      const checks = Object.entries(data.checks || {}).map(([name, passed]) => `
+        <div class="check-row">
+          <span>${escapeHtml(titleize(name))}</span>
+          <span class="pill ${passed ? 'ok' : 'danger'}">${passed ? 'pass' : 'blocked'}</span>
+        </div>`).join('');
+      document.querySelector('#readiness').innerHTML = `
+        <div class="readiness-grid">
+          <div class="card"><div>Funded Buyers</div><div class="metric">${escapeHtml(metrics.funded_buyers ?? 0)}</div><div class="muted">Need 3 for technical local readiness</div></div>
+          <div class="card"><div>Wallet Coverage</div><div class="metric">${money(metrics.active_wallet_total_cents || 0)}</div><div class="muted">Against ${money((data.scope || {}).campaign_budget_cents || 0)} test budget</div></div>
+          <div class="card"><div>Routed Posts</div><div class="metric">${escapeHtml(metrics.delivered_posts ?? 0)}</div><div class="muted">Synthetic ping/post evidence</div></div>
+          <div class="card"><div>Approved Returns</div><div class="metric">${escapeHtml(metrics.approved_return_requests ?? 0)}</div><div class="muted">Credit review evidence</div></div>
+        </div>
+        <div class="check-list">${checks || '<div class="muted">No readiness checks returned.</div>'}</div>`;
+    }
 
     function renderWorkflowKpis(data) {
       const metrics = data.metrics || [];
@@ -614,12 +709,37 @@ async def admin() -> str:
       setStatus(`Timeline loaded from lead_state_transitions. Events: ${(data.events || []).length}`);
     }
 
+    function renderBuyers(buyers) {
+      const rows = buyers.buyers || [];
+      document.querySelector('#buyer-count').textContent = `${rows.length} buyers`;
+      document.querySelector('#buyers').innerHTML = rows.length ? rows.map(b => `
+        <tr data-buyer-id="${escapeHtml(b.buyer_id)}">
+          <td>${escapeHtml(b.company)}</td><td>${escapeHtml(b.status)}</td><td>${escapeHtml(b.sales_stage)}</td>
+          <td>${money(b.deposit_balance_cents)}</td><td>${escapeHtml((b.services || []).join(', '))}</td>
+          <td>${escapeHtml((b.target_zips || []).join(', '))}</td><td>${money(b.low_balance_threshold_cents)}</td><td class="mono">${escapeHtml(b.buyer_id)}</td>
+        </tr>`).join('') : '<tr><td colspan="8" class="muted">No buyers have been created yet.</td></tr>';
+      document.querySelectorAll('tr[data-buyer-id]').forEach(row => {
+        row.addEventListener('click', () => {
+          const buyerId = row.getAttribute('data-buyer-id');
+          document.querySelector('#selected-buyer-id').value = buyerId;
+          document.querySelector('#deposit-buyer-id').value = buyerId;
+          setStatus(`Selected buyer ${buyerId} for update/deposit actions.`);
+        });
+      });
+    }
+
+    function updateBuyerWallet(buyerId, cents) {
+      const row = Array.from(document.querySelectorAll('tr[data-buyer-id]')).find(candidate => candidate.getAttribute('data-buyer-id') === buyerId);
+      if (row) row.children[3].textContent = money(cents);
+    }
+
     async function load() {
-      const [summary, buyers, workflowKpis, workflowRuns] = await Promise.all([
+      const [summary, buyers, workflowKpis, workflowRuns, readiness] = await Promise.all([
         api('/v1/admin/kpis'),
         api('/v1/buyers'),
         api('/v1/admin/workflow-kpis'),
         api('/v1/admin/workflow-runs/recent'),
+        api('/v1/admin/launch-readiness'),
       ]);
       document.querySelector('#kpis').innerHTML = [
         ['Prepaid cash', money(summary.prepaid_cash_cents)],
@@ -628,15 +748,11 @@ async def admin() -> str:
         ['Returned leads', summary.returned_leads],
         ['Lead revenue', money(summary.lead_revenue_cents)],
       ].map(([label, value]) => `<div class="card"><div>${label}</div><div class="metric">${value}</div></div>`).join('');
-      document.querySelector('#buyers').innerHTML = buyers.buyers.map(b => `
-        <tr data-buyer-id="${b.buyer_id}">
-          <td>${b.company}</td><td>${b.status}</td><td>${b.sales_stage}</td>
-          <td>${money(b.deposit_balance_cents)}</td><td>${b.services.join(', ')}</td>
-          <td>${b.target_zips.join(', ')}</td><td>${money(b.low_balance_threshold_cents)}</td><td>${b.buyer_id}</td>
-        </tr>`).join('');
+      renderBuyers(buyers);
       renderWorkflowKpis(workflowKpis);
       renderWorkflowRuns(workflowRuns.runs || []);
-      setStatus(`Dashboard loaded from real APIs. Buyers: ${buyers.buyers.length}`);
+      renderReadiness(readiness);
+      setStatus(`Dashboard loaded from real APIs. Buyers: ${(buyers.buyers || []).length}`);
     }
 
     document.querySelector('#buyer-form').addEventListener('submit', async event => {
@@ -655,7 +771,7 @@ async def admin() -> str:
       document.querySelector('#selected-buyer-id').value = buyer.buyer_id;
       document.querySelector('#deposit-buyer-id').value = buyer.buyer_id;
       await load();
-      setStatus(`Created real buyer ${buyer.company} (${buyer.buyer_id}).`);
+      setStatus(`Created real buyer ${buyer.company} (${buyer.buyer_id}).`, 'ok');
     });
 
     document.querySelector('#buyer-update-form').addEventListener('submit', async event => {
@@ -672,7 +788,7 @@ async def admin() -> str:
         }),
       });
       await load();
-      setStatus(`Updated real buyer ${buyer.company}: ${buyer.status}/${buyer.sales_stage}.`);
+      setStatus(`Updated real buyer ${buyer.company}: ${buyer.status}/${buyer.sales_stage}.`, 'ok');
     });
 
     document.querySelector('#deposit-form').addEventListener('submit', async event => {
@@ -686,8 +802,10 @@ async def admin() -> str:
           external_reference: raw.external_reference,
         }),
       });
+      updateBuyerWallet(raw.buyer_id, wallet.deposit_balance_cents);
+      setStatus(`Deposit recorded. New wallet: ${money(wallet.deposit_balance_cents)}.`, 'ok');
       await load();
-      setStatus(`Deposit recorded. New wallet: ${money(wallet.deposit_balance_cents)}.`);
+      setStatus(`Deposit recorded. New wallet: ${money(wallet.deposit_balance_cents)}.`, 'ok');
     });
 
     document.querySelector('#timeline-form').addEventListener('submit', async event => {
@@ -717,7 +835,8 @@ async def admin() -> str:
     document.querySelector('#review-approve').addEventListener('click', () => reviewLead('approve'));
 
     load().catch(err => {
-      document.body.insertAdjacentHTML('beforeend', `<pre role="alert">${err}</pre>`);
+      setStatus(`Dashboard load failed: ${err}`, 'error');
+      document.body.insertAdjacentHTML('beforeend', `<pre role="alert">${escapeHtml(err)}</pre>`);
     });
   </script>
 </body>

@@ -64,6 +64,22 @@ just test
 just smoke      # e2e workflow: ingest -> auction -> buyer delivery
 ```
 
+If `just` is not installed, use the npm aliases for repo validation:
+
+```bash
+npm run validate:compose
+npm run validate:codex
+npm run codex:version
+npm run codex
+npm run codex:review
+npm run mcp:stormlead:smoke
+npm run lint:python
+npm run typecheck:python
+npm run test:python
+npm run smoke
+npm run simulate:v1
+```
+
 ## production (hetzner)
 
 prod compose + deploy script are placeholders (`infra/compose/prod/`, `.github/workflows/`). add them when the first non-dev environment exists.
@@ -76,6 +92,10 @@ prod compose + deploy script are placeholders (`infra/compose/prod/`, `.github/w
 - `docs/research/v1-paid-pilot-runbook.md` — local technical V1 controls, scoped readiness, and evidence commands.
 - `testing/README.md` — visible Playwright/Cowork evidence rules, headed automation commands, artifact hygiene, and official Playwright references.
 - `docs/research/2026-05-stack-improvements.md` — active technical risk register and implementation corrections.
+- `tools/TOOLS.md` — local-first tool routing, MCP safety rules, and validation commands.
+- `tools/mcp/README.md` — custom StormLead Local Ops MCP tools and safety model.
+- `.codex/README.md` — Codex CLI scripts and project-scoped MCP setup using the repo's Docker MCP profiles.
+- `AGENTS.md` — repo-local operating guide for coding agents.
 - `docs/research/2026-05-forkable-stack.md` and `docs/research/2026-05-stack-audit.md` — preserved source research; use the newer docs when they conflict.
 
 ## known traps (read these)

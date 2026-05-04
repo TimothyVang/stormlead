@@ -3,6 +3,24 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "validate:compose": "docker compose --env-file .env.example -f infra/compose/dev/docker-compose.yml config --quiet",
+    "validate:codex": "uv run python -c \"import pathlib, tomllib; tomllib.loads(pathlib.Path('.codex/config.toml').read_text()); print('codex config valid TOML')\" && codex --version && npm run mcp:stormlead:check",
+    "codex": "codex --cd . --sandbox workspace-write --ask-for-approval on-request",
+    "codex:readonly": "codex --cd . --sandbox read-only --ask-for-approval on-request",
+    "codex:exec": "codex exec --cd . --sandbox workspace-write -c approval_policy=never",
+    "codex:login": "codex login",
+    "codex:mcp:list": "codex mcp list",
+    "codex:review": "codex review --uncommitted",
+    "codex:version": "codex --version",
+    "mcp:stormlead": "node tools/mcp/stormlead-local-ops.mjs",
+    "mcp:stormlead:check": "node --check tools/mcp/stormlead-local-ops.mjs && node --check tools/mcp/smoke-stormlead-local-ops.mjs",
+    "mcp:stormlead:smoke": "node tools/mcp/smoke-stormlead-local-ops.mjs",
+    "lint:python": "uv run ruff check services libs scripts/smoke_e2e.py scripts/replay_lead.py scripts/simulate_v1_leads.py",
+    "typecheck:python": "uv run mypy services libs",
+    "test:python": "uv run pytest -q services libs",
+    "smoke": "uv run python scripts/smoke_e2e.py",
+    "simulate:v1": "uv run python scripts/simulate_v1_leads.py",
+    "validate:local": "npm run validate:compose && npm run lint:python && npm run typecheck:python && npm run test:python",
     "test:playwright": "playwright test --headed --workers=1",
     "test:playwright:headed": "playwright test --headed --workers=1",
     "test:playwright:ui": "playwright test --ui",
@@ -16,7 +34,10 @@
     "evidence:clean:apply": "node scripts/clean_testing_artifacts.mjs --apply"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@openai/codex": "^0.128.0",
     "@playwright/test": "1.59.1",
-    "cross-env": "7.0.3"
+    "cross-env": "7.0.3",
+    "zod": "^4.4.3"
   }
 }
