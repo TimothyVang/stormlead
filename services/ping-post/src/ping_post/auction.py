@@ -15,6 +15,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import os
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -56,6 +57,27 @@ class PingResponse:
     error: str | None
 
 
+
+
+def _routing_thresholds() -> tuple[float, float]:
+    return (float(os.getenv("LEAD_ROUTE_AB_MIN_SCORE", "0.8")), float(os.getenv("LEAD_HOLD_MIN_SCORE", "0.6")))
+
+
+def _lead_can_enter_auction(lead: Lead) -> tuple[bool, str]:
+    if lead.blocked_for_fraud:
+        return False, "blocked_for_fraud"
+    if lead.hold_for_review:
+        return False, "held_for_review"
+    score = lead.score if lead.score is not None else (lead.qualification_score or 0.0)
+    ab_min, hold_min = _routing_thresholds()
+    if score >= ab_min:
+        return True, "route_ab"
+    if score < hold_min:
+        return False, "score_below_hold_threshold"
+    lead_class = lead.lead_class.value if lead.lead_class else None
+    if lead_class in {"c", "d"}:
+        return False, "class_requires_review"
+    return True, "route_b"
 def _ping_payload(lead: Lead) -> dict:
     """sanitized payload that goes to all pinged buyers.
 
@@ -491,6 +513,20 @@ async def _post_to_winner(
 async def run_auction(lead: Lead) -> PingPostResult:
     """run a full ping-post cycle for one lead. returns the result."""
     started = time.perf_counter()
+    allowed, reason = _lead_can_enter_auction(lead)
+    if not allowed:
+        log.info("lead.not_eligible_for_auction", lead_id=str(lead.id), reason=reason)
+        return PingPostResult(
+            event_id=uuid4(),
+            occurred_at=datetime.now(UTC),
+            lead_id=lead.id,
+            pinged_buyer_ids=[],
+            winning_buyer_id=None,
+            winning_bid_cents=None,
+            duration_ms=int((time.perf_counter() - started) * 1000),
+            damage_tier=lead.damage_tier,
+        )
+
     buyers = await _select_eligible_buyers(lead)
     if not buyers:
         return PingPostResult(

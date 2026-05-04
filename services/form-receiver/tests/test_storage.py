@@ -150,3 +150,31 @@ def test_extract_invalid_email_dropped_silently() -> None:
     )
     out = extract_consent(e)
     assert out.email is None  # phone is the primary identifier
+
+
+from datetime import UTC, datetime
+
+from stormlead_core.dedup import build_duplicate_window, initial_quality_score, normalize_address, normalize_phone
+
+
+def test_duplicate_window_normalizes_phone_and_address() -> None:
+    window = build_duplicate_window(
+        phone="(512) 555-0100",
+        address_line1="100 Main St.",
+        city="Austin",
+        state="tx",
+        zip_code="78701",
+        storm_id=None,
+        submitted_at=datetime.now(UTC),
+        lookback_hours=48,
+    )
+    assert window.phone_norm == "5125550100"
+    assert "100 MAIN ST" in window.address_norm
+
+
+def test_initial_quality_score_flags_duplicate_and_low_quality() -> None:
+    q = initial_quality_score(dwell_ms=500, has_email=False, duplicate=True)
+    assert q.blocked is True
+    assert q.hold is True
+    assert q.score < 0.6
+    assert "duplicate_window_match" in q.reason

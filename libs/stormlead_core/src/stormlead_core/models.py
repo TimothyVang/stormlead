@@ -161,6 +161,10 @@ class Lead(BaseModel):
     first_touch_source: str | None = None
     last_touch_source: str | None = None
     rejection_reason: str | None = None
+    score: float | None = None
+    score_reason: str | None = None
+    hold_for_review: bool = False
+    blocked_for_fraud: bool = False
 
     created_at: datetime = Field(default_factory=lambda: datetime.utcnow())
     updated_at: datetime = Field(default_factory=lambda: datetime.utcnow())
