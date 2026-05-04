@@ -18,7 +18,7 @@ from uuid import UUID, uuid4
 from hatchet_sdk import Hatchet
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from stormlead_core import get_logger
+from stormlead_core import LeadLifecycle, get_logger
 from stormlead_db import ConsentAudit, LeadRow, get_session
 
 from form_receiver.schemas import ExtractedConsent
@@ -40,6 +40,9 @@ async def upsert_lead(extracted: ExtractedConsent, *, ip: str) -> UUID:
                 id=new_id,
                 source="landing_form",
                 status="new",
+                lifecycle_state=LeadLifecycle.CAPTURED.value,
+                lifecycle_transitioned_at=now,
+                captured_at=now,
                 name=extracted.name,
                 phone_e164=extracted.phone_e164,
                 email=extracted.email,
@@ -108,9 +111,9 @@ async def record_audit(
     return result is not None
 
 
-async def emit_lead_captured(hatchet: Hatchet, lead_id: UUID) -> None:
+async def emit_lead_captured(hatchet: Hatchet, lead_id: UUID, transition_at: datetime) -> None:
     """push the hatchet event that agent-runtime's QualifyLead workflow listens for."""
-    payload = {"lead_id": str(lead_id)}
+    payload = {"lead_id": str(lead_id), "lifecycle": {"from": None, "to": LeadLifecycle.CAPTURED.value, "transitioned_at": transition_at.isoformat()}}
     # hatchet-sdk's event push api: client.event.push(event_key, payload)
     hatchet.event.push("lead.captured", payload)
     # structlog's `event` positional means the log message; using it again

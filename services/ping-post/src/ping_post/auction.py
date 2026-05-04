@@ -27,7 +27,9 @@ from stormlead_core import (
     Buyer,
     DamageTier,
     Lead,
+    LeadLifecycle,
     LeadStatus,
+    can_transition_lifecycle,
     PingPostResult,
     evaluate_filter,
     get_logger,
@@ -41,6 +43,7 @@ PING_TIMEOUT_S = 2.5
 POST_TIMEOUT_S = 5.0
 BID_WINDOW_S = 5.0
 MAX_PARALLEL_PINGS = 50
+AUTO_ROUTE_CLASSES = {"a", "b"}
 POST_MAX_ATTEMPTS = 3
 POST_RETRY_BASE_DELAY_S = 0.25
 
@@ -247,7 +250,7 @@ async def _select_eligible_buyers(lead: Lead) -> list[Buyer]:
 def _buyer_matches_paid_pilot_rules(buyer: Buyer, lead: Lead) -> bool:
     """Business eligibility that should not live inside freeform CEL."""
     lead_class = lead.lead_class.value if lead.lead_class else None
-    if lead_class in {"c", "d"}:
+    if lead_class not in AUTO_ROUTE_CLASSES:
         return False
     if buyer.target_zips and lead.zip not in buyer.target_zips:
         return False
@@ -557,6 +560,12 @@ async def run_auction(lead: Lead) -> PingPostResult:
                 lead_row = await s.get(LeadRow, lead.id)
                 if lead_row:
                     lead_row.status = LeadStatus.SOLD.value if ok else LeadStatus.UNSOLD.value
+                    next_state = LeadLifecycle.SOLD if ok else LeadLifecycle.UNSOLD
+                    current_state = LeadLifecycle(lead_row.lifecycle_state)
+                    if can_transition_lifecycle(current_state, next_state):
+                        lead_row.lifecycle_state = next_state.value
+                        lead_row.lifecycle_transitioned_at = datetime.now(UTC)
+                        setattr(lead_row, f"{next_state.value}_at", datetime.now(UTC))
                 if ok:
                     s.add(
                         BillingEvent(
@@ -578,6 +587,11 @@ async def run_auction(lead: Lead) -> PingPostResult:
                 lead_row = await s.get(LeadRow, lead.id)
                 if lead_row:
                     lead_row.status = LeadStatus.UNSOLD.value
+                    current_state = LeadLifecycle(lead_row.lifecycle_state)
+                    if can_transition_lifecycle(current_state, LeadLifecycle.UNSOLD):
+                        lead_row.lifecycle_state = LeadLifecycle.UNSOLD.value
+                        lead_row.lifecycle_transitioned_at = datetime.now(UTC)
+                        lead_row.unsold_at = datetime.now(UTC)
 
         return PingPostResult(
             event_id=uuid4(),

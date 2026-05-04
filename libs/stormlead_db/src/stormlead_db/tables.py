@@ -177,6 +177,22 @@ class LeadRow(Base):
     last_touch_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
     rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    lifecycle_state: Mapped[str] = mapped_column(String(32), nullable=False, default="captured", index=True)
+    lifecycle_transitioned_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), nullable=False
+    )
+    captured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    qualified_a_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    qualified_b_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    qualified_c_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    qualified_d_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    auctioned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sold_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    unsold_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    returned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    credited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    suppressed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     # for rag: embedding of damage description + photo summary
     embedding = mapped_column(Vector(1536), nullable=True)
 

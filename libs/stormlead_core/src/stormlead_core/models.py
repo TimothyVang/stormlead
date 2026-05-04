@@ -58,6 +58,51 @@ class LeadClass(StrEnum):
     D = "d"
 
 
+class LeadLifecycle(StrEnum):
+    CAPTURED = "captured"
+    QUALIFIED_A = "qualified_a"
+    QUALIFIED_B = "qualified_b"
+    QUALIFIED_C = "qualified_c"
+    QUALIFIED_D = "qualified_d"
+    AUCTIONED = "auctioned"
+    SOLD = "sold"
+    UNSOLD = "unsold"
+    RETURNED = "returned"
+    CREDITED = "credited"
+    SUPPRESSED = "suppressed"
+
+
+_ALLOWED_LIFECYCLE_TRANSITIONS: dict[LeadLifecycle, set[LeadLifecycle]] = {
+    LeadLifecycle.CAPTURED: {
+        LeadLifecycle.QUALIFIED_A,
+        LeadLifecycle.QUALIFIED_B,
+        LeadLifecycle.QUALIFIED_C,
+        LeadLifecycle.QUALIFIED_D,
+        LeadLifecycle.SUPPRESSED,
+    },
+    LeadLifecycle.QUALIFIED_A: {LeadLifecycle.AUCTIONED, LeadLifecycle.SUPPRESSED},
+    LeadLifecycle.QUALIFIED_B: {LeadLifecycle.AUCTIONED, LeadLifecycle.SUPPRESSED},
+    LeadLifecycle.QUALIFIED_C: {LeadLifecycle.AUCTIONED, LeadLifecycle.SUPPRESSED},
+    LeadLifecycle.QUALIFIED_D: {LeadLifecycle.UNSOLD, LeadLifecycle.SUPPRESSED},
+    LeadLifecycle.AUCTIONED: {LeadLifecycle.SOLD, LeadLifecycle.UNSOLD, LeadLifecycle.SUPPRESSED},
+    LeadLifecycle.SOLD: {LeadLifecycle.RETURNED},
+    LeadLifecycle.RETURNED: {LeadLifecycle.CREDITED},
+    LeadLifecycle.UNSOLD: set(),
+    LeadLifecycle.CREDITED: set(),
+    LeadLifecycle.SUPPRESSED: set(),
+}
+
+
+def can_transition_lifecycle(current: LeadLifecycle, nxt: LeadLifecycle) -> bool:
+    return nxt in _ALLOWED_LIFECYCLE_TRANSITIONS.get(current, set())
+
+
+def transition_lifecycle(current: LeadLifecycle, nxt: LeadLifecycle) -> LeadLifecycle:
+    if not can_transition_lifecycle(current, nxt):
+        raise ValueError(f"invalid lifecycle transition: {current.value} -> {nxt.value}")
+    return nxt
+
+
 class DamageTier(StrEnum):
     """from photo classification + form description.
 

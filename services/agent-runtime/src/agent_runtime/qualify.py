@@ -19,7 +19,7 @@ from uuid import UUID
 
 from claude_agent_sdk import query
 from hatchet_sdk import Context
-from stormlead_core import DamageTier, LeadClass, get_logger
+from stormlead_core import DamageTier, LeadClass, LeadLifecycle, can_transition_lifecycle, get_logger
 from stormlead_db import LeadRow, get_session
 
 from agent_runtime.auth import get_agent_options
@@ -86,16 +86,23 @@ async def qualify_lead(context: Context) -> dict[str, Any]:
     log.info("qualify.done", lead_id=str(lead_id), result_chars=len(result_text))
 
     parsed = _parse_qualification(result_text)
+    lead_class = _class_from_score(parsed["qualification_score"])
+    lifecycle_target = _lifecycle_from_class(lead_class)
     async with get_session() as s:
         row = await s.get(LeadRow, lead_id)
         if row is None:
             raise ValueError(f"lead {lead_id} not found")
         row.damage_tier = parsed["damage_tier"]
         row.qualification_score = parsed["qualification_score"]
-        row.lead_class = _class_from_score(parsed["qualification_score"])
+        row.lead_class = lead_class
         row.qualification_reason = parsed["reasoning"]
         row.rejection_reason = parsed["rejection_reason"]
         row.status = "rejected" if parsed["rejection_reason"] else "qualified"
+        current_state = LeadLifecycle(row.lifecycle_state) if row.lifecycle_state else LeadLifecycle.CAPTURED
+        if can_transition_lifecycle(current_state, lifecycle_target):
+            row.lifecycle_state = lifecycle_target.value
+            row.lifecycle_transitioned_at = row.updated_at
+            setattr(row, f"{lifecycle_target.value}_at", row.updated_at)
 
     # TODO: emit lead.qualified / lead.rejected after Hatchet event emission is
     # wrapped in a small shared helper. Persistence is the paid-pilot gate.
@@ -127,3 +134,7 @@ def _class_from_score(score: float) -> str:
     if score >= 0.3:
         return LeadClass.C.value
     return LeadClass.D.value
+
+
+def _lifecycle_from_class(lead_class: str) -> LeadLifecycle:
+    return {"a": LeadLifecycle.QUALIFIED_A, "b": LeadLifecycle.QUALIFIED_B, "c": LeadLifecycle.QUALIFIED_C, "d": LeadLifecycle.QUALIFIED_D}[lead_class]

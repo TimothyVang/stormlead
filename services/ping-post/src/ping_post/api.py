@@ -27,13 +27,15 @@ from fastapi.responses import HTMLResponse
 from hatchet_sdk import Context, Hatchet
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
-from stormlead_core import BuyerSalesStage, BuyerStatus, Lead, configure_logging, get_logger
+from stormlead_core import BuyerSalesStage, BuyerStatus, Lead, LeadClass, configure_logging, get_logger
 from stormlead_db import BillingEvent, BuyerRow, LeadRow, PostResult, get_session
 
 from ping_post.auction import run_auction
 
 configure_logging()
 log = get_logger(__name__)
+
+AUTO_ROUTE_CLASSES = {LeadClass.A.value, LeadClass.B.value}
 
 VALID_RETURN_REASONS = {
     "wrong_number",
@@ -168,6 +170,8 @@ async def _auction_step(context: Context) -> dict[str, Any]:
             raise ValueError(f"lead {lead_id} not found")
         lead = _row_to_lead(row)
 
+    if (lead.lead_class.value if lead.lead_class else None) not in AUTO_ROUTE_CLASSES:
+        return {"lead_id": str(lead.id), "status": "skipped", "reason": "lead class not auto-routable"}
     result = await run_auction(lead)
     return {
         "lead_id": str(result.lead_id),
@@ -491,6 +495,8 @@ async def trigger_auction(payload: dict[str, Any]) -> dict[str, Any]:
             if row is None:
                 raise HTTPException(404, "lead not found; verify the lead id and try again")
             lead = _row_to_lead(row)
+        if (lead.lead_class.value if lead.lead_class else None) not in AUTO_ROUTE_CLASSES:
+            return {"status": "skipped", "reason": "lead class not auto-routable", "lead_id": str(lead.id)}
         result = await run_auction(lead)
     except HTTPException:
         raise

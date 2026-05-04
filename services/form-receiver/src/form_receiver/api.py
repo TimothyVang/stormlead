@@ -17,6 +17,7 @@ response codes:
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
@@ -142,7 +143,7 @@ async def formbricks_webhook(request: Request) -> dict[str, str]:
         try:
             if _hatchet is None:
                 raise RuntimeError("hatchet client not initialized")
-            await emit_lead_captured(_hatchet, lead_id)
+            await emit_lead_captured(_hatchet, lead_id, transition_at=datetime.now(UTC))
         except Exception as e:
             # raise 5xx so formbricks retries — webhook_id dedup means
             # the lead/audit rows aren't double-written on retry.
