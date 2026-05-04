@@ -201,6 +201,29 @@ class LeadRow(Base):
     )
 
 
+class LeadStateTransition(Base):
+    """Append-only workflow transition audit with retry idempotency."""
+
+    __tablename__ = "lead_state_transitions"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    lead_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("leads.id"), index=True)
+    from_state: Mapped[str] = mapped_column(String(32))
+    to_state: Mapped[str] = mapped_column(String(32), index=True)
+    event_type: Mapped[str] = mapped_column(String(64), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    payload_json: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), index=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_lead_state_transitions_idempotency_key"),
+        Index("ix_lead_state_transitions_lead_created_at", "lead_id", text("created_at DESC")),
+        Index("ix_lead_state_transitions_to_state", "to_state"),
+    )
+
+
 # ============================================================================
 # ping-post (the moat)
 # ============================================================================

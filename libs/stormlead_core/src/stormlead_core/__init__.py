@@ -38,6 +38,14 @@ from stormlead_core.observability import (
     emit_event,
     emit_metric,
 )
+from stormlead_core.pipeline import (
+    InvalidPipelineTransitionError,
+    PipelineState,
+    assert_transition,
+    can_transition,
+    is_terminal,
+    next_states,
+)
 
 __all__ = [
     "ERROR_SINK",
@@ -48,6 +56,7 @@ __all__ = [
     "CallEvent",
     "DamageTier",
     "DuplicateWindow",
+    "InvalidPipelineTransitionError",
     "Lead",
     "LeadCaptured",
     "LeadClass",
@@ -55,13 +64,16 @@ __all__ = [
     "LeadSource",
     "LeadStatus",
     "PingPostResult",
+    "PipelineState",
     "QualityScore",
     "Storm",
     "StormDetected",
     "StormEvent",
     "StormSeverity",
+    "assert_transition",
     "bind_correlation_id",
     "build_duplicate_window",
+    "can_transition",
     "configure_logging",
     "correlation_scope",
     "current_correlation_id",
@@ -70,6 +82,8 @@ __all__ = [
     "evaluate_filter",
     "get_logger",
     "initial_quality_score",
+    "is_terminal",
+    "next_states",
     "normalize_address",
     "normalize_phone",
 ]

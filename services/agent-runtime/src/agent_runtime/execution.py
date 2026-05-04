@@ -94,7 +94,9 @@ async def run_agent_task(
     last_err: Exception | None = None
     for idx, model in enumerate(models):
         fallback_used = idx > 0
-        options = ClaudeAgentOptions(model=model, system_prompt=system_prompt, allowed_tools=allowed_tools)
+        options = ClaudeAgentOptions(
+            model=model, system_prompt=system_prompt, allowed_tools=allowed_tools
+        )
         try:
             result_text = ""
             async for message in query(prompt=prompt, options=options):
@@ -108,7 +110,9 @@ async def run_agent_task(
             if total_tokens > envelope.token_cap:
                 raise ValueError(f"total token cap exceeded: {total_tokens} > {envelope.token_cap}")
             if est_cost > envelope.cost_cap_usd:
-                raise ValueError(f"cost cap exceeded: ${est_cost:.4f} > ${envelope.cost_cap_usd:.4f}")
+                raise ValueError(
+                    f"cost cap exceeded: ${est_cost:.4f} > ${envelope.cost_cap_usd:.4f}"
+                )
 
             duration_ms = int((time.perf_counter() - start) * 1000)
             return result_text, {

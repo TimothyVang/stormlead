@@ -58,7 +58,9 @@ def build_duplicate_window(
     )
 
 
-def initial_quality_score(*, dwell_ms: int | None, has_email: bool, duplicate: bool) -> QualityScore:
+def initial_quality_score(
+    *, dwell_ms: int | None, has_email: bool, duplicate: bool
+) -> QualityScore:
     score = 1.0
     reasons: list[str] = []
     if duplicate:
@@ -74,4 +76,6 @@ def initial_quality_score(*, dwell_ms: int | None, has_email: bool, duplicate: b
     score = max(0.0, min(1.0, score))
     blocked = duplicate
     hold = score < 0.6 or duplicate
-    return QualityScore(score=score, reason=",".join(reasons) or "baseline", hold=hold, blocked=blocked)
+    return QualityScore(
+        score=score, reason=",".join(reasons) or "baseline", hold=hold, blocked=blocked
+    )

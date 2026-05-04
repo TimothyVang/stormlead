@@ -60,7 +60,7 @@ async def _upsert_storm(storm) -> bool:  # type: ignore[no-untyped-def]
         return (datetime.now(UTC) - result.created_at).total_seconds() < 5
 
 
-@hatchet.workflow(on_crons=["*/5 * * * *"])
+@hatchet.workflow(name="nws-cap-poller", on_crons=["*/5 * * * *"])
 class NwsCapPoller:
     @hatchet.step(timeout="60s", retries=2)
     async def poll(self, context: Context) -> dict:
@@ -88,7 +88,7 @@ class NwsCapPoller:
         return {"total": len(features), "new": new_count}
 
 
-@hatchet.workflow(on_crons=["*/30 * * * *"])
+@hatchet.workflow(name="fema-poller", on_crons=["*/30 * * * *"])
 class FemaPoller:
     @hatchet.step(timeout="120s", retries=2)
     async def poll(self, context: Context) -> dict:

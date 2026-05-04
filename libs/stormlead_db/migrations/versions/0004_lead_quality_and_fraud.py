@@ -18,8 +18,12 @@ depends_on = None
 def upgrade() -> None:
     op.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS score double precision;")
     op.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS score_reason text;")
-    op.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS hold_for_review boolean NOT NULL DEFAULT false;")
-    op.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS blocked_for_fraud boolean NOT NULL DEFAULT false;")
+    op.execute(
+        "ALTER TABLE leads ADD COLUMN IF NOT EXISTS hold_for_review boolean NOT NULL DEFAULT false;"
+    )
+    op.execute(
+        "ALTER TABLE leads ADD COLUMN IF NOT EXISTS blocked_for_fraud boolean NOT NULL DEFAULT false;"
+    )
     op.execute("CREATE INDEX IF NOT EXISTS ix_leads_hold_for_review ON leads(hold_for_review);")
     op.execute("CREATE INDEX IF NOT EXISTS ix_leads_blocked_for_fraud ON leads(blocked_for_fraud);")
 

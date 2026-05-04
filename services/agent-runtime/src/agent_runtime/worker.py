@@ -24,14 +24,14 @@ log = get_logger(__name__)
 hatchet = Hatchet(debug=False)
 
 
-@hatchet.workflow(on_events=["lead.captured"])
+@hatchet.workflow(name="qualify-lead", on_events=["lead.captured"])
 class QualifyLead:
     @hatchet.step(timeout="120s", retries=2)
     async def step(self, context: Context) -> dict:
         return await qualify_lead(context)
 
 
-@hatchet.workflow(on_crons=["0 9 * * 1"])  # mondays 09:00 utc
+@hatchet.workflow(name="hermes-self-evolution", on_crons=["0 9 * * 1"])  # mondays 09:00 utc
 class HermesSelfEvolution:
     @hatchet.step(timeout="600s", retries=1)
     async def step(self, context: Context) -> dict:

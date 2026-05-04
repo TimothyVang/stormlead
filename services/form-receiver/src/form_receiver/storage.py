@@ -99,7 +99,9 @@ async def upsert_lead(extracted: ExtractedConsent, *, ip: str) -> UUID:
         return existing.id
 
 
-async def record_audit(*, webhook_id: str, lead_id: UUID, extracted: ExtractedConsent, ip: str, raw_payload: bytes) -> bool:
+async def record_audit(
+    *, webhook_id: str, lead_id: UUID, extracted: ExtractedConsent, ip: str, raw_payload: bytes
+) -> bool:
     parsed_payload = json.loads(raw_payload.decode("utf-8"))
     async with get_session() as s:
         stmt = (
