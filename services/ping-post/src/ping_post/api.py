@@ -17,18 +17,18 @@ import asyncio
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from hatchet_sdk import Context, Hatchet
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from stormlead_core import BuyerSalesStage, BuyerStatus, Lead, configure_logging, get_logger
-from stormlead_db import BillingEvent, BuyerRow, LeadRow, PostResult, get_session
+from stormlead_db import BillingEvent, BuyerRow, LeadRow, PingAttempt, PostResult, get_session
 
 from ping_post.auction import run_auction
 
@@ -44,6 +44,18 @@ VALID_RETURN_REASONS = {
     "job_already_completed",
 }
 
+
+
+class KpiThresholdConfig(BaseModel):
+    pause_delivery_success_rate: float = Field(default=0.85, ge=0, le=1)
+    stop_loss_return_rate: float = Field(default=0.2, ge=0, le=1)
+    pause_wallet_runway_days: float = Field(default=3.0, ge=0)
+    stop_loss_net_revenue_cents: int = 0
+    pause_retry_error_rate: float = Field(default=0.2, ge=0, le=1)
+    pause_ping_p95_latency_ms: int = Field(default=2500, ge=0)
+
+
+KPI_THRESHOLDS = KpiThresholdConfig()
 os.environ.setdefault(
     "HATCHET_CLIENT_TOKEN",
     "eyJhbGciOiJub25lIn0.eyJzdWIiOiJkZXYiLCJzZXJ2ZXJfdXJsIjoiaHR0cDovL2xvY2FsaG9zdDo4MDgwIiwiZ3JwY19icm9hZGNhc3RfYWRkcmVzcyI6ImxvY2FsaG9zdDo3MDc3In0.",
@@ -750,6 +762,127 @@ async def return_lead(lead_id: UUID, payload: ReturnLeadRequest) -> dict[str, An
         raise HTTPException(
             500, "lead return could not be recorded; retry or contact support"
         ) from e
+
+
+
+def _window_clause(start_at: datetime | None, end_at: datetime | None):
+    clauses = []
+    if start_at is not None:
+        clauses.append(LeadRow.created_at >= start_at)
+    if end_at is not None:
+        clauses.append(LeadRow.created_at < end_at)
+    return and_(*clauses) if clauses else None
+
+
+def _normalize_ratio(numerator: int, denominator: int) -> float:
+    return round((numerator / denominator), 4) if denominator else 0.0
+
+
+@app.get('/v1/kpis/normalized')
+async def normalized_kpis(
+    market_state: str | None = Query(default=None, min_length=2, max_length=2),
+    market_zip: str | None = Query(default=None, min_length=3, max_length=10),
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
+) -> dict[str, Any]:
+    if market_state and market_zip:
+        raise HTTPException(400, 'choose either market_state or market_zip, not both')
+    if start_at and start_at.tzinfo is None:
+        start_at = start_at.replace(tzinfo=timezone.utc)
+    if end_at and end_at.tzinfo is None:
+        end_at = end_at.replace(tzinfo=timezone.utc)
+
+    lead_filters = []
+    if market_state:
+        lead_filters.append(LeadRow.state == market_state.upper())
+    if market_zip:
+        lead_filters.append(LeadRow.zip == market_zip)
+    window_clause = _window_clause(start_at, end_at)
+    if window_clause is not None:
+        lead_filters.append(window_clause)
+
+    try:
+        async with get_session() as s:
+            lead_ids_query = select(LeadRow.id)
+            if lead_filters:
+                lead_ids_query = lead_ids_query.where(and_(*lead_filters))
+            lead_ids_subq = lead_ids_query.subquery()
+
+            funded_buyers = await s.scalar(select(func.count(BuyerRow.id)).where(BuyerRow.deposit_balance > 0))
+            coverage_count = await s.scalar(select(func.count(BuyerRow.id)).where(func.jsonb_array_length(BuyerRow.target_zips) > 0))
+            avg_runway_days = await s.scalar(select(func.avg((BuyerRow.deposit_balance * 30) / func.nullif(BuyerRow.monthly_budget, 0))).where(BuyerRow.monthly_budget > 0))
+
+            sold_by_class_rows = (await s.execute(
+                select(LeadRow.lead_class, func.count(PostResult.id))
+                .join(PostResult, PostResult.lead_id == LeadRow.id)
+                .where(PostResult.delivered.is_(True), LeadRow.id.in_(select(lead_ids_subq.c.id)))
+                .group_by(LeadRow.lead_class)
+            )).all()
+
+            return_rate_rows = (await s.execute(
+                select(PostResult.buyer_id, LeadRow.campaign_source, func.sum(func.cast(PostResult.returned, Integer)), func.count(PostResult.id))
+                .join(LeadRow, LeadRow.id == PostResult.lead_id)
+                .where(PostResult.delivered.is_(True), LeadRow.id.in_(select(lead_ids_subq.c.id)))
+                .group_by(PostResult.buyer_id, LeadRow.campaign_source)
+            )).all()
+
+            gross_revenue = await s.scalar(select(func.coalesce(func.sum(PostResult.bid_cents),0)).where(PostResult.delivered.is_(True), PostResult.lead_id.in_(select(lead_ids_subq.c.id))))
+            credits = await s.scalar(select(func.coalesce(func.sum(BillingEvent.amount_cents),0)).where(BillingEvent.event_type=='lead.returned', BillingEvent.lead_id.in_(select(lead_ids_subq.c.id))))
+
+            delivered = await s.scalar(select(func.count(PostResult.id)).where(PostResult.delivered.is_(True), PostResult.lead_id.in_(select(lead_ids_subq.c.id))))
+            post_errors = await s.scalar(select(func.count(PostResult.id)).where(PostResult.delivered.is_(False), PostResult.lead_id.in_(select(lead_ids_subq.c.id))))
+            ping_latency_p95 = await s.scalar(select(func.percentile_cont(0.95).within_group(PingAttempt.response_ms)).where(PingAttempt.response_ms.is_not(None), PingAttempt.lead_id.in_(select(lead_ids_subq.c.id))))
+            ping_avg = await s.scalar(select(func.avg(PingAttempt.response_ms)).where(PingAttempt.response_ms.is_not(None), PingAttempt.lead_id.in_(select(lead_ids_subq.c.id))))
+            retry_errors = await s.scalar(select(func.count(PingAttempt.id)).where(PingAttempt.error.is_not(None), PingAttempt.lead_id.in_(select(lead_ids_subq.c.id))))
+            attempts = await s.scalar(select(func.count(PingAttempt.id)).where(PingAttempt.lead_id.in_(select(lead_ids_subq.c.id))))
+
+        sold_by_class = {str(cls or 'unknown'): int(count) for cls, count in sold_by_class_rows}
+        return_rate_by_buyer_source = [
+            {
+                'buyer_id': str(buyer_id),
+                'source': source or 'unknown',
+                'return_rate': _normalize_ratio(int(returns or 0), int(total or 0)),
+                'returned': int(returns or 0),
+                'sold': int(total or 0),
+            }
+            for buyer_id, source, returns, total in return_rate_rows
+        ]
+        net_revenue = int(gross_revenue or 0) - int(credits or 0)
+        delivery_success_rate = _normalize_ratio(int(delivered or 0), int((delivered or 0) + (post_errors or 0)))
+        retry_error_rate = _normalize_ratio(int(retry_errors or 0), int(attempts or 0))
+
+        actions = []
+        if delivery_success_rate < KPI_THRESHOLDS.pause_delivery_success_rate:
+            actions.append('PAUSE')
+        if retry_error_rate > KPI_THRESHOLDS.pause_retry_error_rate:
+            actions.append('PAUSE')
+        if (avg_runway_days or 0) < KPI_THRESHOLDS.pause_wallet_runway_days:
+            actions.append('PAUSE')
+        if net_revenue < KPI_THRESHOLDS.stop_loss_net_revenue_cents:
+            actions.append('STOP_LOSS')
+
+        return {
+            'scope': {'market_state': market_state.upper() if market_state else None, 'market_zip': market_zip, 'start_at': start_at.isoformat() if start_at else None, 'end_at': end_at.isoformat() if end_at else None},
+            'market_readiness': {'funded_buyers_count': int(funded_buyers or 0), 'zip_service_coverage_count': int(coverage_count or 0), 'wallet_runway_days_avg': float(avg_runway_days or 0)},
+            'revenue_quality': {'sold_leads_by_class': sold_by_class, 'return_rate_by_buyer_source': return_rate_by_buyer_source, 'net_revenue_after_credits_cents': net_revenue},
+            'ops_health': {'delivery_success_rate': delivery_success_rate, 'ping_latency_ms_avg': float(ping_avg or 0), 'ping_latency_ms_p95': float(ping_latency_p95 or 0), 'post_error_rate': _normalize_ratio(int(post_errors or 0), int((delivered or 0) + (post_errors or 0))), 'retry_error_rate': retry_error_rate},
+            'automation': {'thresholds': KPI_THRESHOLDS.model_dump(), 'recommended_actions': sorted(set(actions))},
+        }
+    except Exception as e:
+        log.error('kpi.normalized_failed', error=str(e))
+        raise HTTPException(500, 'normalized kpis could not be loaded; retry after checking database health') from e
+
+
+@app.get('/v1/kpis/thresholds')
+async def get_kpi_thresholds() -> dict[str, Any]:
+    return {'thresholds': KPI_THRESHOLDS.model_dump()}
+
+
+@app.put('/v1/kpis/thresholds')
+async def update_kpi_thresholds(payload: KpiThresholdConfig) -> dict[str, Any]:
+    global KPI_THRESHOLDS
+    KPI_THRESHOLDS = payload
+    return {'thresholds': KPI_THRESHOLDS.model_dump()}
 
 
 def _decimal_to_cents(amount: Decimal) -> int:
