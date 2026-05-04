@@ -111,9 +111,21 @@ def _sign_webhook(secret: str, timestamp: str, body: bytes) -> str:
     return f"v1,{sig}"
 
 
-def _delivery_idempotency_key(lead_id: UUID, buyer_id: UUID, bid_cents: int) -> str:
-    raw = f"{lead_id}:{buyer_id}:{bid_cents}".encode()
+def _delivery_idempotency_key(lead_id: UUID, buyer_id: UUID, _bid_cents: int) -> str:
+    raw = f"{lead_id}:{buyer_id}".encode()
     return hashlib.sha256(raw).hexdigest()
+
+
+async def _has_successful_delivery(lead_id: UUID, buyer_id: UUID) -> bool:
+    async with get_session() as s:
+        prior_success = await s.scalar(
+            select(func.count(PostResult.id)).where(
+                PostResult.lead_id == lead_id,
+                PostResult.buyer_id == buyer_id,
+                PostResult.delivered.is_(True),
+            )
+        )
+    return bool(prior_success)
 
 
 def _should_retry_post(status_code: int | None, error: Exception | None) -> bool:
@@ -401,7 +413,7 @@ async def _post_to_winner(
     buyer: Buyer,
     lead: Lead,
     bid_cents: int,
-) -> tuple[bool, int | None, str | None]:
+) -> tuple[bool, int | None, str | None, list[dict[str, object]]]:
     """deliver full lead with PII to winning buyer. signed."""
     body = json.dumps(
         {
@@ -441,12 +453,23 @@ async def _post_to_winner(
         "Idempotency-Key": idempotency_key,
         "X-Stormlead-Mode": "post",
     }
+    attempt_records: list[dict[str, object]] = []
     for attempt in range(1, POST_MAX_ATTEMPTS + 1):
         try:
             r = await client.post(
                 buyer.webhook_url, content=body, headers=headers, timeout=POST_TIMEOUT_S
             )
             ok = 200 <= r.status_code < 300
+            attempt_records.append(
+                {
+                    "attempt_number": attempt,
+                    "status": "success" if ok else "failed",
+                    "response_status_code": r.status_code,
+                    "response_body": r.text[:2048],
+                    "idempotency_key": idempotency_key,
+                    "attempted_at": datetime.now(UTC).isoformat(),
+                }
+            )
             if ok:
                 log.info(
                     "delivery.post_succeeded",
@@ -455,7 +478,7 @@ async def _post_to_winner(
                     bid_cents=bid_cents,
                     attempt=attempt,
                 )
-                return (True, r.status_code, r.text[:2048])
+                return (True, r.status_code, r.text[:2048], attempt_records)
             retry = _should_retry_post(r.status_code, None)
             log.warning(
                 "delivery.post_failed",
@@ -469,9 +492,19 @@ async def _post_to_winner(
             if retry and attempt < POST_MAX_ATTEMPTS:
                 await asyncio.sleep(POST_RETRY_BASE_DELAY_S * (2 ** (attempt - 1)))
                 continue
-            return (False, r.status_code, r.text[:2048])
+            return (False, r.status_code, r.text[:2048], attempt_records)
         except Exception as e:
             retry = _should_retry_post(None, e)
+            attempt_records.append(
+                {
+                    "attempt_number": attempt,
+                    "status": "exception",
+                    "response_status_code": None,
+                    "response_body": f"{type(e).__name__}: {e}",
+                    "idempotency_key": idempotency_key,
+                    "attempted_at": datetime.now(UTC).isoformat(),
+                }
+            )
             log.warning(
                 "delivery.post_exception",
                 lead_id=str(lead.id),
@@ -484,8 +517,8 @@ async def _post_to_winner(
             if retry and attempt < POST_MAX_ATTEMPTS:
                 await asyncio.sleep(POST_RETRY_BASE_DELAY_S * (2 ** (attempt - 1)))
                 continue
-            return (False, None, f"{type(e).__name__}: {e}")
-    return (False, None, "retry_exhausted")
+            return (False, None, f"{type(e).__name__}: {e}", attempt_records)
+    return (False, None, "retry_exhausted", attempt_records)
 
 
 async def run_auction(lead: Lead) -> PingPostResult:
@@ -534,30 +567,58 @@ async def run_auction(lead: Lead) -> PingPostResult:
         if winner_pair:
             ping_resp, buyer = winner_pair
             bid_cents = ping_resp.bid_cents or 0
-            reserved = await _reserve_buyer_wallet(buyer.id, lead.id, bid_cents)
-            if reserved:
+            if await _has_successful_delivery(lead.id, buyer.id):
+                log.info(
+                    "delivery.post_suppressed_duplicate",
+                    lead_id=str(lead.id),
+                    buyer_id=str(buyer.id),
+                )
+                reserved = False
+                ok, status, body, attempts = True, 208, "duplicate_suppressed", []
+            else:
+                reserved = await _reserve_buyer_wallet(buyer.id, lead.id, bid_cents)
+                if reserved:
+                    ok, status, body, attempts = await _post_to_winner(client, buyer, lead, bid_cents)
+                else:
+                    ok, status, body, attempts = (
+                        False,
+                        None,
+                        "buyer wallet/status changed before post",
+                        [],
+                    )
+            if reserved or ok:
                 winning_buyer_id = buyer.id
                 winning_bid = bid_cents
-                ok, status, body = await _post_to_winner(client, buyer, lead, bid_cents)
-            else:
-                ok, status, body = False, None, "buyer wallet/status changed before post"
 
             async with get_session() as s:
-                s.add(
-                    PostResult(
-                        lead_id=lead.id,
-                        buyer_id=buyer.id,
-                        bid_cents=bid_cents,
-                        delivered=ok,
-                        response_status_code=status,
-                        response_body=body,
+                if attempts:
+                    for attempt in attempts:
+                        s.add(
+                            PostResult(
+                                lead_id=lead.id,
+                                buyer_id=buyer.id,
+                                bid_cents=bid_cents,
+                                delivered=attempt["status"] == "success",
+                                response_status_code=attempt["response_status_code"],
+                                response_body=json.dumps(attempt),
+                            )
+                        )
+                else:
+                    s.add(
+                        PostResult(
+                            lead_id=lead.id,
+                            buyer_id=buyer.id,
+                            bid_cents=bid_cents,
+                            delivered=ok,
+                            response_status_code=status,
+                            response_body=body,
+                        )
                     )
-                )
                 # update lead status
                 lead_row = await s.get(LeadRow, lead.id)
                 if lead_row:
                     lead_row.status = LeadStatus.SOLD.value if ok else LeadStatus.UNSOLD.value
-                if ok:
+                if ok and reserved:
                     s.add(
                         BillingEvent(
                             buyer_id=buyer.id,

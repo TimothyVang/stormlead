@@ -9,6 +9,9 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
 
+import httpx
+import pytest
+
 from ping_post.auction import (
     _delivery_idempotency_key,
     PingResponse,
@@ -20,6 +23,7 @@ from ping_post.auction import (
     _ping_payload,
     _should_retry_post,
     _sign_webhook,
+    _post_to_winner,
 )
 from stormlead_core import Buyer, BuyerStatus, DamageTier, Lead, LeadClass, LeadSource, LeadStatus
 from stormlead_core.filters import evaluate_filter
@@ -113,9 +117,80 @@ def test_delivery_idempotency_key_is_stable() -> None:
 def test_delivery_idempotency_key_changes_when_bid_changes() -> None:
     lead_id = uuid4()
     buyer_id = uuid4()
-    assert _delivery_idempotency_key(lead_id, buyer_id, 9000) != _delivery_idempotency_key(
+    assert _delivery_idempotency_key(lead_id, buyer_id, 9000) == _delivery_idempotency_key(
         lead_id, buyer_id, 9100
     )
+
+
+@pytest.mark.asyncio
+async def test_post_to_winner_retries_and_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    lead = _lead()
+    buyer = _buyer()
+    buyer.id = uuid4()
+    calls = {"n": 0}
+
+    async def fake_post(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return httpx.Response(status_code=503, text="temporary")
+        return httpx.Response(status_code=200, text="ok")
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr("ping_post.auction.asyncio.sleep", fake_sleep)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fake_post)) as client:
+        ok, status, _body, attempts = await _post_to_winner(client, buyer, lead, 12000)
+
+    assert ok
+    assert status == 200
+    assert len(attempts) == 3
+    assert attempts[-1]["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_post_to_winner_duplicate_uses_same_idempotency_key() -> None:
+    lead = _lead()
+    buyer = _buyer()
+    buyer.id = uuid4()
+    seen_keys: list[str] = []
+
+    async def fake_post(request: httpx.Request) -> httpx.Response:
+        seen_keys.append(request.headers["Idempotency-Key"])
+        return httpx.Response(status_code=500, text="boom")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fake_post)) as client:
+        _ok, _status, _body, attempts = await _post_to_winner(client, buyer, lead, 12000)
+
+    assert len(set(seen_keys)) == 1
+    assert len(attempts) >= 1
+    for attempt in attempts:
+        assert attempt["idempotency_key"] == seen_keys[0]
+
+
+@pytest.mark.asyncio
+async def test_post_to_winner_exhausts_retries_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    lead = _lead()
+    buyer = _buyer()
+    buyer.id = uuid4()
+
+    async def fake_post(*args, **kwargs):
+        raise httpx.ReadTimeout("timeout")
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr("ping_post.auction.asyncio.sleep", fake_sleep)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fake_post)) as client:
+        ok, status, body, attempts = await _post_to_winner(client, buyer, lead, 12000)
+
+    assert not ok
+    assert status is None
+    assert "ReadTimeout" in body
+    assert len(attempts) == 3
+    assert all(a["status"] == "exception" for a in attempts)
 
 
 def test_should_retry_post_for_5xx_and_429() -> None:
