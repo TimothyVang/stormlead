@@ -1499,3 +1499,5 @@ This system is ready when:
 - ai transcripts produce structured summaries.
 - class c leads can become class a/b or be suppressed as class d.
 - buyer reports show delivered, credited, and ai-qualified leads separately.
+
+- `2026-05-04-self-hosted-agentic-leadgen-plan.md` — implementation plan to automate stormlead as a self-hosted AI-agent lead-gen machine using n8n + LangGraph + Qdrant.
