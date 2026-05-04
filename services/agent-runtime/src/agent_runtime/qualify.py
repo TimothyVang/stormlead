@@ -15,9 +15,8 @@ from __future__ import annotations
 import json
 import re
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from claude_agent_sdk import query
 from hatchet_sdk import Context
 from stormlead_core import (
     ERROR_SINK,
@@ -30,7 +29,13 @@ from stormlead_core import (
 )
 from stormlead_db import LeadRow, get_session
 
-from agent_runtime.auth import get_agent_options
+from agent_runtime.execution import (
+    ModelPolicy,
+    TaskPolicy,
+    emit_task_event,
+    make_envelope,
+    run_agent_task,
+)
 
 log = get_logger(__name__)
 
@@ -79,18 +84,50 @@ async def qualify_lead(context: Context) -> dict[str, Any]:
             "photo_count": len(row.photo_s3_keys or []),
         }
 
-    options = get_agent_options(
-        "qualify_complex",
-        system_prompt=_QUALIFY_SYSTEM_PROMPT,
-        allowed_tools=[],  # pure reasoning; no tool calls needed
+    correlation_id = None
+    if isinstance(payload.get("correlation_id"), str):
+        correlation_id = UUID(payload["correlation_id"])
+    envelope = make_envelope(
+        task_name="qualify_lead",
+        workflow_name="QualifyLead",
+        run_id=str(payload.get("run_id") or uuid4()),
+        input_payload=payload,
+        correlation_id=correlation_id,
+        task_policy=TaskPolicy(timeout_seconds=120, retry_count=2),
+        model_policy=ModelPolicy(
+            primary_model="claude-opus-4-7",
+            fallback_model="claude-sonnet-4-5",
+            model_tier="premium",
+            token_cap=12_000,
+            cost_cap_usd=1.25,
+        ),
     )
-
-    result_text = ""
-    async for message in query(prompt=str(lead_dict), options=options):
-        # collect any text-bearing payload from the message stream
-        content = getattr(message, "content", None)
-        if content:
-            result_text += str(content)
+    emit_task_event(
+        status="started",
+        event_type="agent.task.started",
+        envelope=envelope,
+        attempt=1,
+        model_used=envelope.primary_model,
+        fallback_used=False,
+    )
+    try:
+        result_text, usage = await run_agent_task(
+            envelope=envelope,
+            system_prompt=_QUALIFY_SYSTEM_PROMPT,
+            prompt=str(lead_dict),
+            allowed_tools=[],
+        )
+    except Exception as exc:
+        emit_task_event(
+            status="dead_lettered",
+            event_type="agent.task.dead_lettered",
+            envelope=envelope,
+            attempt=envelope.retry_count + 1,
+            model_used=envelope.fallback_model or envelope.primary_model,
+            fallback_used=True,
+            error=str(exc),
+        )
+        raise
 
     log.info("qualify.done", lead_id=str(lead_id), result_chars=len(result_text))
 
@@ -117,6 +154,18 @@ async def qualify_lead(context: Context) -> dict[str, Any]:
 
     # TODO: emit lead.qualified / lead.rejected after Hatchet event emission is
     # wrapped in a small shared helper. Persistence is the paid-pilot gate.
+    emit_task_event(
+        status="success",
+        event_type="agent.task.succeeded",
+        envelope=envelope,
+        attempt=1,
+        model_used=str(usage["model_used"]),
+        fallback_used=bool(usage["fallback_used"]),
+        duration_ms=int(usage["duration_ms"]),
+        estimated_input_tokens=int(usage["estimated_input_tokens"]),
+        estimated_output_tokens=int(usage["estimated_output_tokens"]),
+        estimated_cost_usd=float(usage["estimated_cost_usd"]),
+    )
     return {"lead_id": str(lead_id), **parsed}
 
 

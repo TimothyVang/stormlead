@@ -17,12 +17,18 @@ proposal-persistence logic as the corpus grows.
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID, uuid4
 
-from claude_agent_sdk import query
 from hatchet_sdk import Context
 from stormlead_core import get_logger
 
-from agent_runtime.auth import get_agent_options
+from agent_runtime.execution import (
+    ModelPolicy,
+    TaskPolicy,
+    emit_task_event,
+    make_envelope,
+    run_agent_task,
+)
 
 log = get_logger(__name__)
 
@@ -55,17 +61,64 @@ async def hermes_self_evolution(context: Context) -> dict[str, Any]:
     # TODO: persist proposals to skill_proposals table
     digest = "TODO: populate from langfuse trace digest + skill registry"
 
-    options = get_agent_options(
-        "hermes",
-        system_prompt=_HERMES_SYSTEM_PROMPT,
-        allowed_tools=[],
+    payload = context.workflow_input()
+    correlation_id = None
+    if isinstance(payload.get("correlation_id"), str):
+        correlation_id = UUID(payload["correlation_id"])
+    envelope = make_envelope(
+        task_name="hermes_self_evolution",
+        workflow_name="HermesSelfEvolution",
+        run_id=str(payload.get("run_id") or uuid4()),
+        input_payload=payload,
+        correlation_id=correlation_id,
+        task_policy=TaskPolicy(timeout_seconds=600, retry_count=1),
+        model_policy=ModelPolicy(
+            primary_model="claude-opus-4-7",
+            fallback_model="claude-sonnet-4-5",
+            model_tier="premium",
+            token_cap=20_000,
+            cost_cap_usd=3.00,
+        ),
+    )
+    emit_task_event(
+        status="started",
+        event_type="agent.task.started",
+        envelope=envelope,
+        attempt=1,
+        model_used=envelope.primary_model,
+        fallback_used=False,
     )
 
-    proposals_text = ""
-    async for message in query(prompt=digest, options=options):
-        content = getattr(message, "content", None)
-        if content:
-            proposals_text += str(content)
+    try:
+        proposals_text, usage = await run_agent_task(
+            envelope=envelope,
+            system_prompt=_HERMES_SYSTEM_PROMPT,
+            prompt=digest,
+            allowed_tools=[],
+        )
+    except Exception as exc:
+        emit_task_event(
+            status="dead_lettered",
+            event_type="agent.task.dead_lettered",
+            envelope=envelope,
+            attempt=envelope.retry_count + 1,
+            model_used=envelope.fallback_model or envelope.primary_model,
+            fallback_used=True,
+            error=str(exc),
+        )
+        raise
 
     log.info("hermes.done", proposal_chars=len(proposals_text))
+    emit_task_event(
+        status="success",
+        event_type="agent.task.succeeded",
+        envelope=envelope,
+        attempt=1,
+        model_used=str(usage["model_used"]),
+        fallback_used=bool(usage["fallback_used"]),
+        duration_ms=int(usage["duration_ms"]),
+        estimated_input_tokens=int(usage["estimated_input_tokens"]),
+        estimated_output_tokens=int(usage["estimated_output_tokens"]),
+        estimated_cost_usd=float(usage["estimated_cost_usd"]),
+    )
     return {"proposals_raw": proposals_text}
