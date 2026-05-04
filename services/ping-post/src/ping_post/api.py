@@ -31,6 +31,7 @@ from stormlead_core import BuyerSalesStage, BuyerStatus, Lead, configure_logging
 from stormlead_db import BillingEvent, BuyerRow, LeadRow, PostResult, get_session
 
 from ping_post.auction import run_auction
+from ping_post.pre_auction import build_dedup_key, evaluate_pre_auction
 
 configure_logging()
 log = get_logger(__name__)
@@ -479,6 +480,11 @@ async def readyz() -> dict[str, str]:
     return {"status": "ready"}
 
 
+async def _first_buyer_id(session: Any) -> UUID:
+    buyer_id = await session.scalar(select(BuyerRow.id).limit(1))
+    return buyer_id or UUID("00000000-0000-0000-0000-000000000000")
+
+
 @app.post("/v1/auction")
 async def trigger_auction(payload: dict[str, Any]) -> dict[str, Any]:
     """sync auction. for testing only — production goes through hatchet."""
@@ -491,6 +497,64 @@ async def trigger_auction(payload: dict[str, Any]) -> dict[str, Any]:
             if row is None:
                 raise HTTPException(404, "lead not found; verify the lead id and try again")
             lead = _row_to_lead(row)
+
+            recent_rows = (
+                (
+                    await s.execute(
+                        select(LeadRow).where(
+                            LeadRow.created_at >= lead.created_at.replace(minute=0, second=0, microsecond=0),
+                            LeadRow.id != lead.id,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            known_dedup_keys = {build_dedup_key(_row_to_lead(existing_row)) for existing_row in recent_rows}
+            decision = evaluate_pre_auction(lead, known_dedup_keys=known_dedup_keys)
+
+            row.status = decision.status.value
+            row.qualification_score = decision.quality.score
+            row.qualification_reason = decision.reason
+            row.rejection_reason = decision.reason
+
+            if decision.reason is not None:
+                s.add(
+                    BillingEvent(
+                        buyer_id=(await _first_buyer_id(s)),
+                        lead_id=lead.id,
+                        event_type="lead.pre_auction_rejected",
+                        amount_cents=0,
+                        metadata_json={
+                            "reason": decision.reason,
+                            "dedup_key": decision.dedup_key,
+                            "quality_score": decision.quality.score,
+                            "quality_factors": decision.factors,
+                        },
+                    )
+                )
+                log.info(
+                    "lead.pre_auction_rejected",
+                    lead_id=str(lead.id),
+                    reason=decision.reason,
+                    dedup_key=decision.dedup_key,
+                    quality_score=decision.quality.score,
+                    quality_factors=decision.factors,
+                )
+
+            await s.flush()
+
+        if not decision.proceed_to_auction:
+            return {
+                "lead_id": str(lead.id),
+                "proceed_to_auction": False,
+                "status": decision.status.value,
+                "reason": decision.reason,
+                "quality_score": decision.quality.score,
+                "quality_factors": decision.factors,
+                "dedup_key": decision.dedup_key,
+            }
+
         result = await run_auction(lead)
     except HTTPException:
         raise

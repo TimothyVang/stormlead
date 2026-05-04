@@ -19,6 +19,7 @@ from stormlead_core.models import (
     LeadClass,
     LeadSource,
     LeadStatus,
+    QualityScore,
     Storm,
     StormSeverity,
 )
@@ -37,6 +38,7 @@ __all__ = [
     "LeadSource",
     "LeadStatus",
     "PingPostResult",
+    "QualityScore",
     "Storm",
     "StormDetected",
     "StormEvent",

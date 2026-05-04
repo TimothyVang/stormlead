@@ -161,6 +161,7 @@ class Lead(BaseModel):
     first_touch_source: str | None = None
     last_touch_source: str | None = None
     rejection_reason: str | None = None
+    quality_score: QualityScore | None = None
 
     created_at: datetime = Field(default_factory=lambda: datetime.utcnow())
     updated_at: datetime = Field(default_factory=lambda: datetime.utcnow())
@@ -178,6 +179,13 @@ class Lead(BaseModel):
         if len(v) != 2:
             raise ValueError("state must be 2-letter")
         return v.upper()
+
+
+class QualityScore(BaseModel):
+    """normalized quality schema for routing + dispute audit."""
+
+    score: float = Field(ge=0.0, le=1.0)
+    factors: dict[str, float] = Field(default_factory=dict)
 
 
 class Buyer(BaseModel):
