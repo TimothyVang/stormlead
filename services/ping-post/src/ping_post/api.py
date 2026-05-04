@@ -28,7 +28,7 @@ from hatchet_sdk import Context, Hatchet
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 from stormlead_core import BuyerSalesStage, BuyerStatus, Lead, configure_logging, get_logger
-from stormlead_db import BillingEvent, BuyerRow, LeadRow, PostResult, get_session
+from stormlead_db import BillingEvent, BuyerRow, CampaignDecisionRow, LeadRow, PostResult, get_session
 
 from ping_post.auction import run_auction
 
@@ -168,6 +168,7 @@ async def _auction_step(context: Context) -> dict[str, Any]:
             raise ValueError(f"lead {lead_id} not found")
         lead = _row_to_lead(row)
 
+    await _enforce_market_spend_gate(lead.state)
     result = await run_auction(lead)
     return {
         "lead_id": str(result.lead_id),
@@ -491,6 +492,7 @@ async def trigger_auction(payload: dict[str, Any]) -> dict[str, Any]:
             if row is None:
                 raise HTTPException(404, "lead not found; verify the lead id and try again")
             lead = _row_to_lead(row)
+        await _enforce_market_spend_gate(lead.state)
         result = await run_auction(lead)
     except HTTPException:
         raise
@@ -505,6 +507,39 @@ async def trigger_auction(payload: dict[str, Any]) -> dict[str, Any]:
         "winning_buyer_id": str(result.winning_buyer_id) if result.winning_buyer_id else None,
         "winning_bid_cents": result.winning_bid_cents,
         "duration_ms": result.duration_ms,
+    }
+
+
+async def _enforce_market_spend_gate(market_key: str) -> None:
+    async with get_session() as s:
+        latest = await s.scalar(
+            select(CampaignDecisionRow)
+            .where(CampaignDecisionRow.market_key == market_key)
+            .order_by(CampaignDecisionRow.created_at.desc())
+            .limit(1)
+        )
+    if latest and latest.spend_blocked:
+        raise HTTPException(423, f"market {market_key} spend is blocked ({latest.decision_state})")
+
+
+@app.get("/v1/admin/market-decisions/{market_key}")
+async def market_decision_summary(market_key: str) -> dict[str, Any]:
+    async with get_session() as s:
+        latest = await s.scalar(
+            select(CampaignDecisionRow)
+            .where(CampaignDecisionRow.market_key == market_key.upper())
+            .order_by(CampaignDecisionRow.created_at.desc())
+            .limit(1)
+        )
+    if latest is None:
+        raise HTTPException(404, "no decision for market")
+    return {
+        "market_key": latest.market_key,
+        "decision_state": latest.decision_state,
+        "reason_codes": latest.reason_codes,
+        "spend_blocked": latest.spend_blocked,
+        "metrics_snapshot": latest.metrics_snapshot,
+        "updated_at": latest.created_at.isoformat(),
     }
 
 

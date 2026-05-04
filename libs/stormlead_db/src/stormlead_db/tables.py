@@ -277,6 +277,24 @@ class BillingEvent(Base):
 # ============================================================================
 
 
+
+
+class CampaignDecisionRow(Base):
+    """audit trail for campaign orchestration decisions by market."""
+
+    __tablename__ = "campaign_decisions"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    market_key: Mapped[str] = mapped_column(String(32), index=True)
+    decision_state: Mapped[str] = mapped_column(String(16), index=True)
+    reason_codes: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    metrics_snapshot: Mapped[dict] = mapped_column(JSONB, default=dict)
+    spend_blocked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), index=True
+    )
+
+
 class ConsentAudit(Base):
     """tcpa-defensible audit row. one per formbricks webhook delivery.
 
