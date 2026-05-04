@@ -17,7 +17,7 @@ import hmac
 import json
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -32,7 +32,15 @@ from stormlead_core import (
     evaluate_filter,
     get_logger,
 )
-from stormlead_db import BillingEvent, BuyerRow, LeadRow, PingAttempt, PostResult, get_session
+from stormlead_db import (
+    BillingEvent,
+    BuyerRow,
+    DeliveryAttempt,
+    LeadRow,
+    PingAttempt,
+    PostResult,
+    get_session,
+)
 
 log = get_logger(__name__)
 
@@ -111,8 +119,8 @@ def _sign_webhook(secret: str, timestamp: str, body: bytes) -> str:
     return f"v1,{sig}"
 
 
-def _delivery_idempotency_key(lead_id: UUID, buyer_id: UUID, bid_cents: int) -> str:
-    raw = f"{lead_id}:{buyer_id}:{bid_cents}".encode()
+def _delivery_idempotency_key(lead_id: UUID, buyer_id: UUID, post_attempt: int) -> str:
+    raw = f"{lead_id}:{buyer_id}:{post_attempt}".encode()
     return hashlib.sha256(raw).hexdigest()
 
 
@@ -330,78 +338,13 @@ def _debit_amount(bid_cents: int) -> Decimal:
     return Decimal(bid_cents) / Decimal(100)
 
 
-async def _reserve_buyer_wallet(
-    buyer_id: UUID,
-    lead_id: UUID,
-    bid_cents: int,
-) -> bool:
-    debit = _debit_amount(bid_cents)
-    async with get_session() as s:
-        result = await s.execute(
-            update(BuyerRow)
-            .where(
-                BuyerRow.id == buyer_id,
-                BuyerRow.status == "active",
-                BuyerRow.deposit_balance >= debit,
-            )
-            .values(
-                deposit_balance=BuyerRow.deposit_balance - debit,
-                lifetime_spend=BuyerRow.lifetime_spend + debit,
-            )
-        )
-        if result.rowcount != 1:
-            log.warning(
-                "buyer.wallet_reserve_rejected",
-                buyer_id=str(buyer_id),
-                lead_id=str(lead_id),
-                bid_cents=bid_cents,
-            )
-            return False
-        s.add(
-            BillingEvent(
-                buyer_id=buyer_id,
-                lead_id=lead_id,
-                event_type="lead.reserved",
-                amount_cents=-bid_cents,
-                metadata_json={"exclusive": True},
-            )
-        )
-        return True
-
-
-async def _credit_failed_delivery(
-    buyer_id: UUID,
-    lead_id: UUID,
-    bid_cents: int,
-    status: int | None,
-) -> None:
-    credit = _debit_amount(bid_cents)
-    async with get_session() as s:
-        await s.execute(
-            update(BuyerRow)
-            .where(BuyerRow.id == buyer_id)
-            .values(
-                deposit_balance=BuyerRow.deposit_balance + credit,
-                lifetime_spend=BuyerRow.lifetime_spend - credit,
-            )
-        )
-        s.add(
-            BillingEvent(
-                buyer_id=buyer_id,
-                lead_id=lead_id,
-                event_type="lead.delivery_failed_credit",
-                amount_cents=bid_cents,
-                metadata_json={"post_result_status_code": status},
-            )
-        )
-
-
 async def _post_to_winner(
     client: httpx.AsyncClient,
     buyer: Buyer,
     lead: Lead,
     bid_cents: int,
-) -> tuple[bool, int | None, str | None]:
+    post_attempt: int,
+) -> tuple[bool, int | None, str | None, str]:
     """deliver full lead with PII to winning buyer. signed."""
     body = json.dumps(
         {
@@ -432,7 +375,7 @@ async def _post_to_winner(
         }
     ).encode()
     ts = str(int(time.time()))
-    idempotency_key = _delivery_idempotency_key(lead.id, buyer.id, bid_cents)
+    idempotency_key = _delivery_idempotency_key(lead.id, buyer.id, post_attempt)
     headers = {
         "Content-Type": "application/json",
         "Webhook-Timestamp": ts,
@@ -455,7 +398,7 @@ async def _post_to_winner(
                     bid_cents=bid_cents,
                     attempt=attempt,
                 )
-                return (True, r.status_code, r.text[:2048])
+                return (True, r.status_code, r.text[:2048], idempotency_key)
             retry = _should_retry_post(r.status_code, None)
             log.warning(
                 "delivery.post_failed",
@@ -469,7 +412,7 @@ async def _post_to_winner(
             if retry and attempt < POST_MAX_ATTEMPTS:
                 await asyncio.sleep(POST_RETRY_BASE_DELAY_S * (2 ** (attempt - 1)))
                 continue
-            return (False, r.status_code, r.text[:2048])
+            return (False, r.status_code, r.text[:2048], idempotency_key)
         except Exception as e:
             retry = _should_retry_post(None, e)
             log.warning(
@@ -484,8 +427,8 @@ async def _post_to_winner(
             if retry and attempt < POST_MAX_ATTEMPTS:
                 await asyncio.sleep(POST_RETRY_BASE_DELAY_S * (2 ** (attempt - 1)))
                 continue
-            return (False, None, f"{type(e).__name__}: {e}")
-    return (False, None, "retry_exhausted")
+            return (False, None, f"{type(e).__name__}: {e}", idempotency_key)
+    return (False, None, "retry_exhausted", idempotency_key)
 
 
 async def run_auction(lead: Lead) -> PingPostResult:
@@ -534,13 +477,45 @@ async def run_auction(lead: Lead) -> PingPostResult:
         if winner_pair:
             ping_resp, buyer = winner_pair
             bid_cents = ping_resp.bid_cents or 0
-            reserved = await _reserve_buyer_wallet(buyer.id, lead.id, bid_cents)
-            if reserved:
-                winning_buyer_id = buyer.id
-                winning_bid = bid_cents
-                ok, status, body = await _post_to_winner(client, buyer, lead, bid_cents)
-            else:
-                ok, status, body = False, None, "buyer wallet/status changed before post"
+            winning_buyer_id = buyer.id
+            winning_bid = bid_cents
+            ok = False
+            status = None
+            body = "delivery_not_attempted"
+            last_key = ""
+
+            for post_attempt in range(1, POST_MAX_ATTEMPTS + 1):
+                ok, status, body, idem_key = await _post_to_winner(
+                    client, buyer, lead, bid_cents, post_attempt=post_attempt
+                )
+                last_key = idem_key
+                response_hash = hashlib.sha256((body or "").encode()).hexdigest() if body else None
+                retry_count = post_attempt - 1
+                should_retry = (not ok) and _should_retry_post(status, None) and post_attempt < POST_MAX_ATTEMPTS
+                next_retry_at = (
+                    datetime.now(UTC)
+                    + timedelta(seconds=POST_RETRY_BASE_DELAY_S * (2 ** (post_attempt - 1)))
+                    if should_retry
+                    else None
+                )
+
+                async with get_session() as s:
+                    s.add(
+                        DeliveryAttempt(
+                            lead_id=lead.id,
+                            buyer_id=buyer.id,
+                            post_attempt=post_attempt,
+                            idempotency_key=idem_key,
+                            status="delivered" if ok else ("retry_scheduled" if should_retry else "failed"),
+                            response_code=status,
+                            response_body_hash=response_hash,
+                            retry_count=retry_count,
+                            next_retry_at=next_retry_at,
+                            error=None if ok else body,
+                        )
+                    )
+                if ok or not should_retry:
+                    break
 
             async with get_session() as s:
                 s.add(
@@ -553,26 +528,41 @@ async def run_auction(lead: Lead) -> PingPostResult:
                         response_body=body,
                     )
                 )
-                # update lead status
                 lead_row = await s.get(LeadRow, lead.id)
                 if lead_row:
                     lead_row.status = LeadStatus.SOLD.value if ok else LeadStatus.UNSOLD.value
                 if ok:
-                    s.add(
-                        BillingEvent(
-                            buyer_id=buyer.id,
-                            lead_id=lead.id,
-                            event_type="lead.posted",
-                            amount_cents=0,
-                            metadata_json={
-                                "reserved_cents": bid_cents,
-                                "post_result_status_code": status,
-                                "exclusive": True,
-                            },
+                    debit = _debit_amount(bid_cents)
+                    result = await s.execute(
+                        update(BuyerRow)
+                        .where(
+                            BuyerRow.id == buyer.id,
+                            BuyerRow.status == "active",
+                            BuyerRow.deposit_balance >= debit,
+                        )
+                        .values(
+                            deposit_balance=BuyerRow.deposit_balance - debit,
+                            lifetime_spend=BuyerRow.lifetime_spend + debit,
                         )
                     )
-            if reserved and not ok:
-                await _credit_failed_delivery(buyer.id, lead.id, bid_cents, status)
+                    if result.rowcount == 1:
+                        s.add(
+                            BillingEvent(
+                                buyer_id=buyer.id,
+                                lead_id=lead.id,
+                                event_type="lead.posted",
+                                amount_cents=-bid_cents,
+                                metadata_json={
+                                    "post_result_status_code": status,
+                                    "idempotency_key": last_key,
+                                    "exclusive": True,
+                                },
+                            )
+                        )
+                    else:
+                        lead_row.status = LeadStatus.UNSOLD.value
+                        ok = False
+                        winning_bid = None
         else:
             async with get_session() as s:
                 lead_row = await s.get(LeadRow, lead.id)

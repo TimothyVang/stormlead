@@ -250,6 +250,34 @@ class PostResult(Base):
     )
 
 
+class DeliveryAttempt(Base):
+    """delivery attempts for winner POST retries + idempotency tracking."""
+
+    __tablename__ = "delivery_attempts"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    lead_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("leads.id"), index=True)
+    buyer_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("buyers.id"), index=True
+    )
+    post_attempt: Mapped[int] = mapped_column(Integer)
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    response_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    response_body_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), index=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint("lead_id", "buyer_id", "post_attempt", name="uq_delivery_attempt_triplet"),
+        UniqueConstraint("idempotency_key", name="uq_delivery_attempt_idempotency_key"),
+    )
+
+
 class BillingEvent(Base):
     """append-only audit log. immutable. use for invoicing + disputes."""
 
