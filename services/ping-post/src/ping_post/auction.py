@@ -41,6 +41,8 @@ PING_TIMEOUT_S = 2.5
 POST_TIMEOUT_S = 5.0
 BID_WINDOW_S = 5.0
 MAX_PARALLEL_PINGS = 50
+POST_MAX_ATTEMPTS = 3
+POST_RETRY_BASE_DELAY_S = 0.25
 
 
 @dataclass
@@ -107,6 +109,19 @@ def _sign_webhook(secret: str, timestamp: str, body: bytes) -> str:
     msg = f"{timestamp}.".encode() + body
     sig = hmac.new(secret.encode(), msg, hashlib.sha256).hexdigest()
     return f"v1,{sig}"
+
+
+def _delivery_idempotency_key(lead_id: UUID, buyer_id: UUID, bid_cents: int) -> str:
+    raw = f"{lead_id}:{buyer_id}:{bid_cents}".encode()
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _should_retry_post(status_code: int | None, error: Exception | None) -> bool:
+    if error is not None:
+        return isinstance(error, (httpx.TimeoutException, httpx.NetworkError))
+    if status_code is None:
+        return False
+    return status_code == 429 or 500 <= status_code <= 599
 
 
 async def _ping_one(
@@ -417,20 +432,70 @@ async def _post_to_winner(
         }
     ).encode()
     ts = str(int(time.time()))
+    idempotency_key = _delivery_idempotency_key(lead.id, buyer.id, bid_cents)
     headers = {
         "Content-Type": "application/json",
         "Webhook-Timestamp": ts,
         "Webhook-Signature": _sign_webhook(buyer.webhook_secret, ts, body),
         "Webhook-Id": str(uuid4()),
+        "Idempotency-Key": idempotency_key,
         "X-Stormlead-Mode": "post",
     }
-    try:
-        r = await client.post(
-            buyer.webhook_url, content=body, headers=headers, timeout=POST_TIMEOUT_S
-        )
-        return (200 <= r.status_code < 300, r.status_code, r.text[:2048])
-    except Exception as e:
-        return (False, None, f"{type(e).__name__}: {e}")
+    last_failure: str | None = None
+    for attempt in range(1, POST_MAX_ATTEMPTS + 1):
+        try:
+            r = await client.post(
+                buyer.webhook_url, content=body, headers=headers, timeout=POST_TIMEOUT_S
+            )
+            ok = 200 <= r.status_code < 300
+            if ok:
+                log.info(
+                    "delivery.post_succeeded",
+                    lead_id=str(lead.id),
+                    buyer_id=str(buyer.id),
+                    bid_cents=bid_cents,
+                    attempt=attempt,
+                )
+                return (True, r.status_code, r.text[:2048])
+            retry = _should_retry_post(r.status_code, None)
+            log.warning(
+                "delivery.post_failed",
+                lead_id=str(lead.id),
+                buyer_id=str(buyer.id),
+                bid_cents=bid_cents,
+                attempt=attempt,
+                status_code=r.status_code,
+                will_retry=retry and attempt < POST_MAX_ATTEMPTS,
+            )
+            if retry and attempt < POST_MAX_ATTEMPTS:
+                await asyncio.sleep(POST_RETRY_BASE_DELAY_S * (2 ** (attempt - 1)))
+                continue
+            last_failure = r.text[:2048]
+            return (False, r.status_code, last_failure)
+        except Exception as e:
+            retry = _should_retry_post(None, e)
+            last_failure = f"{type(e).__name__}: {e}"
+            log.warning(
+                "delivery.post_exception",
+                lead_id=str(lead.id),
+                buyer_id=str(buyer.id),
+                bid_cents=bid_cents,
+                attempt=attempt,
+                error=f"{type(e).__name__}: {e}",
+                will_retry=retry and attempt < POST_MAX_ATTEMPTS,
+            )
+            if retry and attempt < POST_MAX_ATTEMPTS:
+                await asyncio.sleep(POST_RETRY_BASE_DELAY_S * (2 ** (attempt - 1)))
+                continue
+            return (False, None, last_failure)
+    log.error(
+        "delivery.post_retry_exhausted",
+        lead_id=str(lead.id),
+        buyer_id=str(buyer.id),
+        bid_cents=bid_cents,
+        attempts=POST_MAX_ATTEMPTS,
+    )
+    return (False, None, f"retry_exhausted after {POST_MAX_ATTEMPTS} attempts: {last_failure}")
 
 
 async def run_auction(lead: Lead) -> PingPostResult:
