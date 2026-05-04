@@ -75,6 +75,14 @@ class BuyerCreateRequest(BaseModel):
     target_zips: list[str] = Field(default_factory=list)
     exclusive_zips: list[str] = Field(default_factory=list)
     low_balance_threshold: Decimal = Field(default=Decimal("0.00"), ge=Decimal("0"))
+    zip_allowlist: list[str] = Field(default_factory=list)
+    zip_exclusive: list[str] = Field(default_factory=list)
+    monthly_cap: int | None = Field(default=None, ge=1)
+    is_paused: bool = False
+    pause_ping: bool = False
+    pause_post: bool = False
+    sla_response_ms: int | None = Field(default=None, ge=1)
+    sla_post_within_seconds: int | None = Field(default=None, ge=1)
 
     @field_validator("contact_phone_e164")
     @classmethod
@@ -88,7 +96,7 @@ class BuyerCreateRequest(BaseModel):
     def license_state_uppercase(cls, value: str | None) -> str | None:
         return value.upper() if value else None
 
-    @field_validator("services", "target_zips", "exclusive_zips")
+    @field_validator("services", "target_zips", "exclusive_zips", "zip_allowlist", "zip_exclusive")
     @classmethod
     def normalize_string_list(cls, value: list[str]) -> list[str]:
         return _normalize_string_list(value)
@@ -117,6 +125,14 @@ class BuyerUpdateRequest(BaseModel):
     target_zips: list[str] | None = None
     exclusive_zips: list[str] | None = None
     low_balance_threshold: Decimal | None = Field(default=None, ge=Decimal("0"))
+    zip_allowlist: list[str] | None = None
+    zip_exclusive: list[str] | None = None
+    monthly_cap: int | None = Field(default=None, ge=1)
+    is_paused: bool | None = None
+    pause_ping: bool | None = None
+    pause_post: bool | None = None
+    sla_response_ms: int | None = Field(default=None, ge=1)
+    sla_post_within_seconds: int | None = Field(default=None, ge=1)
 
     @field_validator("contact_phone_e164")
     @classmethod
@@ -130,7 +146,7 @@ class BuyerUpdateRequest(BaseModel):
     def license_state_uppercase(cls, value: str | None) -> str | None:
         return value.upper() if value else None
 
-    @field_validator("services", "target_zips", "exclusive_zips")
+    @field_validator("services", "target_zips", "exclusive_zips", "zip_allowlist", "zip_exclusive")
     @classmethod
     def normalize_optional_string_list(cls, value: list[str] | None) -> list[str] | None:
         return _normalize_string_list(value) if value is not None else None
@@ -533,7 +549,15 @@ async def create_buyer(payload: BuyerCreateRequest) -> dict[str, Any]:
         services=payload.services,
         target_zips=payload.target_zips,
         exclusive_zips=payload.exclusive_zips,
+        zip_allowlist=payload.zip_allowlist,
+        zip_exclusive=payload.zip_exclusive,
         low_balance_threshold=payload.low_balance_threshold,
+        monthly_cap=payload.monthly_cap,
+        is_paused=payload.is_paused,
+        pause_ping=payload.pause_ping,
+        pause_post=payload.pause_post,
+        sla_response_ms=payload.sla_response_ms,
+        sla_post_within_seconds=payload.sla_post_within_seconds,
         deposit_balance=payload.deposit_balance,
     )
     try:
@@ -695,6 +719,33 @@ async def add_deposit(buyer_id: UUID, payload: DepositRequest) -> dict[str, Any]
         ) from e
 
 
+@app.patch("/v1/admin/buyers/{buyer_id}/constraints")
+async def update_buyer_constraints(buyer_id: UUID, payload: BuyerUpdateRequest) -> dict[str, Any]:
+    return await update_buyer(buyer_id, payload)
+
+
+@app.get("/v1/admin/eligibility-health")
+async def eligibility_health() -> dict[str, Any]:
+    async with get_session() as s:
+        buyers = (await s.execute(select(BuyerRow))).scalars().all()
+        unhealthy = []
+        for b in buyers:
+            reasons = []
+            if b.is_paused or b.pause_ping:
+                reasons.append("paused")
+            if b.status != BuyerStatus.ACTIVE.value:
+                reasons.append("not_active")
+            if b.deposit_balance <= b.low_balance_threshold:
+                reasons.append("low_balance")
+            if reasons:
+                unhealthy.append({"buyer_id": str(b.id), "reasons": reasons})
+        return {
+            "total_buyers": len(buyers),
+            "healthy_buyers": len(buyers) - len(unhealthy),
+            "unhealthy_buyers": unhealthy,
+        }
+
+
 @app.post("/v1/leads/{lead_id}/return")
 async def return_lead(lead_id: UUID, payload: ReturnLeadRequest) -> dict[str, Any]:
     try:
@@ -808,7 +859,15 @@ def _buyer_response(buyer: BuyerRow) -> dict[str, Any]:
             "services": buyer.services or [],
             "target_zips": buyer.target_zips or [],
             "exclusive_zips": buyer.exclusive_zips or [],
+            "zip_allowlist": buyer.zip_allowlist or [],
+            "zip_exclusive": buyer.zip_exclusive or [],
             "low_balance_threshold_cents": _decimal_to_cents(buyer.low_balance_threshold),
+            "monthly_cap": buyer.monthly_cap,
+            "is_paused": buyer.is_paused,
+            "pause_ping": buyer.pause_ping,
+            "pause_post": buyer.pause_post,
+            "sla_response_ms": buyer.sla_response_ms,
+            "sla_post_within_seconds": buyer.sla_post_within_seconds,
             "filter_expression": buyer.filter_expression,
             "webhook_url": buyer.webhook_url,
         }

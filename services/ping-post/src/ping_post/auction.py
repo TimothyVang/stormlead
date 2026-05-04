@@ -17,6 +17,7 @@ import hmac
 import json
 import time
 from dataclasses import dataclass
+from typing import Any
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
@@ -54,6 +55,38 @@ class PingResponse:
     status_code: int | None
     body: str | None
     error: str | None
+
+
+@dataclass
+class EligibilityCheck:
+    eligible: bool
+    score: int
+    reasons: list[str]
+
+
+def _evaluate_buyer_eligibility(buyer: Buyer, lead: Lead) -> EligibilityCheck:
+    reasons: list[str] = []
+    if buyer.is_paused or buyer.pause_ping:
+        reasons.append("paused_for_ping")
+    lead_class = lead.lead_class.value if lead.lead_class else None
+    if lead_class in {"c", "d"}:
+        reasons.append("lead_class_not_sellable")
+    if buyer.zip_allowlist and lead.zip not in buyer.zip_allowlist:
+        reasons.append("zip_not_allowlisted")
+    if buyer.zip_exclusive and lead.zip not in buyer.zip_exclusive:
+        reasons.append("zip_not_exclusive_match")
+    if buyer.target_zips and lead.zip not in buyer.target_zips:
+        reasons.append("zip_not_targeted")
+    if lead.requested_service and buyer.services and lead.requested_service not in buyer.services:
+        reasons.append("service_type_not_supported")
+    score = 0
+    if buyer.zip_exclusive and lead.zip in buyer.zip_exclusive:
+        score += 10000
+    if buyer.zip_allowlist and lead.zip in buyer.zip_allowlist:
+        score += 500
+    if buyer.services and lead.requested_service and lead.requested_service in buyer.services:
+        score += 200
+    return EligibilityCheck(eligible=not reasons, score=score, reasons=reasons)
 
 
 def _ping_payload(lead: Lead) -> dict:
@@ -227,7 +260,15 @@ async def _select_eligible_buyers(lead: Lead) -> list[Buyer]:
             services=r.services or [],
             target_zips=r.target_zips or [],
             exclusive_zips=r.exclusive_zips or [],
+            zip_allowlist=r.zip_allowlist or [],
+            zip_exclusive=r.zip_exclusive or [],
             low_balance_threshold=r.low_balance_threshold,
+            monthly_cap=r.monthly_cap,
+            is_paused=r.is_paused,
+            pause_ping=r.pause_ping,
+            pause_post=r.pause_post,
+            sla_response_ms=r.sla_response_ms,
+            sla_post_within_seconds=r.sla_post_within_seconds,
             deposit_balance=r.deposit_balance,
             lifetime_spend=r.lifetime_spend,
             created_at=r.created_at,
@@ -236,24 +277,12 @@ async def _select_eligible_buyers(lead: Lead) -> list[Buyer]:
         verdict = evaluate_filter(buyer.filter_expression, lead)
         if (
             verdict.matches
-            and _buyer_matches_paid_pilot_rules(buyer, lead)
+            and _evaluate_buyer_eligibility(buyer, lead).eligible
             and await _buyer_within_caps(buyer)
         ):
             eligible.append(buyer)
     log.info("buyers.eligible", lead_id=str(lead.id), count=len(eligible))
     return eligible
-
-
-def _buyer_matches_paid_pilot_rules(buyer: Buyer, lead: Lead) -> bool:
-    """Business eligibility that should not live inside freeform CEL."""
-    lead_class = lead.lead_class.value if lead.lead_class else None
-    if lead_class in {"c", "d"}:
-        return False
-    if buyer.target_zips and lead.zip not in buyer.target_zips:
-        return False
-    if lead.requested_service and buyer.services and lead.requested_service not in buyer.services:
-        return False
-    return True
 
 
 async def _buyer_within_caps(buyer: Buyer) -> bool:
@@ -305,21 +334,33 @@ async def _record_pings(
 def _pick_winner(
     responses: list[PingResponse],
     buyers_by_id: dict[UUID, Buyer],
-    damage_tier: DamageTier | None,
-) -> tuple[PingResponse, Buyer] | None:
+    lead: Lead,
+) -> tuple[PingResponse, Buyer, str, int] | None:
     accepting = [
         r
         for r in responses
         if r.accepted
         and r.bid_cents
         and _buyer_can_afford_bid(buyers_by_id[r.buyer_id], r.bid_cents)
+        and not buyers_by_id[r.buyer_id].pause_post
+        and not buyers_by_id[r.buyer_id].is_paused
+        and _evaluate_buyer_eligibility(buyers_by_id[r.buyer_id], lead).eligible
     ]
     if not accepting:
         return None
-    # highest bid wins. ties broken by lowest response time (fastest buyer).
-    accepting.sort(key=lambda r: (-(r.bid_cents or 0), r.response_ms))
+    # deterministic ordering: highest bid, eligibility score, fastest response, stable UUID tie-break.
+    accepting.sort(
+        key=lambda r: (
+            -(r.bid_cents or 0),
+            -_evaluate_buyer_eligibility(buyers_by_id[r.buyer_id], lead).score,
+            r.response_ms,
+            str(r.buyer_id),
+        )
+    )
     winner = accepting[0]
-    return winner, buyers_by_id[winner.buyer_id]
+    eligibility = _evaluate_buyer_eligibility(buyers_by_id[winner.buyer_id], lead)
+    reason = f"highest_bid_then_score_then_latency;bid={winner.bid_cents};score={eligibility.score}"
+    return winner, buyers_by_id[winner.buyer_id], reason, eligibility.score
 
 
 def _buyer_can_afford_bid(buyer: Buyer, bid_cents: int) -> bool:
@@ -527,12 +568,12 @@ async def run_auction(lead: Lead) -> PingPostResult:
 
         await _record_pings(lead.id, payload, responses)
 
-        winner_pair = _pick_winner(responses, buyers_by_id, lead.damage_tier)
+        winner_pair = _pick_winner(responses, buyers_by_id, lead)
         winning_buyer_id: UUID | None = None
         winning_bid: int | None = None
 
         if winner_pair:
-            ping_resp, buyer = winner_pair
+            ping_resp, buyer, selection_reason, selection_score = winner_pair
             bid_cents = ping_resp.bid_cents or 0
             reserved = await _reserve_buyer_wallet(buyer.id, lead.id, bid_cents)
             if reserved:
@@ -551,6 +592,8 @@ async def run_auction(lead: Lead) -> PingPostResult:
                         delivered=ok,
                         response_status_code=status,
                         response_body=body,
+                        selection_reason=selection_reason,
+                        selection_score=selection_score,
                     )
                 )
                 # update lead status

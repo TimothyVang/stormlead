@@ -111,7 +111,15 @@ class BuyerRow(Base):
     services: Mapped[list[str]] = mapped_column(JSONB, default=list)
     target_zips: Mapped[list[str]] = mapped_column(JSONB, default=list)
     exclusive_zips: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    zip_allowlist: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    zip_exclusive: Mapped[list[str]] = mapped_column(JSONB, default=list)
     low_balance_threshold: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal(0))
+    monthly_cap: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    is_paused: Mapped[bool] = mapped_column(Boolean, default=False)
+    pause_ping: Mapped[bool] = mapped_column(Boolean, default=False)
+    pause_post: Mapped[bool] = mapped_column(Boolean, default=False)
+    sla_response_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sla_post_within_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     deposit_balance: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal(0))
     lifetime_spend: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal(0))
@@ -245,6 +253,8 @@ class PostResult(Base):
     response_body: Mapped[str | None] = mapped_column(Text, nullable=True)
     returned: Mapped[bool] = mapped_column(Boolean, default=False)
     return_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    selection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    selection_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), index=True
     )

@@ -216,7 +216,15 @@ class Buyer(BaseModel):
     services: list[str] = Field(default_factory=list)
     target_zips: list[str] = Field(default_factory=list)
     exclusive_zips: list[str] = Field(default_factory=list)
+    zip_allowlist: list[str] = Field(default_factory=list)
+    zip_exclusive: list[str] = Field(default_factory=list)
     low_balance_threshold: Decimal = Decimal(0)
+    monthly_cap: int | None = None
+    is_paused: bool = False
+    pause_ping: bool = False
+    pause_post: bool = False
+    sla_response_ms: int | None = None
+    sla_post_within_seconds: int | None = None
 
     # billing
     deposit_balance: Decimal = Decimal(0)
