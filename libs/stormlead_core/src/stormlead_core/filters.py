@@ -13,7 +13,7 @@ NEVER use eval() / exec() for buyer rules. cel is the explicit-by-design choice.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import celpy
 import structlog
@@ -69,7 +69,7 @@ def evaluate_filter(expression: str, lead: Lead) -> FilterResult:
     """
     try:
         f = BuyerFilter.compile(expression)
-        result = f.program.evaluate(celpy.json_to_cel(_lead_to_cel(lead)))
+        result = f.program.evaluate(cast(Any, celpy.json_to_cel(_lead_to_cel(lead))))
         return FilterResult(matches=bool(result))
     except celpy.CELParseError as e:
         log.error("cel.parse_error", expression=expression, error=str(e))

@@ -23,22 +23,43 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 import httpx
+from hatchet_sdk import Hatchet
 from sqlalchemy import func, select, update
 from stormlead_core import (
     Buyer,
+    BuyerSalesStage,
+    BuyerStatus,
     DamageTier,
     Lead,
     LeadStatus,
     PingPostResult,
+    PipelineState,
     bind_correlation_id,
     emit_event,
     emit_metric,
     evaluate_filter,
     get_logger,
 )
-from stormlead_db import BillingEvent, BuyerRow, LeadRow, PingAttempt, PostResult, get_session
+from stormlead_db import (
+    BillingEvent,
+    BuyerRow,
+    LeadRow,
+    PingAttempt,
+    PostResult,
+    get_session,
+    record_transition,
+)
 
 log = get_logger(__name__)
+_hatchet_client: Hatchet | None = None
+
+
+def _hatchet() -> Hatchet:
+    global _hatchet_client
+    if _hatchet_client is None:
+        _hatchet_client = Hatchet(debug=False)
+    return _hatchet_client
+
 
 # tunables. exposed via env in production.
 PING_TIMEOUT_S = 2.5
@@ -238,7 +259,7 @@ async def _select_eligible_buyers(lead: Lead) -> list[Buyer]:
             company=r.company,
             contact_email=r.contact_email,
             contact_phone_e164=r.contact_phone_e164,
-            status=r.status,
+            status=BuyerStatus(r.status),
             license_number=r.license_number,
             license_state=r.license_state,
             license_verified_at=r.license_verified_at,
@@ -250,7 +271,7 @@ async def _select_eligible_buyers(lead: Lead) -> list[Buyer]:
             filter_expression=r.filter_expression,
             daily_cap=r.daily_cap,
             monthly_budget=r.monthly_budget,
-            sales_stage=r.sales_stage,
+            sales_stage=BuyerSalesStage(r.sales_stage),
             notes=r.notes,
             next_follow_up_at=r.next_follow_up_at,
             services=r.services or [],
@@ -331,6 +352,32 @@ async def _record_pings(
             )
 
 
+async def _record_pipeline_transition(
+    lead_id: UUID,
+    from_state: PipelineState,
+    to_state: PipelineState,
+    event_type: str,
+    payload: dict,
+) -> None:
+    async with get_session() as s:
+        await record_transition(
+            s,
+            lead_id=lead_id,
+            from_state=from_state,
+            to_state=to_state,
+            event_type=event_type,
+            task_name="ping_post.run_auction",
+            payload=payload,
+        )
+
+
+def _push_lead_event(event_name: str, lead_id: UUID, payload: dict | None = None) -> None:
+    _hatchet().event.push(
+        event_name,
+        {"lead_id": str(lead_id), "source_event": event_name, **(payload or {})},
+    )
+
+
 def _pick_winner(
     responses: list[PingResponse],
     buyers_by_id: dict[UUID, Buyer],
@@ -378,7 +425,7 @@ async def _reserve_buyer_wallet(
                 lifetime_spend=BuyerRow.lifetime_spend + debit,
             )
         )
-        if result.rowcount != 1:
+        if getattr(result, "rowcount", 0) != 1:
             log.warning(
                 "buyer.wallet_reserve_rejected",
                 buyer_id=str(buyer_id),
@@ -556,11 +603,33 @@ async def run_auction(lead: Lead) -> PingPostResult:
         )
 
     buyers = await _select_eligible_buyers(lead)
+    await _record_pipeline_transition(
+        lead.id,
+        PipelineState.QUALIFIED,
+        PipelineState.AUCTIONED,
+        "lead.auctioned",
+        {"eligible_buyers": len(buyers)},
+    )
     if not buyers:
+        await _record_pipeline_transition(
+            lead.id,
+            PipelineState.AUCTIONED,
+            PipelineState.UNSOLD,
+            "lead.unsold",
+            {"reason": "no_eligible_buyers"},
+        )
         emit_event("auctioned", lead_id=str(lead.id), service="ping-post", buyers=0)
         emit_metric("funnel.auctioned", lead_id=str(lead.id), service="ping-post", buyers=0)
         emit_event("unsold", lead_id=str(lead.id), service="ping-post")
         emit_metric("funnel.unsold", lead_id=str(lead.id), service="ping-post")
+        emit_metric(
+            "auction.win_rate",
+            value=0,
+            lead_id=str(lead.id),
+            service="ping-post",
+            eligible_buyers=0,
+        )
+        _push_lead_event("lead.unsold", lead.id, {"reason": "no_eligible_buyers"})
         return PingPostResult(
             event_id=uuid4(),
             occurred_at=datetime.now(UTC),
@@ -625,7 +694,27 @@ async def run_auction(lead: Lead) -> PingPostResult:
                 lead_row = await s.get(LeadRow, lead.id)
                 if lead_row:
                     lead_row.status = LeadStatus.SOLD.value if ok else LeadStatus.UNSOLD.value
+                await record_transition(
+                    s,
+                    lead_id=lead.id,
+                    from_state=PipelineState.AUCTIONED,
+                    to_state=PipelineState.SOLD if ok else PipelineState.UNSOLD,
+                    event_type="lead.sold" if ok else "lead.unsold",
+                    task_name="ping_post.run_auction",
+                    payload={
+                        "buyer_id": str(buyer.id),
+                        "bid_cents": bid_cents,
+                        "post_status_code": status,
+                    },
+                )
                 if ok:
+                    emit_metric(
+                        "auction.win_rate",
+                        value=1,
+                        lead_id=str(lead.id),
+                        service="ping-post",
+                        eligible_buyers=len(buyers),
+                    )
                     s.add(
                         BillingEvent(
                             buyer_id=buyer.id,
@@ -639,6 +728,19 @@ async def run_auction(lead: Lead) -> PingPostResult:
                             },
                         )
                     )
+                else:
+                    emit_metric(
+                        "auction.win_rate",
+                        value=0,
+                        lead_id=str(lead.id),
+                        service="ping-post",
+                        eligible_buyers=len(buyers),
+                    )
+                    _push_lead_event(
+                        "lead.unsold",
+                        lead.id,
+                        {"reason": "post_failed", "buyer_id": str(buyer.id)},
+                    )
             if reserved and not ok:
                 emit_event(
                     "refunded", lead_id=str(lead.id), service="ping-post", buyer_id=str(buyer.id)
@@ -646,12 +748,27 @@ async def run_auction(lead: Lead) -> PingPostResult:
                 emit_metric("funnel.refunded", lead_id=str(lead.id), service="ping-post")
                 await _credit_failed_delivery(buyer.id, lead.id, bid_cents, status)
         else:
+            await _record_pipeline_transition(
+                lead.id,
+                PipelineState.AUCTIONED,
+                PipelineState.UNSOLD,
+                "lead.unsold",
+                {"reason": "no_accepted_bid", "eligible_buyers": len(buyers)},
+            )
             emit_event("auctioned", lead_id=str(lead.id), service="ping-post", buyers=len(buyers))
             emit_metric(
                 "funnel.auctioned", lead_id=str(lead.id), service="ping-post", buyers=len(buyers)
             )
             emit_event("unsold", lead_id=str(lead.id), service="ping-post")
             emit_metric("funnel.unsold", lead_id=str(lead.id), service="ping-post")
+            emit_metric(
+                "auction.win_rate",
+                value=0,
+                lead_id=str(lead.id),
+                service="ping-post",
+                eligible_buyers=len(buyers),
+            )
+            _push_lead_event("lead.unsold", lead.id, {"reason": "no_accepted_bid"})
             async with get_session() as s:
                 lead_row = await s.get(LeadRow, lead.id)
                 if lead_row:

@@ -9,11 +9,12 @@ from hatchet_sdk import Hatchet
 from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from stormlead_core import (
+    PipelineState,
     build_duplicate_window,
     get_logger,
     initial_quality_score,
 )
-from stormlead_db import ConsentAudit, LeadRow, get_session
+from stormlead_db import ConsentAudit, LeadRow, get_session, record_transition
 
 from form_receiver.schemas import ExtractedConsent
 
@@ -84,6 +85,15 @@ async def upsert_lead(extracted: ExtractedConsent, *, ip: str) -> UUID:
         )
         result = (await s.execute(stmt)).first()
         if result is not None:
+            await record_transition(
+                s,
+                lead_id=result.id,
+                from_state=None,
+                to_state=PipelineState.CAPTURED,
+                event_type="lead.captured",
+                task_name="form_receiver.upsert_lead",
+                payload={"source": "landing_form", "webhook_id": extracted.formbricks_response_id},
+            )
             return result.id
 
         existing = (

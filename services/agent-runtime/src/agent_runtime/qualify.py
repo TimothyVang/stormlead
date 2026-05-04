@@ -1,13 +1,11 @@
 """qualify_lead workflow: enrich + score a captured lead.
 
-triggered by hatchet event "lead.captured" emitted by form-receiver.
+triggered by hatchet event "lead.enriched" emitted by enrich-worker.
 inputs: payload with lead_id (uuid). outputs: structured qualification
 result; persists damage_tier + qualification_score on the lead row;
 emits "lead.qualified" or "lead.rejected" downstream.
 
-uses opus via oauth. the volume is bounded (one call per inbound lead;
-mvp scale ~10-100/day) so flat-rate subscription billing is the right
-fit. complex multi-step reasoning over pii is opus's strength.
+All model calls route through LiteLLM so tracing, keys, and budgets stay centralized.
 """
 
 from __future__ import annotations
@@ -17,17 +15,18 @@ import re
 from typing import Any
 from uuid import UUID, uuid4
 
-from hatchet_sdk import Context
+from hatchet_sdk import Context, Hatchet
 from stormlead_core import (
     ERROR_SINK,
     DamageTier,
     LeadClass,
+    PipelineState,
     bind_correlation_id,
     emit_event,
     emit_metric,
     get_logger,
 )
-from stormlead_db import LeadRow, get_session
+from stormlead_db import LeadRow, get_session, record_transition
 
 from agent_runtime.execution import (
     ModelPolicy,
@@ -62,11 +61,10 @@ Do not echo PII back; reason in the abstract.
 async def qualify_lead(context: Context) -> dict[str, Any]:
     """fetches lead, runs opus qualification, returns the raw result.
 
-    persistence + downstream event emission are TODO — wire when
-    skill_proposals + lead-status update paths land. for the v1 scaffold
-    this returns the raw model output so traces show the full call.
+    Returns the parsed qualification result after persisting lead status updates.
     """
-    payload = context.workflow_input()
+    workflow_input = context.workflow_input
+    payload = workflow_input() if callable(workflow_input) else workflow_input
     lead_id = UUID(payload["lead_id"])
     bind_correlation_id(payload.get("correlation_id") or str(lead_id))
 
@@ -96,7 +94,7 @@ async def qualify_lead(context: Context) -> dict[str, Any]:
         task_policy=TaskPolicy(timeout_seconds=120, retry_count=2),
         model_policy=ModelPolicy(
             primary_model="claude-opus-4-7",
-            fallback_model="claude-sonnet-4-5",
+            fallback_model="claude-sonnet-4-6",
             model_tier="premium",
             token_cap=12_000,
             cost_cap_usd=1.25,
@@ -147,13 +145,49 @@ async def qualify_lead(context: Context) -> dict[str, Any]:
         row.qualification_reason = parsed["reasoning"]
         row.rejection_reason = parsed["rejection_reason"]
         row.status = "rejected" if parsed["rejection_reason"] else "qualified"
+        to_state = PipelineState.REJECTED if parsed["rejection_reason"] else PipelineState.QUALIFIED
+        await record_transition(
+            s,
+            lead_id=lead_id,
+            from_state=PipelineState.ENRICHED,
+            to_state=to_state,
+            event_type="lead.rejected" if parsed["rejection_reason"] else "lead.qualified",
+            task_name="agent_runtime.qualify_lead",
+            workflow_run_id=envelope.run_id,
+            payload={
+                "qualification_score": parsed["qualification_score"],
+                "lead_class": row.lead_class,
+                "rejection_reason": parsed["rejection_reason"],
+            },
+        )
 
     stage = "qualified" if not parsed["rejection_reason"] else "unsold"
     emit_event(stage, lead_id=str(lead_id), service="agent-runtime")
     emit_metric(f"funnel.{stage}", lead_id=str(lead_id), service="agent-runtime")
+    emit_metric(
+        "qualification.latency_ms",
+        value=float(usage["duration_ms"]),
+        lead_id=str(lead_id),
+        service="agent-runtime",
+    )
+    emit_metric(
+        "llm.cost_per_lead",
+        value=float(usage["estimated_cost_usd"]),
+        lead_id=str(lead_id),
+        service="agent-runtime",
+        model=str(usage["model_used"]),
+    )
 
-    # TODO: emit lead.qualified / lead.rejected after Hatchet event emission is
-    # wrapped in a small shared helper. Persistence is the paid-pilot gate.
+    event_name = "lead.rejected" if parsed["rejection_reason"] else "lead.qualified"
+    Hatchet(debug=False).event.push(
+        event_name,
+        {
+            "lead_id": str(lead_id),
+            "run_id": envelope.run_id,
+            "correlation_id": str(lead_id),
+            "source_event": event_name,
+        },
+    )
     emit_task_event(
         status="success",
         event_type="agent.task.succeeded",

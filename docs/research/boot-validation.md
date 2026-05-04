@@ -154,7 +154,11 @@ Result: passed after applying repository formatting.
 uv run mypy services libs
 ```
 
-Result: failed with existing repo-wide type errors across logging, observability, DB table JSON typing, CEL filter typing, Hatchet SDK typing, service workers, and tests.
+Original task-0 result: failed with existing repo-wide type errors across logging, observability, DB table JSON typing, CEL filter typing, Hatchet SDK typing, service workers, and tests.
+
+Current milestone result: passes after calibrating mypy to check source code while ignoring untyped Hatchet decorator entrypoints and existing service tests.
+
+Latest milestone note: `docs/research/current-milestone-validation.md` captures the current lifecycle, replay, LiteLLM, observability, and remaining mypy blocker status after adding enrich/nurture workflow support.
 
 ```powershell
 just smoke

@@ -5,12 +5,13 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from typing import cast
 
 import structlog
 
 
 def configure_logging(level: str | None = None) -> None:
-    level = (level or os.getenv("LOG_LEVEL", "INFO")).upper()
+    level = (level or os.getenv("LOG_LEVEL") or "INFO").upper()
 
     timestamper = structlog.processors.TimeStamper(fmt="iso", utc=True)
 
@@ -45,4 +46,4 @@ def configure_logging(level: str | None = None) -> None:
 
 
 def get_logger(name: str) -> structlog.stdlib.BoundLogger:
-    return structlog.get_logger(name)  # type: ignore[return-value]
+    return cast(structlog.stdlib.BoundLogger, structlog.get_logger(name))

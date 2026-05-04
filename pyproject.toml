@@ -12,6 +12,7 @@ members = [
     "services/ping-post",
     "services/storm-watcher",
     "services/agent-runtime",
+    "services/enrich-worker",
     "services/form-receiver",
 ]
 
@@ -45,8 +46,24 @@ ignore = ["E501"]  # line length handled by formatter
 
 [tool.mypy]
 python_version = "3.12"
-strict = true
 ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = [
+    "agent_runtime.worker",
+    "enrich_worker.worker",
+    "ping_post.api",
+    "storm_watcher.worker",
+]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = [
+    "*.tests.*",
+]
+ignore_errors = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

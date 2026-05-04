@@ -170,7 +170,8 @@ _supports_legacy_hatchet_worker = hasattr(hatchet, "step")
 
 
 async def _auction_step(context: Context) -> dict[str, Any]:
-    payload = context.workflow_input()
+    workflow_input = context.workflow_input
+    payload = workflow_input() if callable(workflow_input) else workflow_input
     lead_id = payload["lead_id"]
 
     async with get_session() as s:
@@ -191,7 +192,7 @@ async def _auction_step(context: Context) -> dict[str, Any]:
 
 if _supports_legacy_hatchet_worker:
 
-    @hatchet.workflow(name="ping-post-auction", on_events=["lead.qualified", "lead.captured"])
+    @hatchet.workflow(name="ping-post-auction", on_events=["lead.qualified"])
     class PingPostWorkflow:
         """Hatchet SDK v0.x workflow wrapper."""
 

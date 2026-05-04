@@ -16,6 +16,7 @@ class PipelineState(StrEnum):
     AUCTIONED = "auctioned"
     SOLD = "sold"
     UNSOLD = "unsold"
+    REJECTED = "rejected"
     NURTURED = "nurtured"
 
 
@@ -30,11 +31,12 @@ class InvalidPipelineTransitionError(ValueError):
 
 _ALLOWED_TRANSITIONS: dict[PipelineState, frozenset[PipelineState]] = {
     PipelineState.CAPTURED: frozenset({PipelineState.ENRICHED}),
-    PipelineState.ENRICHED: frozenset({PipelineState.QUALIFIED}),
+    PipelineState.ENRICHED: frozenset({PipelineState.QUALIFIED, PipelineState.REJECTED}),
     PipelineState.QUALIFIED: frozenset({PipelineState.AUCTIONED}),
     PipelineState.AUCTIONED: frozenset({PipelineState.SOLD, PipelineState.UNSOLD}),
     PipelineState.SOLD: frozenset(),
     PipelineState.UNSOLD: frozenset({PipelineState.NURTURED}),
+    PipelineState.REJECTED: frozenset({PipelineState.NURTURED}),
     PipelineState.NURTURED: frozenset(),
 }
 

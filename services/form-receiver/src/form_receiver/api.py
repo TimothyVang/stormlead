@@ -125,7 +125,11 @@ async def formbricks_webhook(request: Request) -> dict[str, str]:
 
     if envelope.event != "responseFinished":
         # only finished responses are persisted; partials are noise
-        log.info("webhook.skipped_event", event=envelope.event, webhook_id=envelope.webhookId)
+        log.info(
+            "webhook.skipped_event",
+            formbricks_event=envelope.event,
+            webhook_id=envelope.webhookId,
+        )
         return {"status": "skipped", "reason": f"event {envelope.event} not persisted"}
 
     # 3. extract consent

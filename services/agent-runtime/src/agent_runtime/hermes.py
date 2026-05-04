@@ -5,9 +5,7 @@ modes, proposes skill / prompt mutations as rows in the
 `skill_proposals` postgres table. proposals are reviewed by the
 operator before any code change merges.
 
-uses opus via oauth. weekly cadence + bounded analysis budget make
-the rate-limit footprint trivial; opus-quality reasoning over the
-trace corpus is the differentiator.
+All model calls route through LiteLLM so tracing, keys, and budgets stay centralized.
 
 reference: NousResearch/hermes-agent-self-evolution (mit). this
 implementation is a minimal scaffold; expand the trace-digest +
@@ -61,7 +59,8 @@ async def hermes_self_evolution(context: Context) -> dict[str, Any]:
     # TODO: persist proposals to skill_proposals table
     digest = "TODO: populate from langfuse trace digest + skill registry"
 
-    payload = context.workflow_input()
+    workflow_input = context.workflow_input
+    payload = workflow_input() if callable(workflow_input) else workflow_input
     correlation_id = None
     if isinstance(payload.get("correlation_id"), str):
         correlation_id = UUID(payload["correlation_id"])
@@ -74,7 +73,7 @@ async def hermes_self_evolution(context: Context) -> dict[str, Any]:
         task_policy=TaskPolicy(timeout_seconds=600, retry_count=1),
         model_policy=ModelPolicy(
             primary_model="claude-opus-4-7",
-            fallback_model="claude-sonnet-4-5",
+            fallback_model="claude-sonnet-4-6",
             model_tier="premium",
             token_cap=20_000,
             cost_cap_usd=3.00,

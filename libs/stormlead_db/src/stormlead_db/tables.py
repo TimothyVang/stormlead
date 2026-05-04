@@ -211,6 +211,9 @@ class LeadStateTransition(Base):
     from_state: Mapped[str] = mapped_column(String(32))
     to_state: Mapped[str] = mapped_column(String(32), index=True)
     event_type: Mapped[str] = mapped_column(String(64), index=True)
+    task_name: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    workflow_run_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(32), default="succeeded", index=True)
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
     payload_json: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(

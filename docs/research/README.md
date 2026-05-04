@@ -26,10 +26,11 @@ claude research artifacts that informed the scaffold's choices. the two `2026-05
 - **openbao for secrets in v1** → deferred until 2nd operator. `.env` + sops-encrypted `.env.prod` is enough until then.
 - **hetzner falkenstein/helsinki ok for the auction endpoint** → deploy to ashburn (us-east) or hillsboro (us-west). eu→us rtt eats the auction budget.
 - **agents need an api key; oauth not allowed** → over-conservative reading of the policy. for single-operator personal automation, `CLAUDE_CODE_OAUTH_TOKEN` (via `claude setup-token` + claude code cli) is viable. the prohibition is on offering claude.ai login *to end users*. see `agent-auth-patterns.md` for the hybrid recommendation.
+- **hybrid oauth/litellm runtime** → superseded by the current milestone. Runtime services now use LiteLLM only; historical oauth research remains preserved for context.
 
 ## scaffold divergences from `forkable-stack.md` (deliberate)
 
-- **no suna fork.** agent-runtime is direct on claude agent sdk + litellm (~200 loc target), no supabase. see top-level README.
+- **no suna fork.** agent-runtime uses a small LiteLLM HTTP client, no supabase. see top-level README.
 - **ping-post is python (fastapi + hatchet), not rust/go.** rewrite the hot path later if/when we cross ~500 leads/sec sustained.
 - **no coolify.** prod runs docker compose under systemd on hetzner.
 

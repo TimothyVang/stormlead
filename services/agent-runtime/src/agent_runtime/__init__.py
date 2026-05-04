@@ -1,10 +1,8 @@
-"""agent-runtime: claude-agent-sdk workers for stormlead.
+"""agent-runtime: Hatchet workers for StormLead.
 
 two hatchet workflows registered:
-  qualify_lead            event-triggered (lead.captured); opus via oauth
-  hermes_self_evolution   weekly cron (mon 09:00 utc); opus via oauth
+  qualify_lead            event-triggered (lead.captured); LiteLLM-routed model call
+  hermes_self_evolution   weekly cron (mon 09:00 utc); LiteLLM-routed model call
 
-auth: hybrid per docs/research/2026-05-agent-auth-patterns.md.
-  - hermes + complex qualification → CLAUDE_CODE_OAUTH_TOKEN (opus, flat-rate)
-  - any future bulk path           → litellm proxy (haiku, pay-per-token)
+All model traffic goes through the LiteLLM proxy. Do not add direct provider SDKs here.
 """

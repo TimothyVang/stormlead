@@ -62,6 +62,15 @@ test-watch:
 smoke:
     uv run python scripts/smoke_e2e.py
 
+replay-lead LEAD_ID:
+    DATABASE_URL="$DATABASE_URL_HOST" uv run python scripts/replay_lead.py --lead-id "{{LEAD_ID}}"
+
+replay-lead-from LEAD_ID FROM_STATE:
+    DATABASE_URL="$DATABASE_URL_HOST" uv run python scripts/replay_lead.py --lead-id "{{LEAD_ID}}" --from-state "{{FROM_STATE}}"
+
+replay-lead-execute LEAD_ID FROM_STATE:
+    DATABASE_URL="$DATABASE_URL_HOST" uv run python scripts/replay_lead.py --lead-id "{{LEAD_ID}}" --from-state "{{FROM_STATE}}" --execute
+
 # --- lint + format ---
 
 fmt:

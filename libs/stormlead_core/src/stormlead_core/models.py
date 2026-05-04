@@ -33,11 +33,13 @@ class StormSeverity(StrEnum):
 class LeadStatus(StrEnum):
     NEW = "new"
     QUALIFYING = "qualifying"
+    ENRICHED = "enriched"
     QUALIFIED = "qualified"
     REJECTED = "rejected"
     POSTING = "posting"
     SOLD = "sold"
     UNSOLD = "unsold"
+    NURTURED = "nurtured"
     DIALING = "dialing"
     CONTACTED = "contacted"
     DEAD = "dead"

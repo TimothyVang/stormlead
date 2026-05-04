@@ -234,6 +234,20 @@ services:
       HATCHET_CLIENT_TLS_STRATEGY: none
       FORMBRICKS_WEBHOOK_SECRET: ${FORMBRICKS_WEBHOOK_SECRET}
 
+  enrich-worker:
+    image: ghcr.io/stormlead/enrich-worker:2026.05.0
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      hatchet-engine:
+        condition: service_started
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN}
+      HATCHET_CLIENT_HOST_PORT: ${HATCHET_CLIENT_HOST_PORT}
+      HATCHET_CLIENT_TLS_STRATEGY: none
+
   agent-runtime:
     image: ghcr.io/stormlead/agent-runtime:2026.05.0
     restart: unless-stopped
@@ -249,10 +263,8 @@ services:
       HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN}
       HATCHET_CLIENT_HOST_PORT: ${HATCHET_CLIENT_HOST_PORT}
       HATCHET_CLIENT_TLS_STRATEGY: none
-      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       LITELLM_PROXY_URL: ${LITELLM_PROXY_URL}
-      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
       LANGFUSE_HOST: ${LANGFUSE_HOST}

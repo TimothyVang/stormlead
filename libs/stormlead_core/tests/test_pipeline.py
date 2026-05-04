@@ -19,6 +19,7 @@ def test_all_required_states_exist() -> None:
         "auctioned",
         "sold",
         "unsold",
+        "rejected",
         "nurtured",
     }
 
@@ -26,11 +27,12 @@ def test_all_required_states_exist() -> None:
 def test_allowed_transition_matrix() -> None:
     allowed = {
         PipelineState.CAPTURED: {PipelineState.ENRICHED},
-        PipelineState.ENRICHED: {PipelineState.QUALIFIED},
+        PipelineState.ENRICHED: {PipelineState.QUALIFIED, PipelineState.REJECTED},
         PipelineState.QUALIFIED: {PipelineState.AUCTIONED},
         PipelineState.AUCTIONED: {PipelineState.SOLD, PipelineState.UNSOLD},
         PipelineState.SOLD: set(),
         PipelineState.UNSOLD: {PipelineState.NURTURED},
+        PipelineState.REJECTED: {PipelineState.NURTURED},
         PipelineState.NURTURED: set(),
     }
     for from_state in PipelineState:

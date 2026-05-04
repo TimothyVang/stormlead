@@ -3,11 +3,14 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Literal
 from uuid import UUID, uuid4
 
-from claude_agent_sdk import ClaudeAgentOptions, query
+import httpx
 from stormlead_core import get_logger
 from stormlead_core.events import AgentTaskEnvelope, AgentTaskEvent
+
+from agent_runtime.auth import litellm_chat_completions_url, litellm_headers
 
 log = get_logger(__name__)
 
@@ -42,10 +45,45 @@ def _estimate_cost_usd(model: str, input_tokens: int, output_tokens: int) -> flo
     return (input_tokens * in_rate) + (output_tokens * out_rate)
 
 
+def _completion_payload(
+    *,
+    model: str,
+    system_prompt: str,
+    prompt: str,
+    max_tokens: int,
+) -> dict:
+    return {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ],
+        "max_tokens": max(1, max_tokens),
+    }
+
+
+def _extract_completion_text(response_json: dict) -> str:
+    choices = response_json.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise ValueError("LiteLLM response did not include choices")
+    message = choices[0].get("message") if isinstance(choices[0], dict) else None
+    if not isinstance(message, dict):
+        raise ValueError("LiteLLM response did not include a message")
+    content = message.get("content")
+    if not isinstance(content, str):
+        raise ValueError("LiteLLM response message content was not text")
+    return content
+
+
 def emit_task_event(
     *,
-    status: str,
-    event_type: str,
+    status: Literal["started", "success", "failure", "dead_lettered"],
+    event_type: Literal[
+        "agent.task.started",
+        "agent.task.succeeded",
+        "agent.task.failed",
+        "agent.task.dead_lettered",
+    ],
     envelope: AgentTaskEnvelope,
     attempt: int,
     model_used: str,
@@ -94,15 +132,22 @@ async def run_agent_task(
     last_err: Exception | None = None
     for idx, model in enumerate(models):
         fallback_used = idx > 0
-        options = ClaudeAgentOptions(
-            model=model, system_prompt=system_prompt, allowed_tools=allowed_tools
-        )
         try:
-            result_text = ""
-            async for message in query(prompt=prompt, options=options):
-                content = getattr(message, "content", None)
-                if content:
-                    result_text += str(content)
+            if allowed_tools:
+                raise ValueError("LiteLLM chat execution does not support agent tools yet")
+            async with httpx.AsyncClient(timeout=envelope.timeout_seconds) as client:
+                response = await client.post(
+                    litellm_chat_completions_url(),
+                    headers=litellm_headers(),
+                    json=_completion_payload(
+                        model=model,
+                        system_prompt=system_prompt,
+                        prompt=prompt,
+                        max_tokens=envelope.token_cap - input_tokens,
+                    ),
+                )
+                response.raise_for_status()
+                result_text = _extract_completion_text(response.json())
 
             out_tokens = _estimate_tokens(result_text)
             total_tokens = input_tokens + out_tokens

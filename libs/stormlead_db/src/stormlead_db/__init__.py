@@ -9,6 +9,14 @@ from stormlead_db.tables import (
     PostResult,
     StormRow,
 )
+from stormlead_db.transitions import (
+    TransitionWriteResult,
+    build_transition_idempotency_key,
+    has_active_transition,
+    latest_state,
+    latest_transition,
+    record_transition,
+)
 
 __all__ = [
     "BillingEvent",
@@ -19,6 +27,12 @@ __all__ = [
     "PingAttempt",
     "PostResult",
     "StormRow",
+    "TransitionWriteResult",
+    "build_transition_idempotency_key",
     "get_engine",
     "get_session",
+    "has_active_transition",
+    "latest_state",
+    "latest_transition",
+    "record_transition",
 ]

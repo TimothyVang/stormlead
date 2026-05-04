@@ -46,6 +46,7 @@ from stormlead_core.pipeline import (
     is_terminal,
     next_states,
 )
+from stormlead_core.replay import ReplayPlan, build_replay_plan
 
 __all__ = [
     "ERROR_SINK",
@@ -66,6 +67,7 @@ __all__ = [
     "PingPostResult",
     "PipelineState",
     "QualityScore",
+    "ReplayPlan",
     "Storm",
     "StormDetected",
     "StormEvent",
@@ -73,6 +75,7 @@ __all__ = [
     "assert_transition",
     "bind_correlation_id",
     "build_duplicate_window",
+    "build_replay_plan",
     "can_transition",
     "configure_logging",
     "correlation_scope",

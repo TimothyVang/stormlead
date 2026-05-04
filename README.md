@@ -18,7 +18,8 @@ the **ping-post engine** in `services/ping-post/`. nothing forkable exists for t
 services/
   ping-post/                fastapi, the auction engine + cel filters
   storm-watcher/            tropycal/nws/fema pollers, hatchet cron
-  agent-runtime/            claude-agent-sdk workers: qualify_lead (opus, oauth) + hermes_self_evolution (weekly cron)
+  enrich-worker/            deterministic lead enrichment + lead.enriched event
+  agent-runtime/            LiteLLM-routed qualify/nurture/hermes workers
   form-receiver/            formbricks webhook ingestion + tcpa consent audit + lead.captured event
 
 libs/
@@ -41,7 +42,7 @@ scripts/                    (placeholder) one-shot ops
 .github/workflows/          (placeholder) ci/cd
 ```
 
-unimplemented yet (will return as they ship): `apps/landing`, `apps/buyer-portal`, `services/voice-bridge`, `services/enrich-worker`.
+unimplemented yet (will return as they ship): `apps/landing`, `apps/buyer-portal`, `services/voice-bridge`.
 
 ## quickstart (wsl2)
 
@@ -76,10 +77,10 @@ prod compose + deploy script are placeholders (`infra/compose/prod/`, `.github/w
 
 ## known traps (read these)
 
-1. **litellm**: pinned to a known-good image sha after the march 2026 supply-chain attack. do not `pip install litellm` anywhere. only the cosign-verified docker image. (current pin v1.83.4 is now CVE'd — bump to v1.83.7-stable; see `docs/research/2026-05-stack-improvements.md`.)
-2. **claude agent sdk** ignores `ANTHROPIC_BASE_URL` from the bundled cli — set `cli_path` explicitly when `services/agent-runtime/` lands. two viable auth paths: (a) api key via litellm (default, full observability + cost caps), (b) `CLAUDE_CODE_OAUTH_TOKEN` for subscription-billed opus work that bypasses litellm. hybrid recommended; see `docs/research/2026-05-agent-auth-patterns.md`.
+1. **litellm**: pinned to a known-good image sha after the march 2026 supply-chain attack. do not `pip install litellm` anywhere. only the cosign-verified docker image. Runtime model calls use the LiteLLM OpenAI-compatible proxy only.
+2. **direct provider sdks**: not allowed in runtime services. `agent-runtime` calls `${LITELLM_PROXY_URL}/v1/chat/completions`; static tests reject direct Anthropic/OpenAI SDK imports.
 3. **postgres mcp**: anthropic's reference server is archived + exploitable. we use `crystaldba/postgres-mcp-pro` behind a read-only role. (pin a specific tag, not `:latest`.)
-4. **suna**: not used. agent loop is direct on claude agent sdk + litellm. ~200 loc, no supabase.
+4. **suna**: not used. agent execution is a small LiteLLM HTTP client, no supabase.
 5. **rust**: not used. python everywhere. rewrite ping-post hot path in go later if we cross 500 leads/sec sustained.
 6. **hetzner region**: deploy to ashburn (us-east) or hillsboro (us-west). a falkenstein/helsinki box adds 150–200ms rtt to every buyer ping/post — eats the auction's <5s budget. see `docs/research/2026-05-architectural-fit.md`.
 7. **nats / seaweedfs / openbao not in v1 compose**: cut after architectural-fit research. hatchet handles durable workflows on postgres; hetzner object storage replaces seaweedfs in prod; sops-encrypted `.env.prod` replaces openbao until 2nd operator. re-add any of these when a concrete need surfaces, not before.
