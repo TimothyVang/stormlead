@@ -1,15 +1,3 @@
-"""qualify_lead workflow: enrich + score a captured lead.
-
-triggered by hatchet event "lead.captured" emitted by form-receiver.
-inputs: payload with lead_id (uuid). outputs: structured qualification
-result; persists damage_tier + qualification_score on the lead row;
-emits "lead.qualified" or "lead.rejected" downstream.
-
-uses opus via oauth. the volume is bounded (one call per inbound lead;
-mvp scale ~10-100/day) so flat-rate subscription billing is the right
-fit. complex multi-step reasoning over pii is opus's strength.
-"""
-
 from __future__ import annotations
 
 import json
@@ -23,9 +11,10 @@ from stormlead_core import DamageTier, LeadClass, get_logger
 from stormlead_db import LeadRow, get_session
 
 from agent_runtime.auth import get_agent_options
+from agent_runtime.policy import Timer, flow_enabled, get_policy
+from agent_runtime.telemetry import record_run
 
 log = get_logger(__name__)
-
 
 _QUALIFY_SYSTEM_PROMPT = """\
 You are a lead-qualification analyst for a storm-chase tree-removal
@@ -39,20 +28,12 @@ description, and (when available) photo classifications, output strict JSON:
   "reasoning": "<short paragraph citing fields from the input>",
   "rejection_reason": "<set if score < 0.3, else null>"
 }
-
-Be conservative. If consent metadata is incomplete or the description
-suggests no actual storm damage, score < 0.3 with a rejection_reason.
-Do not echo PII back; reason in the abstract.
 """
 
 
 async def qualify_lead(context: Context) -> dict[str, Any]:
-    """fetches lead, runs opus qualification, returns the raw result.
-
-    persistence + downstream event emission are TODO — wire when
-    skill_proposals + lead-status update paths land. for the v1 scaffold
-    this returns the raw model output so traces show the full call.
-    """
+    if not flow_enabled("qualify"):
+        return {"skipped": True, "reason": "qualify flow disabled"}
     payload = context.workflow_input()
     lead_id = UUID(payload["lead_id"])
 
@@ -60,7 +41,6 @@ async def qualify_lead(context: Context) -> dict[str, Any]:
         row = await s.get(LeadRow, lead_id)
         if row is None:
             raise ValueError(f"lead {lead_id} not found")
-        # minimal projection for the prompt; redact deeper pii at this layer
         lead_dict = {
             "city": row.city,
             "state": row.state,
@@ -70,20 +50,30 @@ async def qualify_lead(context: Context) -> dict[str, Any]:
             "photo_count": len(row.photo_s3_keys or []),
         }
 
-    options = get_agent_options(
-        "qualify_complex",
-        system_prompt=_QUALIFY_SYSTEM_PROMPT,
-        allowed_tools=[],  # pure reasoning; no tool calls needed
-    )
-
+    policy = get_policy("qualify_complex", escalate=bool(payload.get("escalate")))
     result_text = ""
-    async for message in query(prompt=str(lead_dict), options=options):
-        # collect any text-bearing payload from the message stream
-        content = getattr(message, "content", None)
-        if content:
-            result_text += str(content)
-
-    log.info("qualify.done", lead_id=str(lead_id), result_chars=len(result_text))
+    outcome = "success"
+    err_msg = None
+    with Timer() as timer:
+        for attempt in range(policy.retries + 1):
+            try:
+                options = get_agent_options(
+                    "qualify_complex",
+                    system_prompt=_QUALIFY_SYSTEM_PROMPT,
+                    allowed_tools=[],
+                    model=policy.model if attempt == 0 else (policy.fallback_model or policy.model),
+                    max_tokens=policy.max_tokens,
+                )
+                async for message in query(prompt=str(lead_dict), options=options):
+                    content = getattr(message, "content", None)
+                    if content:
+                        result_text += str(content)
+                break
+            except Exception as exc:
+                outcome = "failed"
+                err_msg = str(exc)
+                if attempt >= policy.retries:
+                    raise
 
     parsed = _parse_qualification(result_text)
     async with get_session() as s:
@@ -97,8 +87,18 @@ async def qualify_lead(context: Context) -> dict[str, Any]:
         row.rejection_reason = parsed["rejection_reason"]
         row.status = "rejected" if parsed["rejection_reason"] else "qualified"
 
-    # TODO: emit lead.qualified / lead.rejected after Hatchet event emission is
-    # wrapped in a small shared helper. Persistence is the paid-pilot gate.
+    await record_run(
+        flow_name="qualify",
+        workload="qualify_complex",
+        model=policy.model,
+        max_tokens=policy.max_tokens,
+        retries=policy.retries,
+        latency_ms=timer.elapsed_ms,
+        estimated_cost_usd=0.0,
+        outcome=outcome,
+        error=err_msg,
+    )
+    log.info("qualify.done", lead_id=str(lead_id), latency_ms=timer.elapsed_ms)
     return {"lead_id": str(lead_id), **parsed}
 
 

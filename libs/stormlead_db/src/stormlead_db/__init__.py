@@ -1,5 +1,6 @@
 from stormlead_db.engine import get_engine, get_session
 from stormlead_db.tables import (
+    AgentRunRow,
     BillingEvent,
     BuyerRow,
     ConsentAudit,
@@ -10,6 +11,7 @@ from stormlead_db.tables import (
 )
 
 __all__ = [
+    "AgentRunRow",
     "BillingEvent",
     "BuyerRow",
     "ConsentAudit",

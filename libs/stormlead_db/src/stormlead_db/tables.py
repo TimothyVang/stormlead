@@ -303,3 +303,21 @@ class ConsentAudit(Base):
     page_html_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     dwell_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     raw_payload: Mapped[dict] = mapped_column(JSONB)
+
+
+class AgentRunRow(Base):
+    """per-agent invocation metrics for budget enforcement + ops reporting."""
+
+    __tablename__ = "agent_runs"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    flow_name: Mapped[str] = mapped_column(String(64), index=True)
+    workload: Mapped[str] = mapped_column(String(64), index=True)
+    model: Mapped[str] = mapped_column(String(128))
+    max_tokens: Mapped[int] = mapped_column(Integer)
+    retries: Mapped[int] = mapped_column(Integer, default=0)
+    latency_ms: Mapped[int] = mapped_column(Integer)
+    estimated_cost_usd: Mapped[Decimal] = mapped_column(Numeric(10, 6), default=Decimal(0))
+    outcome: Mapped[str] = mapped_column(String(32), index=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"), index=True)

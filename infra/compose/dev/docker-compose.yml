@@ -327,6 +327,9 @@ services:
       HATCHET_CLIENT_HOST_PORT: ${HATCHET_CLIENT_HOST_PORT}
       HATCHET_CLIENT_TLS_STRATEGY: none
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      AGENT_FLOWS_DISABLED: ${AGENT_FLOWS_DISABLED:-}
+      AGENT_POLICY_PREMIUM_MODEL: ${AGENT_POLICY_PREMIUM_MODEL:-}
+      AGENT_DAILY_BUDGET_USD: ${AGENT_DAILY_BUDGET_USD:-150}
     ports:
       # host port remapped from 8001 to avoid collisions with other local
       # docker projects. smoke_e2e.py + manual curl tests use 8003.
@@ -405,6 +408,9 @@ services:
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
       LANGFUSE_HOST: ${LANGFUSE_HOST}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      AGENT_FLOWS_DISABLED: ${AGENT_FLOWS_DISABLED:-}
+      AGENT_POLICY_PREMIUM_MODEL: ${AGENT_POLICY_PREMIUM_MODEL:-}
+      AGENT_DAILY_BUDGET_USD: ${AGENT_DAILY_BUDGET_USD:-150}
 
 volumes:
   postgres_data:

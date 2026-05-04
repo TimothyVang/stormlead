@@ -49,6 +49,8 @@ def get_agent_options(
     *,
     system_prompt: str | None = None,
     allowed_tools: list[str] | None = None,
+    model: str | None = None,
+    max_tokens: int | None = None,
 ) -> ClaudeAgentOptions:
     """build claude-agent-sdk options for the given workload.
 
@@ -67,8 +69,11 @@ def get_agent_options(
         os.environ["ANTHROPIC_BASE_URL"] = os.environ.get(
             "LITELLM_PROXY_URL", "http://litellm:4000"
         )
-    return ClaudeAgentOptions(
-        model=backend.model,
+    kwargs = dict(
+        model=model or backend.model,
         system_prompt=system_prompt,
         allowed_tools=allowed_tools or [],
     )
+    if max_tokens is not None:
+        kwargs["max_tokens"] = max_tokens
+    return ClaudeAgentOptions(**kwargs)
