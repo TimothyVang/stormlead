@@ -196,6 +196,7 @@ class Buyer(BaseModel):
     license_number: str | None = None
     license_state: str | None = None
     license_verified_at: datetime | None = None
+    license_jurisdiction_metadata: dict[str, dict[str, str | bool | None]] = Field(default_factory=dict)
 
     # delivery
     webhook_url: str

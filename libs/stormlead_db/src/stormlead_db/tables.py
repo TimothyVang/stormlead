@@ -92,6 +92,7 @@ class BuyerRow(Base):
     license_verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    license_jurisdiction_metadata: Mapped[dict] = mapped_column(JSONB, default=dict)
 
     webhook_url: Mapped[str] = mapped_column(Text)
     webhook_secret: Mapped[str] = mapped_column(Text)  # encrypted via pgcrypto in prod
@@ -270,6 +271,44 @@ class BillingEvent(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), index=True
     )
+
+
+class SuppressionEntryRow(Base):
+    __tablename__ = "suppression_entries"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    phone_e164: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    source: Mapped[str] = mapped_column(String(64), default="manual")
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+
+
+class DncEntryRow(Base):
+    __tablename__ = "dnc_entries"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    phone_e164: Mapped[str] = mapped_column(String(20), index=True)
+    source: Mapped[str] = mapped_column(String(64), default="manual")
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+
+
+class ComplianceDecisionLogRow(Base):
+    __tablename__ = "compliance_decision_logs"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    actor: Mapped[str] = mapped_column(String(128), index=True)
+    action: Mapped[str] = mapped_column(String(128), index=True)
+    lead_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("leads.id"), nullable=True, index=True)
+    buyer_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("buyers.id"), nullable=True, index=True)
+    blocked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    rule_hit: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    details_json: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"), index=True)
 
 
 # ============================================================================

@@ -213,6 +213,7 @@ async def _select_eligible_buyers(lead: Lead) -> list[Buyer]:
             license_number=r.license_number,
             license_state=r.license_state,
             license_verified_at=r.license_verified_at,
+            license_jurisdiction_metadata=r.license_jurisdiction_metadata or {},
             webhook_url=r.webhook_url,
             webhook_secret=r.webhook_secret,
             bid_per_lead_t1_t2=r.bid_per_lead_t1_t2,
@@ -234,12 +235,24 @@ async def _select_eligible_buyers(lead: Lead) -> list[Buyer]:
             updated_at=r.updated_at,
         )
         verdict = evaluate_filter(buyer.filter_expression, lead)
+        license_ok, license_rule = _buyer_has_required_jurisdiction_credentials(buyer, lead.state)
         if (
             verdict.matches
             and _buyer_matches_paid_pilot_rules(buyer, lead)
+            and license_ok
             and await _buyer_within_caps(buyer)
         ):
             eligible.append(buyer)
+        elif not license_ok:
+            await record_compliance_decision_log(
+                actor="ping-post.auction",
+                action="buyer_eligibility",
+                lead_id=lead.id,
+                buyer_id=buyer.id,
+                blocked=True,
+                rule_hit=license_rule,
+                details={"state": lead.state},
+            )
     log.info("buyers.eligible", lead_id=str(lead.id), count=len(eligible))
     return eligible
 
@@ -254,6 +267,22 @@ def _buyer_matches_paid_pilot_rules(buyer: Buyer, lead: Lead) -> bool:
     if lead.requested_service and buyer.services and lead.requested_service not in buyer.services:
         return False
     return True
+
+
+def _buyer_has_required_jurisdiction_credentials(buyer: Buyer, jurisdiction: str) -> tuple[bool, str | None]:
+    metadata = buyer.license_jurisdiction_metadata.get(jurisdiction, {})
+    if not metadata.get("required", False):
+        return True, None
+    if not metadata.get("license_number"):
+        return False, "buyer_license_missing"
+    expires_at = metadata.get("expires_at")
+    if expires_at:
+        try:
+            if datetime.fromisoformat(str(expires_at).replace("Z", "+00:00")) <= datetime.now(UTC):
+                return False, "buyer_license_expired"
+        except ValueError:
+            return False, "buyer_license_invalid_expiry"
+    return True, None
 
 
 async def _buyer_within_caps(buyer: Buyer) -> bool:

@@ -1,5 +1,6 @@
 """stormlead shared core: models, events, filter dsl, observability."""
 
+from stormlead_core.compliance import ComplianceGate, suppresses_outbound
 from stormlead_core.events import (
     CallEvent,
     LeadCaptured,
@@ -29,6 +30,7 @@ __all__ = [
     "BuyerSalesStage",
     "BuyerStatus",
     "CallEvent",
+    "ComplianceGate",
     "DamageTier",
     "Lead",
     "LeadCaptured",
@@ -42,6 +44,7 @@ __all__ = [
     "StormEvent",
     "StormSeverity",
     "configure_logging",
+    "suppresses_outbound",
     "evaluate_filter",
     "get_logger",
 ]

@@ -68,6 +68,7 @@ class BuyerCreateRequest(BaseModel):
     deposit_balance: Decimal = Field(default=Decimal("0.00"), ge=Decimal("0"))
     license_number: str | None = Field(default=None, max_length=128)
     license_state: str | None = Field(default=None, max_length=2)
+    license_jurisdiction_metadata: dict[str, dict[str, str | bool | None]] = Field(default_factory=dict)
     sales_stage: BuyerSalesStage = BuyerSalesStage.PROSPECT
     notes: str | None = Field(default=None, max_length=5000)
     next_follow_up_at: datetime | None = None
@@ -110,6 +111,7 @@ class BuyerUpdateRequest(BaseModel):
     monthly_budget: Decimal | None = Field(default=None, ge=Decimal("0"))
     license_number: str | None = Field(default=None, max_length=128)
     license_state: str | None = Field(default=None, max_length=2)
+    license_jurisdiction_metadata: dict[str, dict[str, str | bool | None]] | None = None
     sales_stage: BuyerSalesStage | None = None
     notes: str | None = Field(default=None, max_length=5000)
     next_follow_up_at: datetime | None = None
@@ -519,6 +521,7 @@ async def create_buyer(payload: BuyerCreateRequest) -> dict[str, Any]:
         status=BuyerStatus.PENDING_VERIFICATION.value,
         license_number=payload.license_number,
         license_state=payload.license_state,
+        license_jurisdiction_metadata=payload.license_jurisdiction_metadata,
         webhook_url=payload.webhook_url,
         webhook_secret=payload.webhook_secret,
         bid_per_lead_t1_t2=payload.bid_per_lead_t1_t2,
@@ -800,6 +803,7 @@ def _buyer_response(buyer: BuyerRow) -> dict[str, Any]:
             "license_verified_at": buyer.license_verified_at.isoformat()
             if buyer.license_verified_at
             else None,
+            "license_jurisdiction_metadata": buyer.license_jurisdiction_metadata or {},
             "sales_stage": buyer.sales_stage,
             "notes": buyer.notes,
             "next_follow_up_at": buyer.next_follow_up_at.isoformat()
