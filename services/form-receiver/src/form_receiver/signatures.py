@@ -96,3 +96,25 @@ def verify(
             # do not break — keep the comparison time roughly constant
     if not matched:
         raise InvalidSignatureError("signature mismatch")
+
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class DncCheckResult:
+    allowed: bool
+    reason: str | None = None
+    source: str = "noop"
+
+
+class DncChecker:
+    """Pre-dial DNC contract for future voice-bridge integration."""
+
+    async def check(self, phone_e164: str) -> DncCheckResult:  # pragma: no cover - interface
+        raise NotImplementedError
+
+
+class NoopDncChecker(DncChecker):
+    async def check(self, phone_e164: str) -> DncCheckResult:
+        return DncCheckResult(allowed=True, source="noop")

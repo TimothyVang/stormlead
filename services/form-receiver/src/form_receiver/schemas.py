@@ -14,6 +14,8 @@ defensible consent capture.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from hashlib import sha256
 from typing import Any
 
 import phonenumbers
@@ -80,6 +82,11 @@ class ExtractedConsent(BaseModel):
     # tamper-evidence
     page_html_sha256: str | None = None
     dwell_ms: int | None = None
+    disclosure_text_hash: str
+    form_version: str
+    source_metadata: dict[str, Any] = Field(default_factory=dict)
+    consent_timestamp: datetime
+    voice_outreach_permitted: bool = True
 
 
 class ConsentExtractionError(ValueError):
@@ -129,6 +136,8 @@ def extract_consent(envelope: FormbricksEnvelope) -> ExtractedConsent:
     state = _required(answers, "state")
     zip_ = _required(answers, "zip")
 
+    form_version = _required(answers, "form_version")
+
     # optional
     email = _valid_email(answers.get("email"))
     page_html_sha256 = answers.get("page_html_sha256")
@@ -145,6 +154,27 @@ def extract_consent(envelope: FormbricksEnvelope) -> ExtractedConsent:
         if ttc_total > 0:
             dwell_ms = ttc_total
 
+    disclosure_text_hash = sha256(consent_text.encode("utf-8")).hexdigest()
+    provided_disclosure_hash = answers.get("disclosure_text_hash")
+    if isinstance(provided_disclosure_hash, str) and provided_disclosure_hash.strip():
+        if provided_disclosure_hash.strip().lower() != disclosure_text_hash:
+            raise ConsentExtractionError("disclosure_text_hash does not match consent_text")
+
+    source_metadata: dict[str, Any] = {
+        "url": meta.url,
+        "user_agent": meta.userAgent,
+        "country": meta.country,
+        "survey_id": envelope.data.surveyId,
+        "response_id": envelope.data.id,
+        "contact_id": envelope.data.contact.id if envelope.data.contact else None,
+        "contact_user_id": envelope.data.contact.userId if envelope.data.contact else None,
+    }
+    source_metadata = {k: v for k, v in source_metadata.items() if v is not None}
+
+    voice_outreach_permitted = answers.get("voice_outreach_permitted", True)
+    if not isinstance(voice_outreach_permitted, bool):
+        voice_outreach_permitted = True
+
     return ExtractedConsent(
         formbricks_response_id=envelope.data.id,
         page_url=meta.url,
@@ -159,4 +189,9 @@ def extract_consent(envelope: FormbricksEnvelope) -> ExtractedConsent:
         zip=zip_,
         page_html_sha256=page_html_sha256,
         dwell_ms=dwell_ms,
+        disclosure_text_hash=disclosure_text_hash,
+        form_version=form_version,
+        source_metadata=source_metadata,
+        consent_timestamp=datetime.now(timezone.utc),
+        voice_outreach_permitted=voice_outreach_permitted,
     )

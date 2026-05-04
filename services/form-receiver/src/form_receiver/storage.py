@@ -39,7 +39,7 @@ async def upsert_lead(extracted: ExtractedConsent, *, ip: str) -> UUID:
             .values(
                 id=new_id,
                 source="landing_form",
-                status="new",
+                status="new" if extracted.voice_outreach_permitted else "outreach_blocked",
                 name=extracted.name,
                 phone_e164=extracted.phone_e164,
                 email=extracted.email,
@@ -50,7 +50,7 @@ async def upsert_lead(extracted: ExtractedConsent, *, ip: str) -> UUID:
                 consent_text=extracted.consent_text,
                 consent_ip=ip,
                 consent_user_agent=extracted.user_agent,
-                consent_at=now,
+                consent_at=extracted.consent_timestamp,
                 page_url=extracted.page_url,
                 page_html_hash=page_html_hash,
             )
@@ -86,6 +86,13 @@ async def record_audit(
 ) -> bool:
     """write a consent_audits row keyed on webhook_id. returns True if new, False if dup."""
     parsed_payload = json.loads(raw_payload.decode("utf-8"))
+    parsed_payload["consent_evidence"] = {
+        "consent_timestamp": extracted.consent_timestamp.isoformat(),
+        "form_version": extracted.form_version,
+        "disclosure_text_hash": extracted.disclosure_text_hash,
+        "source_metadata": extracted.source_metadata,
+        "voice_outreach_permitted": extracted.voice_outreach_permitted,
+    }
     async with get_session() as s:
         stmt = (
             pg_insert(ConsentAudit)

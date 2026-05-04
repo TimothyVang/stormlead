@@ -150,3 +150,42 @@ def test_extract_invalid_email_dropped_silently() -> None:
     )
     out = extract_consent(e)
     assert out.email is None  # phone is the primary identifier
+
+
+def test_extract_consent_evidence_fields() -> None:
+    e = _envelope(
+        {
+            "name": "T",
+            "phone": "+15125550123",
+            "address_line1": "1 Main St",
+            "city": "Austin",
+            "state": "TX",
+            "zip": "78701",
+            "consent_text": "I agree to be contacted.",
+            "form_version": "v2026-05-01",
+            "voice_outreach_permitted": False,
+        }
+    )
+    out = extract_consent(e)
+    assert out.form_version == "v2026-05-01"
+    assert len(out.disclosure_text_hash) == 64
+    assert out.source_metadata["survey_id"] == "survey_test"
+    assert out.voice_outreach_permitted is False
+
+
+def test_disclosure_hash_mismatch_raises() -> None:
+    e = _envelope(
+        {
+            "name": "T",
+            "phone": "+15125550123",
+            "address_line1": "1 Main St",
+            "city": "Austin",
+            "state": "TX",
+            "zip": "78701",
+            "consent_text": "I agree to be contacted.",
+            "form_version": "v2026-05-01",
+            "disclosure_text_hash": "deadbeef",
+        }
+    )
+    with pytest.raises(ConsentExtractionError):
+        extract_consent(e)

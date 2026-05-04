@@ -33,6 +33,7 @@ from form_receiver.schemas import (
 from form_receiver.signatures import (
     InvalidSignatureError,
     MissingHeaderError,
+    NoopDncChecker,
     ReplayError,
     verify,
 )
@@ -43,6 +44,7 @@ log = get_logger(__name__)
 
 
 _hatchet: Hatchet | None = None
+_dnc_checker = NoopDncChecker()
 
 
 @asynccontextmanager
@@ -128,6 +130,11 @@ async def formbricks_webhook(request: Request) -> dict[str, str]:
 
     ip = _client_ip(request)
     webhook_id = request.headers["webhook-id"]
+
+    dnc_result = await _dnc_checker.check(extracted.phone_e164)
+    if not dnc_result.allowed:
+        extracted = extracted.model_copy(update={"voice_outreach_permitted": False})
+        log.info("webhook.outreach_blocked", lead_phone=extracted.phone_e164, reason=dnc_result.reason, source=dnc_result.source)
 
     # 4. persist + emit
     lead_id = await upsert_lead(extracted, ip=ip)
