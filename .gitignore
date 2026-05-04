@@ -36,3 +36,23 @@ volumes/
 
 # wsl ntfs alternate-data-stream artifacts
 *:Zone.Identifier
+
+# Generated Playwright/Cowork evidence. Keep local proof files out of git by default.
+testing/playwright-artifacts/*
+!testing/playwright-artifacts/
+!testing/playwright-artifacts/.gitkeep
+testing/playwright-report/*
+!testing/playwright-report/
+!testing/playwright-report/.gitkeep
+testing/runs/*
+!testing/runs/
+!testing/runs/.gitkeep
+testing/screenshots/*
+!testing/screenshots/
+!testing/screenshots/.gitkeep
+testing/videos/*
+!testing/videos/
+!testing/videos/.gitkeep
+!testing/logs/
+testing/logs/*
+!testing/logs/.gitkeep
