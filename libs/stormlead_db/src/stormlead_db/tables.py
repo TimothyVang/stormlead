@@ -307,3 +307,75 @@ class ConsentAudit(Base):
     page_html_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     dwell_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     raw_payload: Mapped[dict] = mapped_column(JSONB)
+
+
+# ============================================================================
+# agent workflow runs
+# ============================================================================
+
+
+class RunSessionRow(Base):
+    __tablename__ = "run_sessions"
+
+    run_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    lead_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("leads.id"), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    assignee: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    escalation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), onupdate=text("now()")
+    )
+
+
+class RunStepRow(Base):
+    __tablename__ = "run_steps"
+
+    step_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    run_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("run_sessions.run_id", ondelete="CASCADE"), index=True
+    )
+    step_type: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), onupdate=text("now()")
+    )
+
+
+class RunEventRow(Base):
+    __tablename__ = "run_events"
+
+    event_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    run_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("run_sessions.run_id", ondelete="CASCADE"), index=True
+    )
+    step_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("run_steps.step_id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    event_type: Mapped[str] = mapped_column(String(64), index=True)
+    payload_json: Mapped[dict] = mapped_column(JSONB, default=dict)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"), index=True)
+
+
+class RunArtifactRow(Base):
+    __tablename__ = "run_artifacts"
+
+    artifact_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    run_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("run_sessions.run_id", ondelete="CASCADE"), index=True
+    )
+    step_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("run_steps.step_id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    artifact_type: Mapped[str] = mapped_column(String(64), index=True)
+    uri: Mapped[str] = mapped_column(Text)
+    metadata_json: Mapped[dict] = mapped_column(JSONB, default=dict)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"), index=True)

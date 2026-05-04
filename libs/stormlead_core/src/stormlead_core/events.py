@@ -136,3 +136,26 @@ class AgentTaskEvent(_Envelope):
     estimated_input_tokens: int | None = None
     estimated_output_tokens: int | None = None
     estimated_cost_usd: float | None = None
+
+
+class AgentRunEvent(_Envelope):
+    """run-level workflow lifecycle for visual agentic orchestration."""
+
+    event_type: Literal[
+        "run.started",
+        "step.started",
+        "step.succeeded",
+        "step.failed",
+        "run.awaiting_approval",
+        "run.completed",
+        "run.failed",
+        "run.canceled",
+    ]
+    run_id: str
+    lead_id: UUID | None = None
+    step_id: UUID | None = None
+    step_type: str | None = None
+    status: Literal["queued", "running", "awaiting_approval", "completed", "failed", "canceled"]
+    attempt: int = 1
+    reason: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)

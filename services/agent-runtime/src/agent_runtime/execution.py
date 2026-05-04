@@ -2,14 +2,38 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+from enum import Enum
 from uuid import UUID, uuid4
 
-from claude_agent_sdk import ClaudeAgentOptions, query
 from stormlead_core import get_logger
-from stormlead_core.events import AgentTaskEnvelope, AgentTaskEvent
+from stormlead_core.events import AgentRunEvent, AgentTaskEnvelope, AgentTaskEvent
 
 log = get_logger(__name__)
+
+
+class RunStatus(str, Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    AWAITING_APPROVAL = "awaiting_approval"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELED = "canceled"
+
+
+ALLOWED_TRANSITIONS: dict[RunStatus, set[RunStatus]] = {
+    RunStatus.QUEUED: {RunStatus.RUNNING, RunStatus.CANCELED},
+    RunStatus.RUNNING: {
+        RunStatus.AWAITING_APPROVAL,
+        RunStatus.COMPLETED,
+        RunStatus.FAILED,
+        RunStatus.CANCELED,
+    },
+    RunStatus.AWAITING_APPROVAL: {RunStatus.RUNNING, RunStatus.COMPLETED, RunStatus.CANCELED},
+    RunStatus.COMPLETED: set(),
+    RunStatus.FAILED: set(),
+    RunStatus.CANCELED: set(),
+}
 
 
 @dataclass(frozen=True)
@@ -27,12 +51,47 @@ class TaskPolicy:
     retry_count: int
 
 
+@dataclass
+class RunStateMachine:
+    run_id: str
+    lead_id: UUID | None
+    correlation_id: UUID | None
+    status: RunStatus = RunStatus.QUEUED
+    attempt: int = 1
+
+    def transition(self, next_status: RunStatus, *, reason: str | None = None) -> AgentRunEvent:
+        if next_status not in ALLOWED_TRANSITIONS[self.status]:
+            raise ValueError(f"invalid transition: {self.status} -> {next_status}")
+        self.status = next_status
+        event_type = {
+            RunStatus.RUNNING: "run.started",
+            RunStatus.AWAITING_APPROVAL: "run.awaiting_approval",
+            RunStatus.COMPLETED: "run.completed",
+            RunStatus.FAILED: "run.failed",
+            RunStatus.CANCELED: "run.canceled",
+        }.get(next_status, "run.started")
+        return AgentRunEvent(
+            event_id=uuid4(),
+            event_type=event_type,
+            occurred_at=datetime.now(timezone.utc),
+            correlation_id=self.correlation_id,
+            run_id=self.run_id,
+            lead_id=self.lead_id,
+            status=self.status,
+            attempt=self.attempt,
+            reason=reason,
+        )
+
+
+def emit_run_event(event: AgentRunEvent) -> None:
+    log.info("agent.run.event", **event.model_dump(mode="json"))
+
+
 def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
 def _estimate_cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
-    # intentionally conservative static estimates for budget enforcement
     if "opus" in model:
         in_rate, out_rate = 0.000015, 0.000075
     elif "sonnet" in model:
@@ -59,7 +118,7 @@ def emit_task_event(
     event = AgentTaskEvent(
         event_id=uuid4(),
         event_type=event_type,
-        occurred_at=datetime.now(UTC),
+        occurred_at=datetime.now(timezone.utc),
         correlation_id=envelope.correlation_id,
         task=envelope,
         status=status,
@@ -93,6 +152,8 @@ async def run_agent_task(
     start = time.perf_counter()
     last_err: Exception | None = None
     for idx, model in enumerate(models):
+        from claude_agent_sdk import ClaudeAgentOptions, query
+
         fallback_used = idx > 0
         options = ClaudeAgentOptions(model=model, system_prompt=system_prompt, allowed_tools=allowed_tools)
         try:
