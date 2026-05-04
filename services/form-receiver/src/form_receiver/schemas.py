@@ -81,6 +81,12 @@ class ExtractedConsent(BaseModel):
     page_html_sha256: str | None = None
     dwell_ms: int | None = None
 
+    # attribution for reporting
+    campaign_id: str | None = None
+    campaign_source: str | None = None
+    first_touch_source: str | None = None
+    last_touch_source: str | None = None
+
 
 class ConsentExtractionError(ValueError):
     """raised when required consent fields are missing or invalid."""
@@ -131,6 +137,16 @@ def extract_consent(envelope: FormbricksEnvelope) -> ExtractedConsent:
 
     # optional
     email = _valid_email(answers.get("email"))
+    campaign_id = _optional_str(answers, "campaign_id") or _optional_str(envelope.data.variables, "campaign_id")
+    campaign_source = _optional_str(answers, "campaign_source") or _optional_str(
+        envelope.data.variables, "campaign_source"
+    )
+    first_touch_source = _optional_str(answers, "first_touch_source") or _optional_str(
+        envelope.data.variables, "first_touch_source"
+    )
+    last_touch_source = _optional_str(answers, "last_touch_source") or _optional_str(
+        envelope.data.variables, "last_touch_source"
+    )
     page_html_sha256 = answers.get("page_html_sha256")
     if page_html_sha256 is not None and not isinstance(page_html_sha256, str):
         page_html_sha256 = None
@@ -159,4 +175,16 @@ def extract_consent(envelope: FormbricksEnvelope) -> ExtractedConsent:
         zip=zip_,
         page_html_sha256=page_html_sha256,
         dwell_ms=dwell_ms,
+        campaign_id=campaign_id,
+        campaign_source=campaign_source,
+        first_touch_source=first_touch_source,
+        last_touch_source=last_touch_source,
     )
+
+
+def _optional_str(mapping: dict[str, Any], key: str) -> str | None:
+    raw = mapping.get(key)
+    if isinstance(raw, str):
+        value = raw.strip()
+        return value or None
+    return None

@@ -17,7 +17,7 @@ import asyncio
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -26,7 +26,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from hatchet_sdk import Context, Hatchet
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from stormlead_core import BuyerSalesStage, BuyerStatus, Lead, configure_logging, get_logger
 from stormlead_db import BillingEvent, BuyerRow, LeadRow, PostResult, get_session
 
@@ -605,6 +605,167 @@ async def admin_kpis() -> dict[str, Any]:
         raise HTTPException(
             500, "admin kpis could not be loaded; retry after checking database health"
         ) from e
+
+
+@app.get("/v1/admin/reporting/overview")
+async def reporting_overview(start_date: date | None = None, end_date: date | None = None) -> dict[str, Any]:
+    end = end_date or datetime.now(UTC).date()
+    start = start_date or (end - timedelta(days=29))
+    start_dt = datetime.combine(start, time.min, tzinfo=UTC)
+    end_dt = datetime.combine(end + timedelta(days=1), time.min, tzinfo=UTC)
+    try:
+        async with get_session() as s:
+            prepaid = await s.scalar(select(func.coalesce(func.sum(BuyerRow.deposit_balance), 0)))
+            active_funded_buyers = await s.scalar(
+                select(func.count(BuyerRow.id)).where(
+                    BuyerRow.status == BuyerStatus.ACTIVE.value,
+                    BuyerRow.deposit_balance > 0,
+                )
+            )
+            sold_by_class_rows = (
+                await s.execute(
+                    select(LeadRow.lead_class, func.count(PostResult.id))
+                    .join(PostResult, PostResult.lead_id == LeadRow.id)
+                    .where(
+                        PostResult.delivered.is_(True),
+                        PostResult.created_at >= start_dt,
+                        PostResult.created_at < end_dt,
+                    )
+                    .group_by(LeadRow.lead_class)
+                )
+            ).all()
+            delivered_count = await s.scalar(
+                select(func.count(PostResult.id)).where(
+                    PostResult.delivered.is_(True),
+                    PostResult.created_at >= start_dt,
+                    PostResult.created_at < end_dt,
+                )
+            )
+            returned_count = await s.scalar(
+                select(func.count(PostResult.id)).where(
+                    PostResult.delivered.is_(True),
+                    PostResult.returned.is_(True),
+                    PostResult.created_at >= start_dt,
+                    PostResult.created_at < end_dt,
+                )
+            )
+            margin_rows = (
+                await s.execute(
+                    select(
+                        func.coalesce(LeadRow.campaign_source, "unknown").label("campaign_source"),
+                        func.coalesce(LeadRow.campaign_id, "unknown").label("campaign_id"),
+                        func.count(PostResult.id).label("delivered_leads"),
+                        func.coalesce(func.sum(PostResult.bid_cents), 0).label("gross_revenue_cents"),
+                        func.coalesce(
+                            func.sum(
+                                case(
+                                    (PostResult.returned.is_(True), PostResult.bid_cents), else_=0
+                                )
+                            ),
+                            0,
+                        ).label("return_credit_cents"),
+                    )
+                    .join(LeadRow, LeadRow.id == PostResult.lead_id)
+                    .where(
+                        PostResult.delivered.is_(True),
+                        PostResult.created_at >= start_dt,
+                        PostResult.created_at < end_dt,
+                    )
+                    .group_by(LeadRow.campaign_source, LeadRow.campaign_id)
+                    .order_by(func.sum(PostResult.bid_cents).desc())
+                )
+            ).all()
+
+        sold_by_class = {
+            (lead_class or "unknown"): int(count) for lead_class, count in sold_by_class_rows
+        }
+        margin = []
+        for row in margin_rows:
+            net = int(row.gross_revenue_cents or 0) - int(row.return_credit_cents or 0)
+            margin.append(
+                {
+                    "campaign_source": row.campaign_source,
+                    "campaign_id": row.campaign_id,
+                    "delivered_leads": int(row.delivered_leads or 0),
+                    "gross_revenue_cents": int(row.gross_revenue_cents or 0),
+                    "return_credit_cents": int(row.return_credit_cents or 0),
+                    "net_margin_cents": net,
+                }
+            )
+        return {
+            "window_start_date": start.isoformat(),
+            "window_end_date": end.isoformat(),
+            "prepaid_balance_cents": _decimal_to_cents(Decimal(prepaid or 0)),
+            "active_funded_buyers": int(active_funded_buyers or 0),
+            "sold_leads_by_class": sold_by_class,
+            "return_rate": float((returned_count or 0) / max(int(delivered_count or 0), 1)),
+            "margin_by_source_campaign": margin,
+        }
+    except Exception as e:
+        log.error("admin.reporting_overview_failed", error=str(e))
+        raise HTTPException(500, "reporting overview could not be loaded") from e
+
+
+@app.get("/v1/buyers/{buyer_id}/daily-summary")
+async def buyer_daily_summary(buyer_id: UUID, day: date | None = None) -> dict[str, Any]:
+    summary_day = day or datetime.now(UTC).date()
+    start_dt = datetime.combine(summary_day, time.min, tzinfo=UTC)
+    end_dt = start_dt + timedelta(days=1)
+    try:
+        async with get_session() as s:
+            buyer = await s.get(BuyerRow, buyer_id)
+            if buyer is None:
+                raise HTTPException(404, "buyer not found; verify the buyer id and try again")
+            delivered = await s.scalar(
+                select(func.count(PostResult.id)).where(
+                    PostResult.buyer_id == buyer_id,
+                    PostResult.delivered.is_(True),
+                    PostResult.created_at >= start_dt,
+                    PostResult.created_at < end_dt,
+                )
+            )
+            debits = await s.scalar(
+                select(func.coalesce(func.sum(BillingEvent.amount_cents), 0)).where(
+                    BillingEvent.buyer_id == buyer_id,
+                    BillingEvent.event_type == "lead.posted",
+                    BillingEvent.created_at >= start_dt,
+                    BillingEvent.created_at < end_dt,
+                )
+            )
+            credits = await s.scalar(
+                select(func.coalesce(func.sum(BillingEvent.amount_cents), 0)).where(
+                    BillingEvent.buyer_id == buyer_id,
+                    BillingEvent.event_type.in_(["deposit.added", "lead.returned"]),
+                    BillingEvent.created_at >= start_dt,
+                    BillingEvent.created_at < end_dt,
+                )
+            )
+            open_returns = await s.scalar(
+                select(func.count(PostResult.id)).where(
+                    PostResult.buyer_id == buyer_id,
+                    PostResult.delivered.is_(True),
+                    PostResult.returned.is_(False),
+                )
+            )
+            current_wallet_cents = _decimal_to_cents(Decimal(buyer.deposit_balance or 0))
+            threshold_cents = _decimal_to_cents(Decimal(buyer.low_balance_threshold or 0))
+        recommendation = max(threshold_cents - current_wallet_cents, 0)
+        return {
+            "buyer_id": str(buyer_id),
+            "day": summary_day.isoformat(),
+            "delivered_leads": int(delivered or 0),
+            "debits_cents": int(debits or 0),
+            "credits_cents": int(credits or 0),
+            "open_returns": int(open_returns or 0),
+            "wallet_balance_cents": current_wallet_cents,
+            "low_balance_threshold_cents": threshold_cents,
+            "refill_recommendation_cents": recommendation,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("buyer.daily_summary_failed", buyer_id=str(buyer_id), error=str(e))
+        raise HTTPException(500, "buyer daily summary could not be loaded") from e
 
 
 @app.get("/v1/buyers/{buyer_id}")

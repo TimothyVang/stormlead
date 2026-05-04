@@ -53,6 +53,10 @@ async def upsert_lead(extracted: ExtractedConsent, *, ip: str) -> UUID:
                 consent_at=now,
                 page_url=extracted.page_url,
                 page_html_hash=page_html_hash,
+                campaign_id=extracted.campaign_id,
+                campaign_source=extracted.campaign_source,
+                first_touch_source=extracted.first_touch_source,
+                last_touch_source=extracted.last_touch_source,
             )
             .on_conflict_do_nothing(constraint="uq_lead_phone_hash")
             .returning(LeadRow.id)

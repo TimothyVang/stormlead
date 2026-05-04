@@ -74,6 +74,36 @@ prod compose + deploy script are placeholders (`infra/compose/prod/`, `.github/w
 - `docs/research/2026-05-stack-improvements.md` — active technical risk register and implementation corrections.
 - `docs/research/2026-05-forkable-stack.md` and `docs/research/2026-05-stack-audit.md` — preserved source research; use the newer docs when they conflict.
 
+## reporting api contracts (admin dashboard integration)
+
+- `GET /v1/admin/reporting/overview?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD`
+  - Returns prepaid balance, active funded buyers, sold leads by class, return rate, and margin grouped by `campaign_source` + `campaign_id`.
+  - Date window defaults to the last 30 days in UTC if omitted.
+  - Response shape:
+    - `window_start_date`, `window_end_date`
+    - `prepaid_balance_cents`
+    - `active_funded_buyers`
+    - `sold_leads_by_class` (object keyed by class, including `unknown`)
+    - `return_rate` (0.0 to 1.0)
+    - `margin_by_source_campaign[]` items with `campaign_source`, `campaign_id`, `delivered_leads`, `gross_revenue_cents`, `return_credit_cents`, `net_margin_cents`.
+
+- `GET /v1/buyers/{buyer_id}/daily-summary?day=YYYY-MM-DD`
+  - Returns buyer-level daily ledger summary for admin dashboards.
+  - `day` defaults to today in UTC if omitted.
+  - Response shape:
+    - `buyer_id`, `day`
+    - `delivered_leads`
+    - `debits_cents` (`lead.posted` events)
+    - `credits_cents` (`deposit.added` + `lead.returned` events)
+    - `open_returns` (delivered and not yet returned)
+    - `wallet_balance_cents`
+    - `low_balance_threshold_cents`
+    - `refill_recommendation_cents` (`max(threshold - wallet, 0)`).
+
+- Lead attribution fields required for consistent reporting:
+  - `campaign_id`, `campaign_source`, `first_touch_source`, `last_touch_source` on leads.
+  - `services/form-receiver` populates these from Formbricks answer fields first, with fallback to envelope `variables`.
+
 ## known traps (read these)
 
 1. **litellm**: pinned to a known-good image sha after the march 2026 supply-chain attack. do not `pip install litellm` anywhere. only the cosign-verified docker image. (current pin v1.83.4 is now CVE'd — bump to v1.83.7-stable; see `docs/research/2026-05-stack-improvements.md`.)
