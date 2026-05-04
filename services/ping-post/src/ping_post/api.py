@@ -17,7 +17,7 @@ import asyncio
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -28,7 +28,7 @@ from hatchet_sdk import Context, Hatchet
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 from stormlead_core import BuyerSalesStage, BuyerStatus, Lead, configure_logging, get_logger
-from stormlead_db import BillingEvent, BuyerRow, LeadRow, PostResult, get_session
+from stormlead_db import BillingEvent, BuyerRow, ConsentAudit, LeadRow, PostResult, ReturnRequest, get_session
 
 from ping_post.auction import run_auction
 
@@ -140,6 +140,8 @@ class DepositRequest(BaseModel):
     amount_cents: int = Field(gt=0)
     external_reference: str | None = Field(default=None, max_length=255)
 
+
+RETURN_STATES = {"OPEN", "UNDER_REVIEW", "APPROVED", "DENIED", "CREDITED", "ESCALATED"}
 
 class ReturnLeadRequest(BaseModel):
     reason: str = Field(min_length=1)
@@ -699,57 +701,68 @@ async def add_deposit(buyer_id: UUID, payload: DepositRequest) -> dict[str, Any]
 async def return_lead(lead_id: UUID, payload: ReturnLeadRequest) -> dict[str, Any]:
     try:
         async with get_session() as s:
-            result = (
-                (
-                    await s.execute(
-                        select(PostResult)
-                        .where(PostResult.lead_id == lead_id, PostResult.delivered.is_(True))
-                        .order_by(PostResult.created_at.desc())
-                    )
-                )
-                .scalars()
-                .first()
-            )
+            result = ((await s.execute(select(PostResult).where(PostResult.lead_id == lead_id, PostResult.delivered.is_(True)).order_by(PostResult.created_at.desc()))).scalars().first())
             if result is None:
-                raise HTTPException(
-                    404, "delivered lead sale not found; verify the lead id and try again"
-                )
-            if result.returned:
-                raise HTTPException(
-                    409, "lead was already returned; check the existing return record"
-                )
-            buyer = await s.get(BuyerRow, result.buyer_id)
-            if buyer is None:
-                raise HTTPException(404, "buyer for this lead sale was not found; contact support")
-            credit = Decimal(result.bid_cents) / Decimal(100)
-            buyer.deposit_balance += credit
-            buyer.lifetime_spend -= credit
-            result.returned = True
-            result.return_reason = payload.reason
-            s.add(
-                BillingEvent(
-                    buyer_id=result.buyer_id,
-                    lead_id=lead_id,
-                    event_type="lead.returned",
-                    amount_cents=result.bid_cents,
-                    metadata_json={"reason": payload.reason, "notes": payload.notes},
-                )
-            )
+                raise HTTPException(404, "delivered lead sale not found; verify the lead id and try again")
+            active = ((await s.execute(select(ReturnRequest).where(ReturnRequest.post_result_id == result.id, ReturnRequest.state.in_(["OPEN","UNDER_REVIEW","APPROVED","ESCALATED"])))).scalars().first())
+            if active is not None:
+                raise HTTPException(409, "an active return request already exists for this post result")
+            lead = await s.get(LeadRow, lead_id)
+            if lead is None:
+                raise HTTPException(404, "lead not found")
+            audits = (await s.execute(select(ConsentAudit).where(ConsentAudit.lead_id == lead_id).order_by(ConsentAudit.received_at.desc()))).scalars().all()
+            evidence_bundle = _build_evidence_bundle(lead, result, audits)
+            triage = {"recommendation": "UNDER_REVIEW", "confidence": 0.5, "human_approval_required": True}
+            req = ReturnRequest(post_result_id=result.id, lead_id=lead_id, buyer_id=result.buyer_id, state="OPEN", reason=payload.reason, notes=payload.notes, evidence_bundle=evidence_bundle, triage_recommendation=triage)
+            s.add(req)
             await s.flush()
-            return {
-                "lead_id": str(lead_id),
-                "buyer_id": str(result.buyer_id),
-                "credited_cents": result.bid_cents,
-                "return_reason": payload.reason,
-                "wallet": _buyer_wallet_response(buyer),
-            }
+            return {"return_request_id": str(req.id), "state": req.state, "triage": triage, "evidence_bundle": evidence_bundle}
     except HTTPException:
         raise
     except Exception as e:
         log.error("lead.return_failed", lead_id=str(lead_id), error=str(e))
-        raise HTTPException(
-            500, "lead return could not be recorded; retry or contact support"
-        ) from e
+        raise HTTPException(500, "lead return request could not be recorded; retry or contact support") from e
+
+
+@app.post("/v1/returns/{return_request_id}/review")
+async def review_return(return_request_id: UUID, payload: ReviewReturnRequest) -> dict[str, Any]:
+    allowed = {"under_review", "approve", "deny", "escalate", "credit"}
+    if payload.action not in allowed:
+        raise HTTPException(400, f"action must be one of: {', '.join(sorted(allowed))}")
+    async with get_session() as s:
+        req = await s.get(ReturnRequest, return_request_id)
+        if req is None:
+            raise HTTPException(404, "return request not found")
+        if payload.action == "under_review":
+            req.state = "UNDER_REVIEW"
+        elif payload.action == "approve":
+            req.state = "APPROVED"
+        elif payload.action == "deny":
+            req.state = "DENIED"
+        elif payload.action == "escalate":
+            req.state = "ESCALATED"
+        elif payload.action == "credit":
+            if req.state != "APPROVED":
+                raise HTTPException(409, "request must be APPROVED before crediting")
+            buyer = await s.get(BuyerRow, req.buyer_id)
+            post_result = await s.get(PostResult, req.post_result_id)
+            if buyer is None or post_result is None:
+                raise HTTPException(404, "related buyer or post result not found")
+            credit = Decimal(post_result.bid_cents) / Decimal(100)
+            buyer.deposit_balance += credit
+            buyer.lifetime_spend -= credit
+            post_result.returned = True
+            post_result.return_reason = req.reason
+            event = BillingEvent(buyer_id=req.buyer_id, lead_id=req.lead_id, event_type="lead.return.credited", amount_cents=post_result.bid_cents, metadata_json={"return_request_id": str(req.id), "reason": req.reason, "notes": req.notes})
+            s.add(event)
+            await s.flush()
+            req.credited_event_id = event.id
+            req.state = "CREDITED"
+        req.reviewed_by = payload.reviewer
+        req.reviewer_notes = payload.notes
+        req.reviewed_at = datetime.now(timezone.utc)
+        await s.flush()
+        return {"return_request_id": str(req.id), "state": req.state, "reviewed_by": req.reviewed_by, "credited_event_id": str(req.credited_event_id) if req.credited_event_id else None}
 
 
 def _decimal_to_cents(amount: Decimal) -> int:
@@ -825,4 +838,38 @@ def _buyer_wallet_response(buyer: BuyerRow) -> dict[str, Any]:
         "lifetime_spend_cents": _decimal_to_cents(buyer.lifetime_spend),
         "daily_cap": buyer.daily_cap,
         "monthly_budget_cents": _decimal_to_cents(buyer.monthly_budget),
+    }
+
+
+class ReviewReturnRequest(BaseModel):
+    action: str
+    reviewer: str
+    notes: str | None = None
+
+
+def _build_evidence_bundle(lead: LeadRow, post_result: PostResult, consent_audits: list[ConsentAudit]) -> dict[str, Any]:
+    return {
+        "consent_proof": {
+            "lead_consent_at": str(lead.consent_at) if lead.consent_at else None,
+            "consent_ip": lead.consent_ip,
+            "consent_user_agent": lead.consent_user_agent,
+            "consent_text": lead.consent_text,
+            "audit_count": len(consent_audits),
+            "audit_webhook_ids": [a.webhook_id for a in consent_audits],
+        },
+        "timestamps": {
+            "lead_created_at": str(lead.created_at),
+            "post_result_created_at": str(post_result.created_at),
+        },
+        "delivery_logs": {
+            "delivered": post_result.delivered,
+            "response_status_code": post_result.response_status_code,
+            "response_body": post_result.response_body,
+        },
+        "classification_rationale": {
+            "lead_class": lead.lead_class,
+            "qualification_score": lead.qualification_score,
+            "qualification_reason": lead.qualification_reason,
+            "rejection_reason": lead.rejection_reason,
+        },
     }

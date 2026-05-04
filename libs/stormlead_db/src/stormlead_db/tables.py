@@ -303,3 +303,44 @@ class ConsentAudit(Base):
     page_html_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     dwell_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     raw_payload: Mapped[dict] = mapped_column(JSONB)
+
+
+class ReturnRequest(Base):
+    """buyer-initiated return request for a delivered post result."""
+
+    __tablename__ = "return_requests"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    post_result_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("post_results.id"), nullable=False, index=True
+    )
+    lead_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("leads.id"), nullable=False, index=True
+    )
+    buyer_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("buyers.id"), nullable=False, index=True
+    )
+    state: Mapped[str] = mapped_column(String(32), nullable=False, index=True, default="OPEN")
+    reason: Mapped[str] = mapped_column(Text)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    evidence_bundle: Mapped[dict] = mapped_column(JSONB, default=dict)
+    triage_recommendation: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    reviewer_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    credited_event_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("billing_events.id"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), onupdate=text("now()")
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('OPEN','UNDER_REVIEW','APPROVED','DENIED','CREDITED','ESCALATED')",
+            name="ck_return_requests_state",
+        ),
+    )

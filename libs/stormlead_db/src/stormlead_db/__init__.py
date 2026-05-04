@@ -6,6 +6,7 @@ from stormlead_db.tables import (
     LeadRow,
     PingAttempt,
     PostResult,
+    ReturnRequest,
     StormRow,
 )
 
@@ -16,6 +17,7 @@ __all__ = [
     "LeadRow",
     "PingAttempt",
     "PostResult",
+    "ReturnRequest",
     "StormRow",
     "get_engine",
     "get_session",

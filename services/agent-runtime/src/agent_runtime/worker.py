@@ -17,6 +17,7 @@ from stormlead_core import configure_logging, get_logger
 
 from agent_runtime.hermes import hermes_self_evolution
 from agent_runtime.qualify import qualify_lead
+from agent_runtime.returns import triage_return_request
 
 configure_logging()
 log = get_logger(__name__)
@@ -38,10 +39,18 @@ class HermesSelfEvolution:
         return await hermes_self_evolution(context)
 
 
+@hatchet.workflow(on_events=["return.requested"])
+class TriageReturnRequest:
+    @hatchet.step(timeout="120s", retries=1)
+    async def step(self, context: Context) -> dict:
+        return await triage_return_request(context)
+
+
 def main() -> None:
     worker = hatchet.worker("agent-runtime", max_runs=4)
     worker.register_workflow(QualifyLead())
     worker.register_workflow(HermesSelfEvolution())
+    worker.register_workflow(TriageReturnRequest())
     asyncio.run(worker.async_start())
 
 
