@@ -60,6 +60,7 @@ just migrate      # runs alembic migrations
 # 3. dev loop
 just logs ping-post
 just test
+just smoke      # e2e workflow: ingest -> auction -> buyer delivery
 ```
 
 ## production (hetzner)
