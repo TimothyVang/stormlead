@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 
 from hatchet_sdk import Context, Hatchet
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from stormlead_core import configure_logging, get_logger
+from stormlead_core import ERROR_SINK, configure_logging, emit_metric, get_logger
 from stormlead_db import StormRow, get_session
 
 from storm_watcher.fema import fetch_recent_declarations, normalize_declaration
@@ -67,6 +67,8 @@ class NwsCapPoller:
         try:
             features = await fetch_active_alerts()
         except Exception as e:
+            ERROR_SINK.report("storm-watcher", "nws_fetch", e)
+            emit_metric("buyer_endpoint_failures", service="storm-watcher", source="nws")
             log.error("nws.fetch_failed", error=str(e))
             return {"error": str(e), "found": 0}
 
@@ -79,6 +81,7 @@ class NwsCapPoller:
                 if await _upsert_storm(storm):
                     new_count += 1
             except Exception as e:
+                ERROR_SINK.report("storm-watcher", "nws_upsert", e, external_id=storm.external_id)
                 log.error("nws.upsert_failed", external_id=storm.external_id, error=str(e))
 
         log.info("nws.poll_done", total=len(features), new=new_count)
@@ -92,6 +95,7 @@ class FemaPoller:
         try:
             declarations = await fetch_recent_declarations(days_back=14)
         except Exception as e:
+            ERROR_SINK.report("storm-watcher", "fema_fetch", e)
             log.error("fema.fetch_failed", error=str(e))
             return {"error": str(e), "found": 0}
 
@@ -102,6 +106,7 @@ class FemaPoller:
                 if await _upsert_storm(storm):
                     new_count += 1
             except Exception as e:
+                ERROR_SINK.report("storm-watcher", "fema_upsert", e, external_id=storm.external_id)
                 log.error("fema.upsert_failed", external_id=storm.external_id, error=str(e))
 
         log.info("fema.poll_done", total=len(declarations), new=new_count)
