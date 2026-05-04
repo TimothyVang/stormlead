@@ -8,7 +8,11 @@ from uuid import UUID, uuid4
 from hatchet_sdk import Hatchet
 from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from stormlead_core import build_duplicate_window, get_logger, initial_quality_score, normalize_address
+from stormlead_core import (
+    build_duplicate_window,
+    get_logger,
+    initial_quality_score,
+)
 from stormlead_db import ConsentAudit, LeadRow, get_session
 
 from form_receiver.schemas import ExtractedConsent

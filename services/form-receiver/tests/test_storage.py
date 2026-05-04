@@ -6,11 +6,17 @@ since they need a real postgres + the migration applied.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 from form_receiver.schemas import (
     ConsentExtractionError,
     FormbricksEnvelope,
     extract_consent,
+)
+from stormlead_core.dedup import (
+    build_duplicate_window,
+    initial_quality_score,
 )
 
 
@@ -150,11 +156,6 @@ def test_extract_invalid_email_dropped_silently() -> None:
     )
     out = extract_consent(e)
     assert out.email is None  # phone is the primary identifier
-
-
-from datetime import UTC, datetime
-
-from stormlead_core.dedup import build_duplicate_window, initial_quality_score, normalize_address, normalize_phone
 
 
 def test_duplicate_window_normalizes_phone_and_address() -> None:

@@ -16,11 +16,11 @@ from ping_post.auction import (
     _buyer_matches_paid_pilot_rules,
     _debit_amount,
     _delivery_idempotency_key,
+    _lead_can_enter_auction,
     _pick_winner,
     _ping_payload,
     _should_retry_post,
     _sign_webhook,
-    _lead_can_enter_auction,
 )
 from stormlead_core import Buyer, BuyerStatus, DamageTier, Lead, LeadClass, LeadSource, LeadStatus
 from stormlead_core.filters import evaluate_filter
