@@ -55,6 +55,9 @@ async def qualify_lead(context: Context) -> dict[str, Any]:
     """
     payload = context.workflow_input()
     lead_id = UUID(payload["lead_id"])
+    correlation_id = payload.get("correlation_id")
+    idempotency_key = payload.get("idempotency_key", f"qualify:{lead_id}")
+    allow_side_effects = bool(payload.get("allow_side_effects", True))
 
     async with get_session() as s:
         row = await s.get(LeadRow, lead_id)
@@ -83,23 +86,36 @@ async def qualify_lead(context: Context) -> dict[str, Any]:
         if content:
             result_text += str(content)
 
-    log.info("qualify.done", lead_id=str(lead_id), result_chars=len(result_text))
+    log.info(
+        "qualify.done",
+        lead_id=str(lead_id),
+        correlation_id=str(correlation_id) if correlation_id else None,
+        idempotency_key=idempotency_key,
+        result_chars=len(result_text),
+    )
 
     parsed = _parse_qualification(result_text)
-    async with get_session() as s:
-        row = await s.get(LeadRow, lead_id)
-        if row is None:
-            raise ValueError(f"lead {lead_id} not found")
-        row.damage_tier = parsed["damage_tier"]
-        row.qualification_score = parsed["qualification_score"]
-        row.lead_class = _class_from_score(parsed["qualification_score"])
-        row.qualification_reason = parsed["reasoning"]
-        row.rejection_reason = parsed["rejection_reason"]
-        row.status = "rejected" if parsed["rejection_reason"] else "qualified"
+    if allow_side_effects:
+        async with get_session() as s:
+            row = await s.get(LeadRow, lead_id)
+            if row is None:
+                raise ValueError(f"lead {lead_id} not found")
+            row.damage_tier = parsed["damage_tier"]
+            row.qualification_score = parsed["qualification_score"]
+            row.lead_class = _class_from_score(parsed["qualification_score"])
+            row.qualification_reason = parsed["reasoning"]
+            row.rejection_reason = parsed["rejection_reason"]
+            row.status = "rejected" if parsed["rejection_reason"] else "qualified"
 
     # TODO: emit lead.qualified / lead.rejected after Hatchet event emission is
     # wrapped in a small shared helper. Persistence is the paid-pilot gate.
-    return {"lead_id": str(lead_id), **parsed}
+    return {
+        "lead_id": str(lead_id),
+        "correlation_id": correlation_id,
+        "idempotency_key": idempotency_key,
+        "side_effects_applied": allow_side_effects,
+        **parsed,
+    }
 
 
 def _parse_qualification(result_text: str) -> dict[str, Any]:

@@ -1,10 +1,3 @@
-"""canonical pydantic models for stormlead.
-
-these are the wire format. db rows mirror them. event-bus payloads
-(hatchet events; postgres listen/notify in v1) serialize them.
-no service should redefine these.
-"""
-
 from __future__ import annotations
 
 from datetime import datetime
@@ -86,73 +79,168 @@ class BuyerSalesStage(StrEnum):
 
 
 # ============================================================================
+# workflow/agent safety models
+# ============================================================================
+
+
+class HumanOverrideMode(StrEnum):
+    OFF = "off"
+    LOW_CONFIDENCE_ONLY = "low_confidence_only"
+    STRICT = "strict"
+
+
+class WorkflowContext(BaseModel):
+    correlation_id: UUID = Field(default_factory=uuid4)
+    causation_id: UUID | None = None
+    idempotency_key: str
+    allow_charges_or_posts: bool = True
+    human_override_mode: HumanOverrideMode = HumanOverrideMode.LOW_CONFIDENCE_ONLY
+    min_confidence_for_autonomy: float = 0.7
+
+
+class AgentDecisionOutput(BaseModel):
+    decision: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    reason_codes: list[str] = Field(default_factory=list)
+    idempotency_key: str
+    requires_human_review: bool = False
+
+
+class RetrySafeExecution(BaseModel):
+    """shared helper for duplicate-prevention in repeated agent runs."""
+
+    idempotency_key: str
+    dedupe_scope: str
+    should_execute_side_effects: bool
+
+
+# ============================================================================
+# agent role I/O contracts
+# ============================================================================
+
+
+class MarketSentinelInput(BaseModel):
+    workflow: WorkflowContext
+    storm_id: UUID | None = None
+    affected_states: list[str] = Field(default_factory=list)
+    open_lead_count: int = 0
+    active_buyer_count: int = 0
+
+
+class MarketSentinelOutput(AgentDecisionOutput):
+    decision: str  # ready | monitor | hold
+    readiness_score: float = Field(ge=0.0, le=1.0)
+
+
+class LeadQualifierInput(BaseModel):
+    workflow: WorkflowContext
+    lead_id: UUID
+    damage_description: str | None = None
+    consent_present: bool = False
+    photo_count: int = 0
+
+
+class LeadQualifierOutput(AgentDecisionOutput):
+    decision: str  # qualify | reject | review
+    lead_class: LeadClass
+    reason: str
+
+
+class BuyerMatcherInput(BaseModel):
+    workflow: WorkflowContext
+    lead_id: UUID
+    lead_class: LeadClass
+    damage_tier: DamageTier | None = None
+    candidate_buyer_ids: list[UUID] = Field(default_factory=list)
+
+
+class RankedBuyer(BaseModel):
+    buyer_id: UUID
+    rank: int = Field(ge=1)
+    score: float = Field(ge=0.0, le=1.0)
+
+
+class BuyerMatcherOutput(AgentDecisionOutput):
+    decision: str  # match | no_match | review
+    eligible_buyers: list[RankedBuyer] = Field(default_factory=list)
+
+
+class DisputeTriagerInput(BaseModel):
+    workflow: WorkflowContext
+    lead_id: UUID
+    buyer_id: UUID | None = None
+    dispute_reason: str
+    requested_refund_cents: int | None = None
+
+
+class DisputeTriagerOutput(AgentDecisionOutput):
+    decision: str  # refund | deny | partial_refund | review
+    recommended_refund_cents: int | None = None
+
+
+class NurtureControllerInput(BaseModel):
+    workflow: WorkflowContext
+    lead_id: UUID
+    hours_since_capture: int = 0
+    prior_attempt_count: int = 0
+
+
+class NurtureControllerOutput(AgentDecisionOutput):
+    decision: str  # retry_contact | recycle | archive | review
+    next_action_at: datetime | None = None
+
+
+# ============================================================================
 # core entities
 # ============================================================================
 
 
 class Storm(BaseModel):
-    """normalized storm event. one per NHC atcf id or fema declaration id."""
-
     model_config = ConfigDict(frozen=False, str_strip_whitespace=True)
-
     id: UUID = Field(default_factory=uuid4)
-    external_id: str  # nhc atcf id (AL092024) or fema disaster id (DR-4828-FL)
-    name: str  # "hurricane helene", "milton", etc.
-    source: str  # "nhc" | "nws" | "fema" | "spc"
+    external_id: str
+    name: str
+    source: str
     severity: StormSeverity
-    affected_states: list[str] = Field(default_factory=list)  # ["FL", "GA", "SC"]
-    affected_counties: list[str] = Field(default_factory=list)  # FIPS codes
-    # postgis geom stored separately; this is a serializable bbox for messages
+    affected_states: list[str] = Field(default_factory=list)
+    affected_counties: list[str] = Field(default_factory=list)
     bbox_wkt: str | None = None
     detected_at: datetime
     landfall_at: datetime | None = None
     declared_at: datetime | None = None
-    raw: dict[str, Any] = Field(default_factory=dict)  # source payload for audit
+    raw: dict[str, Any] = Field(default_factory=dict)
 
 
 class Lead(BaseModel):
-    """a homeowner lead. PII-bearing. handle accordingly."""
-
     model_config = ConfigDict(frozen=False, str_strip_whitespace=True)
-
     id: UUID = Field(default_factory=uuid4)
     source: LeadSource
     status: LeadStatus = LeadStatus.NEW
-
-    # pii (encrypted at rest in prod via pgcrypto + openbao keys)
     name: str
-    phone_e164: str  # normalized to e164 at ingest
+    phone_e164: str
     email: str | None = None
     address_line1: str
     city: str
-    state: str  # 2-letter
+    state: str
     zip: str
     lat: float | None = None
     lon: float | None = None
-
-    # context
     storm_id: UUID | None = None
     damage_description: str | None = None
     damage_tier: DamageTier | None = None
     photo_s3_keys: list[str] = Field(default_factory=list)
-
-    # tcpa-required audit trail
-    consent_text: str  # exact disclosure shown
+    consent_text: str
     consent_ip: str
     consent_user_agent: str
     consent_at: datetime
     page_url: str
-    page_html_hash: str  # sha256 of page at submit time
+    page_html_hash: str
     rrweb_session_s3_key: str | None = None
     trustedform_cert_url: str | None = None
-
-    # enrichment
     property_avm: Decimal | None = None
     year_built: int | None = None
     owner_occupied: bool | None = None
-
-    # scoring (set by qualify agent)
-    qualification_score: float | None = None  # 0..1
+    qualification_score: float | None = None
     lead_class: LeadClass | None = None
     qualification_reason: str | None = None
     requested_service: str | None = None
@@ -161,7 +249,6 @@ class Lead(BaseModel):
     first_touch_source: str | None = None
     last_touch_source: str | None = None
     rejection_reason: str | None = None
-
     created_at: datetime = Field(default_factory=lambda: datetime.utcnow())
     updated_at: datetime = Field(default_factory=lambda: datetime.utcnow())
 
@@ -181,33 +268,22 @@ class Lead(BaseModel):
 
 
 class Buyer(BaseModel):
-    """a tree-service buyer in the roster."""
-
     model_config = ConfigDict(frozen=False, str_strip_whitespace=True)
-
     id: UUID = Field(default_factory=uuid4)
     name: str
     company: str
     contact_email: str
     contact_phone_e164: str
     status: BuyerStatus = BuyerStatus.PENDING_VERIFICATION
-
-    # licensing (we verify and store)
     license_number: str | None = None
     license_state: str | None = None
     license_verified_at: datetime | None = None
-
-    # delivery
     webhook_url: str
-    webhook_secret: str  # hmac key
-
-    # pricing
-    bid_per_lead_t1_t2: Decimal  # $45-100 typical
-    bid_per_lead_t3: Decimal  # $150-250 typical
-    bid_per_call: Decimal  # $80-120 typical
-
-    # geographic + filter dsl (cel expression)
-    filter_expression: str  # see filters.py
+    webhook_secret: str
+    bid_per_lead_t1_t2: Decimal
+    bid_per_lead_t3: Decimal
+    bid_per_call: Decimal
+    filter_expression: str
     daily_cap: int = 100
     monthly_budget: Decimal = Decimal(5000)
     sales_stage: BuyerSalesStage = BuyerSalesStage.PROSPECT
@@ -217,10 +293,7 @@ class Buyer(BaseModel):
     target_zips: list[str] = Field(default_factory=list)
     exclusive_zips: list[str] = Field(default_factory=list)
     low_balance_threshold: Decimal = Decimal(0)
-
-    # billing
     deposit_balance: Decimal = Decimal(0)
     lifetime_spend: Decimal = Decimal(0)
-
     created_at: datetime = Field(default_factory=lambda: datetime.utcnow())
     updated_at: datetime = Field(default_factory=lambda: datetime.utcnow())
