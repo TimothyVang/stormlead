@@ -170,6 +170,29 @@ services:
       - hatchet_certs:/hatchet/certs
       - hatchet_config:/hatchet/config
 
+  hatchet-token:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-admin:v0.85.3
+    entrypoint: sh
+    command:
+      - -c
+      - >
+        set -eu;
+        token=$$(/hatchet/hatchet-admin --config /hatchet/config token create --name stormlead-dev | sed -n '1p');
+        test -n "$$token";
+        umask 077;
+        printf 'export HATCHET_CLIENT_TOKEN=%s\n' "$$token" > /hatchet/runtime/client.env;
+        printf 'hatchet dev token written\n'
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER:-stormlead}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/hatchet?sslmode=disable"
+    depends_on:
+      hatchet-setup-config:
+        condition: service_completed_successfully
+      hatchet-migration:
+        condition: service_completed_successfully
+    volumes:
+      - hatchet_config:/hatchet/config
+      - hatchet_runtime:/hatchet/runtime
+
   # =========================================================================
   # llm gateway: litellm
   # =========================================================================
@@ -178,19 +201,23 @@ services:
   #   cosign verify ghcr.io/berriai/litellm:main-stable --certificate-identity-regexp ...
 
   litellm:
-    image: ghcr.io/berriai/litellm-database:main-v1.83.7-stable
+    image: ghcr.io/berriai/litellm:main-v1.83.7-stable
     restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
     environment:
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-master-change-me}
-      DATABASE_URL: "postgres://${POSTGRES_USER:-stormlead}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/litellm?sslmode=disable"
-      STORE_MODEL_IN_DB: "True"
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY_REAL:-}  # real upstream anthropic key, only here
     volumes:
       - ./../../litellm/config.yaml:/app/config.yaml:ro
-    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "2"]
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:4000/health/readiness', timeout=3)\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
     ports:
       - "127.0.0.1:4000:4000"
 
@@ -322,6 +349,8 @@ services:
         condition: service_healthy
       hatchet-engine:
         condition: service_started
+      hatchet-token:
+        condition: service_completed_successfully
     environment:
       DATABASE_URL: ${DATABASE_URL}
       HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN}
@@ -332,6 +361,9 @@ services:
       # host port remapped from 8001 to avoid collisions with other local
       # docker projects. smoke_e2e.py + manual curl tests use 8003.
       - "127.0.0.1:8003:8000"
+    volumes:
+      - hatchet_runtime:/hatchet/runtime:ro
+    command: sh -c ". /hatchet/runtime/client.env; exec uvicorn ping_post.api:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*'"
     # so the auction's POST-to-buyer can reach a host-bound listener
     # (smoke_e2e.py runs in-process aiohttp on the host's :9999); seed
     # buyers point at host.docker.internal. linux/wsl2 needs the
@@ -349,6 +381,8 @@ services:
         condition: service_healthy
       hatchet-engine:
         condition: service_started
+      hatchet-token:
+        condition: service_completed_successfully
     environment:
       DATABASE_URL: ${DATABASE_URL}
       HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN}
@@ -356,6 +390,9 @@ services:
       HATCHET_CLIENT_TLS_STRATEGY: none
       NWS_USER_AGENT: ${NWS_USER_AGENT}
       FEMA_API_BASE: ${FEMA_API_BASE}
+    volumes:
+      - hatchet_runtime:/hatchet/runtime:ro
+    command: sh -c ". /hatchet/runtime/client.env; exec python -m storm_watcher.worker"
 
   form-receiver:
     build:
@@ -367,6 +404,8 @@ services:
         condition: service_healthy
       hatchet-engine:
         condition: service_started
+      hatchet-token:
+        condition: service_completed_successfully
     environment:
       DATABASE_URL: ${DATABASE_URL}
       HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN}
@@ -377,6 +416,9 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:
       - "127.0.0.1:8002:8000"
+    volumes:
+      - hatchet_runtime:/hatchet/runtime:ro
+    command: sh -c ". /hatchet/runtime/client.env; exec uvicorn form_receiver.api:app --host 0.0.0.0 --port 8000"
 
   enrich-worker:
     build:
@@ -388,6 +430,8 @@ services:
         condition: service_healthy
       hatchet-engine:
         condition: service_started
+      hatchet-token:
+        condition: service_completed_successfully
     environment:
       DATABASE_URL: ${DATABASE_URL}
       HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN}
@@ -395,6 +439,9 @@ services:
       HATCHET_CLIENT_TLS_STRATEGY: none
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       STORMLEAD_COMMERCIAL_LAUNCH_APPROVED: ${STORMLEAD_COMMERCIAL_LAUNCH_APPROVED:-false}
+    volumes:
+      - hatchet_runtime:/hatchet/runtime:ro
+    command: sh -c ". /hatchet/runtime/client.env; exec python -m enrich_worker.worker"
 
   agent-runtime:
     build:
@@ -407,7 +454,9 @@ services:
       hatchet-engine:
         condition: service_started
       litellm:
-        condition: service_started
+        condition: service_healthy
+      hatchet-token:
+        condition: service_completed_successfully
     environment:
       DATABASE_URL: ${DATABASE_URL}
       HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN}
@@ -420,6 +469,9 @@ services:
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
       LANGFUSE_HOST: ${LANGFUSE_HOST}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - hatchet_runtime:/hatchet/runtime:ro
+    command: sh -c ". /hatchet/runtime/client.env; exec python -m agent_runtime.worker"
 
 volumes:
   postgres_data:
@@ -427,3 +479,4 @@ volumes:
   rabbitmq_data:
   hatchet_config:
   hatchet_certs:
+  hatchet_runtime:
