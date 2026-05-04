@@ -176,6 +176,10 @@ class LeadRow(Base):
     first_touch_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
     last_touch_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
     rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    score: Mapped[float | None] = mapped_column(nullable=True)
+    score_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    hold_for_review: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    blocked_for_fraud: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
 
     # for rag: embedding of damage description + photo summary
     embedding = mapped_column(Vector(1536), nullable=True)

@@ -8,6 +8,14 @@ from stormlead_core.events import (
     StormDetected,
     StormEvent,
 )
+from stormlead_core.dedup import (
+    DuplicateWindow,
+    QualityScore,
+    build_duplicate_window,
+    initial_quality_score,
+    normalize_address,
+    normalize_phone,
+)
 from stormlead_core.filters import BuyerFilter, evaluate_filter
 from stormlead_core.logging import configure_logging, get_logger
 from stormlead_core.models import (
@@ -28,9 +36,11 @@ __all__ = [
     "BuyerFilter",
     "BuyerSalesStage",
     "BuyerStatus",
+    "DuplicateWindow",
     "CallEvent",
     "DamageTier",
     "Lead",
+    "QualityScore",
     "LeadCaptured",
     "LeadClass",
     "LeadEvent",
@@ -42,6 +52,10 @@ __all__ = [
     "StormEvent",
     "StormSeverity",
     "configure_logging",
+    "build_duplicate_window",
     "evaluate_filter",
+    "initial_quality_score",
+    "normalize_address",
+    "normalize_phone",
     "get_logger",
 ]

@@ -20,6 +20,7 @@ from ping_post.auction import (
     _ping_payload,
     _should_retry_post,
     _sign_webhook,
+    _lead_can_enter_auction,
 )
 from stormlead_core import Buyer, BuyerStatus, DamageTier, Lead, LeadClass, LeadSource, LeadStatus
 from stormlead_core.filters import evaluate_filter
@@ -285,3 +286,27 @@ def test_paid_pilot_rules_require_requested_service_when_configured() -> None:
     assert not _buyer_matches_paid_pilot_rules(buyer, _lead(requested_service="tree_removal"))
     buyer.services = ["tree_removal"]
     assert _buyer_matches_paid_pilot_rules(buyer, _lead(requested_service="tree_removal"))
+
+
+def test_lead_blocked_or_hold_is_not_auctioned() -> None:
+    lead = _lead()
+    lead.blocked_for_fraud = True
+    assert _lead_can_enter_auction(lead) == (False, "blocked_for_fraud")
+
+    lead.blocked_for_fraud = False
+    lead.hold_for_review = True
+    assert _lead_can_enter_auction(lead) == (False, "held_for_review")
+
+
+def test_low_score_or_cd_class_goes_to_manual_review() -> None:
+    lead = _lead()
+    lead.score = 0.4
+    ok, reason = _lead_can_enter_auction(lead)
+    assert not ok
+    assert reason == "score_below_hold_threshold"
+
+    lead2 = _lead(lead_class=LeadClass.C)
+    lead2.score = 0.7
+    ok2, reason2 = _lead_can_enter_auction(lead2)
+    assert not ok2
+    assert reason2 == "class_requires_review"

@@ -1,24 +1,14 @@
-"""persist a captured lead + consent audit, then emit lead.captured.
-
-dedup: the standard-webhooks `webhook-id` header is the primary key on
-consent_audits. ON CONFLICT DO NOTHING + a returning-count check tells
-us whether the delivery was new (→ emit hatchet event) or a retry
-(→ no-op, return success).
-
-lead-level dedup: LeadRow has UniqueConstraint(phone_e164, page_html_hash).
-same homeowner re-submitting the same page → same lead row reused.
-"""
-
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from hatchet_sdk import Hatchet
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from stormlead_core import get_logger
+from stormlead_core import build_duplicate_window, get_logger, initial_quality_score, normalize_address
 from stormlead_db import ConsentAudit, LeadRow, get_session
 
 from form_receiver.schemas import ExtractedConsent
@@ -27,13 +17,40 @@ log = get_logger(__name__)
 
 
 async def upsert_lead(extracted: ExtractedConsent, *, ip: str) -> UUID:
-    """upsert by (phone_e164, page_html_hash). returns the lead id (new or existing)."""
-    page_html_hash = extracted.page_html_sha256 or ""  # column is non-null
+    page_html_hash = extracted.page_html_sha256 or ""
     new_id = uuid4()
     now = datetime.now(UTC)
+    duplicate_hours = int(os.getenv("LEAD_DUPLICATE_WINDOW_HOURS", "72"))
+    dedup = build_duplicate_window(
+        phone=extracted.phone_e164,
+        address_line1=extracted.address_line1,
+        city=extracted.city,
+        state=extracted.state,
+        zip_code=extracted.zip,
+        storm_id=None,
+        submitted_at=now,
+        lookback_hours=duplicate_hours,
+    )
 
     async with get_session() as s:
-        # try insert; on conflict (phone, hash), do nothing
+        dup_exists = (
+            await s.execute(
+                select(LeadRow.id).where(
+                    LeadRow.phone_e164 == extracted.phone_e164,
+                    LeadRow.created_at >= dedup.window_start,
+                    or_(
+                        LeadRow.storm_id.is_(None),
+                        LeadRow.storm_id == dedup.storm_id,
+                    ),
+                )
+            )
+        ).first() is not None
+        score = initial_quality_score(
+            dwell_ms=extracted.dwell_ms,
+            has_email=bool(extracted.email),
+            duplicate=dup_exists,
+        )
+
         stmt = (
             pg_insert(LeadRow)
             .values(
@@ -53,6 +70,10 @@ async def upsert_lead(extracted: ExtractedConsent, *, ip: str) -> UUID:
                 consent_at=now,
                 page_url=extracted.page_url,
                 page_html_hash=page_html_hash,
+                score=score.score,
+                score_reason=score.reason,
+                hold_for_review=score.hold,
+                blocked_for_fraud=score.blocked,
             )
             .on_conflict_do_nothing(constraint="uq_lead_phone_hash")
             .returning(LeadRow.id)
@@ -61,7 +82,6 @@ async def upsert_lead(extracted: ExtractedConsent, *, ip: str) -> UUID:
         if result is not None:
             return result.id
 
-        # conflict: fetch the existing row
         existing = (
             await s.execute(
                 select(LeadRow.id).where(
@@ -71,20 +91,11 @@ async def upsert_lead(extracted: ExtractedConsent, *, ip: str) -> UUID:
             )
         ).first()
         if existing is None:
-            # shouldn't happen — we just hit the unique constraint
             raise RuntimeError("lead conflict but no existing row found")
         return existing.id
 
 
-async def record_audit(
-    *,
-    webhook_id: str,
-    lead_id: UUID,
-    extracted: ExtractedConsent,
-    ip: str,
-    raw_payload: bytes,
-) -> bool:
-    """write a consent_audits row keyed on webhook_id. returns True if new, False if dup."""
+async def record_audit(*, webhook_id: str, lead_id: UUID, extracted: ExtractedConsent, ip: str, raw_payload: bytes) -> bool:
     parsed_payload = json.loads(raw_payload.decode("utf-8"))
     async with get_session() as s:
         stmt = (
@@ -109,10 +120,6 @@ async def record_audit(
 
 
 async def emit_lead_captured(hatchet: Hatchet, lead_id: UUID) -> None:
-    """push the hatchet event that agent-runtime's QualifyLead workflow listens for."""
     payload = {"lead_id": str(lead_id)}
-    # hatchet-sdk's event push api: client.event.push(event_key, payload)
     hatchet.event.push("lead.captured", payload)
-    # structlog's `event` positional means the log message; using it again
-    # as a kwarg collides. rename to `hatchet_event` for the payload-name field.
     log.info("event.pushed", hatchet_event="lead.captured", lead_id=str(lead_id))
