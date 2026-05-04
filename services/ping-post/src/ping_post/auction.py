@@ -30,6 +30,11 @@ from stormlead_core import (
     Lead,
     LeadStatus,
     PingPostResult,
+    ERROR_SINK,
+    bind_correlation_id,
+    current_correlation_id,
+    emit_event,
+    emit_metric,
     evaluate_filter,
     get_logger,
 )
@@ -151,6 +156,7 @@ async def _ping_one(
     buyer: Buyer,
     payload: dict,
 ) -> PingResponse:
+    bind_correlation_id(str(lead.id))
     started = time.perf_counter()
     body = json.dumps(payload).encode()
     ts = str(int(time.time()))
@@ -470,6 +476,8 @@ async def _post_to_winner(
             )
             ok = 200 <= r.status_code < 300
             if ok:
+                emit_event("sold", lead_id=str(lead.id), service="ping-post", buyer_id=str(buyer.id))
+                emit_metric("funnel.sold", lead_id=str(lead.id), service="ping-post")
                 log.info(
                     "delivery.post_succeeded",
                     lead_id=str(lead.id),
@@ -489,6 +497,8 @@ async def _post_to_winner(
                 will_retry=retry and attempt < POST_MAX_ATTEMPTS,
             )
             if retry and attempt < POST_MAX_ATTEMPTS:
+                emit_event("retried", lead_id=str(lead.id), service="ping-post", buyer_id=str(buyer.id), attempt=attempt)
+                emit_metric("funnel.retried", lead_id=str(lead.id), service="ping-post")
                 await asyncio.sleep(POST_RETRY_BASE_DELAY_S * (2 ** (attempt - 1)))
                 continue
             return (False, r.status_code, r.text[:2048])
@@ -504,6 +514,8 @@ async def _post_to_winner(
                 will_retry=retry and attempt < POST_MAX_ATTEMPTS,
             )
             if retry and attempt < POST_MAX_ATTEMPTS:
+                emit_event("retried", lead_id=str(lead.id), service="ping-post", buyer_id=str(buyer.id), attempt=attempt)
+                emit_metric("funnel.retried", lead_id=str(lead.id), service="ping-post")
                 await asyncio.sleep(POST_RETRY_BASE_DELAY_S * (2 ** (attempt - 1)))
                 continue
             return (False, None, f"{type(e).__name__}: {e}")
@@ -512,6 +524,7 @@ async def _post_to_winner(
 
 async def run_auction(lead: Lead) -> PingPostResult:
     """run a full ping-post cycle for one lead. returns the result."""
+    bind_correlation_id(str(lead.id))
     started = time.perf_counter()
     allowed, reason = _lead_can_enter_auction(lead)
     if not allowed:
@@ -529,6 +542,10 @@ async def run_auction(lead: Lead) -> PingPostResult:
 
     buyers = await _select_eligible_buyers(lead)
     if not buyers:
+        emit_event("auctioned", lead_id=str(lead.id), service="ping-post", buyers=0)
+        emit_metric("funnel.auctioned", lead_id=str(lead.id), service="ping-post", buyers=0)
+        emit_event("unsold", lead_id=str(lead.id), service="ping-post")
+        emit_metric("funnel.unsold", lead_id=str(lead.id), service="ping-post")
         return PingPostResult(
             event_id=uuid4(),
             occurred_at=datetime.now(UTC),
@@ -608,8 +625,14 @@ async def run_auction(lead: Lead) -> PingPostResult:
                         )
                     )
             if reserved and not ok:
+                emit_event("refunded", lead_id=str(lead.id), service="ping-post", buyer_id=str(buyer.id))
+                emit_metric("funnel.refunded", lead_id=str(lead.id), service="ping-post")
                 await _credit_failed_delivery(buyer.id, lead.id, bid_cents, status)
         else:
+            emit_event("auctioned", lead_id=str(lead.id), service="ping-post", buyers=len(buyers))
+            emit_metric("funnel.auctioned", lead_id=str(lead.id), service="ping-post", buyers=len(buyers))
+            emit_event("unsold", lead_id=str(lead.id), service="ping-post")
+            emit_metric("funnel.unsold", lead_id=str(lead.id), service="ping-post")
             async with get_session() as s:
                 lead_row = await s.get(LeadRow, lead.id)
                 if lead_row:

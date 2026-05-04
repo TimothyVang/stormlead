@@ -22,7 +22,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from hatchet_sdk import Hatchet
 from sqlalchemy import text as sa_text
-from stormlead_core import configure_logging, get_logger
+from stormlead_core import (
+    ERROR_SINK,
+    bind_correlation_id,
+    configure_logging,
+    emit_event,
+    emit_metric,
+    get_logger,
+)
 from stormlead_db import get_session
 
 from form_receiver.schemas import (
@@ -89,6 +96,7 @@ async def readyz() -> dict[str, str]:
 @app.post("/webhooks/formbricks")
 async def formbricks_webhook(request: Request) -> dict[str, str]:
     raw_body = await request.body()
+    bind_correlation_id(request.headers.get("webhook-id"))
     secret = os.environ.get("FORMBRICKS_WEBHOOK_SECRET", "")
     if not secret:
         raise HTTPException(500, "FORMBRICKS_WEBHOOK_SECRET not configured")
@@ -146,8 +154,11 @@ async def formbricks_webhook(request: Request) -> dict[str, str]:
         except Exception as e:
             # raise 5xx so formbricks retries — webhook_id dedup means
             # the lead/audit rows aren't double-written on retry.
+            ERROR_SINK.report("form-receiver", "emit_lead_captured", e, lead_id=str(lead_id))
             log.error("event.push_failed", error=str(e), lead_id=str(lead_id))
             raise HTTPException(503, "event emission failed; will retry") from e
+        emit_event("captured", lead_id=str(lead_id), service="form-receiver")
+        emit_metric("funnel.captured", lead_id=str(lead_id), service="form-receiver")
         return {"status": "accepted", "lead_id": str(lead_id)}
 
     log.info("webhook.duplicate", webhook_id=webhook_id, lead_id=str(lead_id))

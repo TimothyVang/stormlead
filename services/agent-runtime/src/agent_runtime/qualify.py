@@ -19,7 +19,15 @@ from uuid import UUID
 
 from claude_agent_sdk import query
 from hatchet_sdk import Context
-from stormlead_core import DamageTier, LeadClass, get_logger
+from stormlead_core import (
+    ERROR_SINK,
+    DamageTier,
+    LeadClass,
+    bind_correlation_id,
+    emit_event,
+    emit_metric,
+    get_logger,
+)
 from stormlead_db import LeadRow, get_session
 
 from agent_runtime.auth import get_agent_options
@@ -55,6 +63,7 @@ async def qualify_lead(context: Context) -> dict[str, Any]:
     """
     payload = context.workflow_input()
     lead_id = UUID(payload["lead_id"])
+    bind_correlation_id(payload.get("correlation_id") or str(lead_id))
 
     async with get_session() as s:
         row = await s.get(LeadRow, lead_id)
@@ -85,7 +94,12 @@ async def qualify_lead(context: Context) -> dict[str, Any]:
 
     log.info("qualify.done", lead_id=str(lead_id), result_chars=len(result_text))
 
-    parsed = _parse_qualification(result_text)
+    try:
+        parsed = _parse_qualification(result_text)
+    except Exception as e:
+        ERROR_SINK.report("agent-runtime", "qualify_parse", e, lead_id=str(lead_id))
+        emit_metric("qualification.errors", lead_id=str(lead_id), service="agent-runtime")
+        raise
     async with get_session() as s:
         row = await s.get(LeadRow, lead_id)
         if row is None:
@@ -96,6 +110,10 @@ async def qualify_lead(context: Context) -> dict[str, Any]:
         row.qualification_reason = parsed["reasoning"]
         row.rejection_reason = parsed["rejection_reason"]
         row.status = "rejected" if parsed["rejection_reason"] else "qualified"
+
+    stage = "qualified" if not parsed["rejection_reason"] else "unsold"
+    emit_event(stage, lead_id=str(lead_id), service="agent-runtime")
+    emit_metric(f"funnel.{stage}", lead_id=str(lead_id), service="agent-runtime")
 
     # TODO: emit lead.qualified / lead.rejected after Hatchet event emission is
     # wrapped in a small shared helper. Persistence is the paid-pilot gate.
