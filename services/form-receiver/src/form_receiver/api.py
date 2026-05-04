@@ -20,10 +20,13 @@ import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel
+from sqlalchemy import select
 from hatchet_sdk import Hatchet
 from sqlalchemy import text as sa_text
 from stormlead_core import configure_logging, get_logger
 from stormlead_db import get_session
+from stormlead_db import DisclosureLogRow, LeadRow, SuppressionRow
 
 from form_receiver.schemas import (
     ConsentExtractionError,
@@ -57,6 +60,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="stormlead form-receiver", lifespan=lifespan)
+
+
+class SuppressionWrite(BaseModel):
+    phone_e164: str | None = None
+    email: str | None = None
+    lead_id: str | None = None
+    source_channel: str
+    source_detail: str | None = None
 
 
 def _client_ip(request: Request) -> str:
@@ -130,7 +141,12 @@ async def formbricks_webhook(request: Request) -> dict[str, str]:
     webhook_id = request.headers["webhook-id"]
 
     # 4. persist + emit
-    lead_id = await upsert_lead(extracted, ip=ip)
+    try:
+        lead_id = await upsert_lead(extracted, ip=ip)
+    except RuntimeError as e:
+        if "suppressed" in str(e):
+            return {"status": "suppressed"}
+        raise
     was_new = await record_audit(
         webhook_id=webhook_id,
         lead_id=lead_id,
@@ -152,3 +168,46 @@ async def formbricks_webhook(request: Request) -> dict[str, str]:
 
     log.info("webhook.duplicate", webhook_id=webhook_id, lead_id=str(lead_id))
     return {"status": "accepted-duplicate", "lead_id": str(lead_id)}
+
+
+@app.post("/compliance/suppress")
+async def suppress_lead(payload: SuppressionWrite) -> dict[str, str]:
+    if not (payload.phone_e164 or payload.email or payload.lead_id):
+        raise HTTPException(400, "one of phone_e164/email/lead_id is required")
+    async with get_session() as s:
+        s.add(
+            SuppressionRow(
+                phone_e164=payload.phone_e164,
+                email=payload.email,
+                lead_id=payload.lead_id,
+                source_channel=payload.source_channel,
+                source_detail=payload.source_detail,
+            )
+        )
+    return {"status": "recorded"}
+
+
+@app.get("/compliance/disclosures/{lead_id}")
+async def lead_disclosures(lead_id: str) -> dict:
+    async with get_session() as s:
+        lead_exists = await s.scalar(select(LeadRow.id).where(LeadRow.id == lead_id))
+        if lead_exists is None:
+            raise HTTPException(404, "lead not found")
+        rows = (
+            (await s.execute(select(DisclosureLogRow).where(DisclosureLogRow.lead_id == lead_id)))
+            .scalars()
+            .all()
+        )
+    return {
+        "lead_id": lead_id,
+        "disclosures": [
+            {
+                "recipient": r.recipient_name or r.recipient_id,
+                "recipient_type": r.recipient_type,
+                "channel": r.channel,
+                "when": r.disclosed_at.isoformat(),
+                "metadata": r.metadata_json,
+            }
+            for r in rows
+        ],
+    }

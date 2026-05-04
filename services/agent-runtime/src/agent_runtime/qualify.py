@@ -23,6 +23,7 @@ from stormlead_core import DamageTier, LeadClass, get_logger
 from stormlead_db import LeadRow, get_session
 
 from agent_runtime.auth import get_agent_options
+from agent_runtime.compliance import should_record_call
 
 log = get_logger(__name__)
 
@@ -60,6 +61,17 @@ async def qualify_lead(context: Context) -> dict[str, Any]:
         row = await s.get(LeadRow, lead_id)
         if row is None:
             raise ValueError(f"lead {lead_id} not found")
+        has_recording_consent = bool(row.consent_text and row.consent_version_hash)
+        if not should_record_call(state=row.state, has_recording_consent=has_recording_consent):
+            row.status = "rejected"
+            row.rejection_reason = "recording_consent_required_for_state"
+            return {
+                "lead_id": str(lead_id),
+                "damage_tier": "tier_1_branches",
+                "qualification_score": 0.0,
+                "reasoning": "Fail-safe reject: missing recording consent for two-party consent state.",
+                "rejection_reason": "recording_consent_required_for_state",
+            }
         # minimal projection for the prompt; redact deeper pii at this layer
         lead_dict = {
             "city": row.city,

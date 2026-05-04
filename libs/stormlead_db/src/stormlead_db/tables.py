@@ -155,6 +155,7 @@ class LeadRow(Base):
 
     # tcpa audit (immutable after insert; enforce in code, not constraint)
     consent_text: Mapped[str] = mapped_column(Text)
+    consent_version_hash: Mapped[str] = mapped_column(String(64), default="", server_default="")
     consent_ip: Mapped[str] = mapped_column(String(45))
     consent_user_agent: Mapped[str] = mapped_column(Text)
     consent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -303,3 +304,45 @@ class ConsentAudit(Base):
     page_html_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     dwell_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     raw_payload: Mapped[dict] = mapped_column(JSONB)
+
+
+class SuppressionRow(Base):
+    """append-only suppression registry keyed by canonical identity values."""
+
+    __tablename__ = "suppressions"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    phone_e164: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    lead_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("leads.id"), nullable=True, index=True
+    )
+    reason: Mapped[str] = mapped_column(String(64), default="opt_out")
+    source_channel: Mapped[str] = mapped_column(String(32), index=True)
+    source_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), index=True
+    )
+
+    __table_args__ = (
+        CheckConstraint("phone_e164 IS NOT NULL OR email IS NOT NULL OR lead_id IS NOT NULL"),
+    )
+
+
+class DisclosureLogRow(Base):
+    """audit trail for outbound lead disclosures."""
+
+    __tablename__ = "disclosure_logs"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    lead_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("leads.id"), nullable=False, index=True
+    )
+    recipient_type: Mapped[str] = mapped_column(String(32))
+    recipient_id: Mapped[str] = mapped_column(String(128), index=True)
+    recipient_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    channel: Mapped[str] = mapped_column(String(32), index=True)
+    disclosed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), index=True
+    )
+    metadata_json: Mapped[dict] = mapped_column(JSONB, default=dict)

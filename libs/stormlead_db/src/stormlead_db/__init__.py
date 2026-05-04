@@ -7,6 +7,8 @@ from stormlead_db.tables import (
     PingAttempt,
     PostResult,
     StormRow,
+    SuppressionRow,
+    DisclosureLogRow,
 )
 
 __all__ = [
@@ -17,6 +19,8 @@ __all__ = [
     "PingAttempt",
     "PostResult",
     "StormRow",
+    "SuppressionRow",
+    "DisclosureLogRow",
     "get_engine",
     "get_session",
 ]

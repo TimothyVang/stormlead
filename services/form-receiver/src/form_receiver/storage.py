@@ -12,6 +12,7 @@ same homeowner re-submitting the same page → same lead row reused.
 from __future__ import annotations
 
 import json
+import hashlib
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -19,7 +20,7 @@ from hatchet_sdk import Hatchet
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from stormlead_core import get_logger
-from stormlead_db import ConsentAudit, LeadRow, get_session
+from stormlead_db import ConsentAudit, LeadRow, SuppressionRow, get_session
 
 from form_receiver.schemas import ExtractedConsent
 
@@ -32,7 +33,15 @@ async def upsert_lead(extracted: ExtractedConsent, *, ip: str) -> UUID:
     new_id = uuid4()
     now = datetime.now(UTC)
 
+    consent_version_hash = hashlib.sha256(extracted.consent_text.encode("utf-8")).hexdigest()
+
     async with get_session() as s:
+        where_clause = SuppressionRow.phone_e164 == extracted.phone_e164
+        if extracted.email:
+            where_clause = where_clause | (SuppressionRow.email == extracted.email)
+        suppressed = await s.scalar(select(SuppressionRow.id).where(where_clause))
+        if suppressed is not None:
+            raise RuntimeError("lead is suppressed")
         # try insert; on conflict (phone, hash), do nothing
         stmt = (
             pg_insert(LeadRow)
@@ -48,6 +57,7 @@ async def upsert_lead(extracted: ExtractedConsent, *, ip: str) -> UUID:
                 state=extracted.state,
                 zip=extracted.zip,
                 consent_text=extracted.consent_text,
+                consent_version_hash=consent_version_hash,
                 consent_ip=ip,
                 consent_user_agent=extracted.user_agent,
                 consent_at=now,

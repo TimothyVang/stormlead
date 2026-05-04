@@ -32,7 +32,16 @@ from stormlead_core import (
     evaluate_filter,
     get_logger,
 )
-from stormlead_db import BillingEvent, BuyerRow, LeadRow, PingAttempt, PostResult, get_session
+from stormlead_db import (
+    BillingEvent,
+    BuyerRow,
+    DisclosureLogRow,
+    LeadRow,
+    PingAttempt,
+    PostResult,
+    SuppressionRow,
+    get_session,
+)
 
 log = get_logger(__name__)
 
@@ -188,6 +197,13 @@ async def _ping_one(
 async def _select_eligible_buyers(lead: Lead) -> list[Buyer]:
     """pull buyers from db, filter by status + cel expression."""
     async with get_session() as s:
+        suppression_where = (SuppressionRow.lead_id == lead.id) | (SuppressionRow.phone_e164 == lead.phone_e164)
+        if lead.email:
+            suppression_where = suppression_where | (SuppressionRow.email == lead.email)
+        is_suppressed = await s.scalar(select(SuppressionRow.id).where(suppression_where))
+        if is_suppressed is not None:
+            log.info("lead.suppressed_skip_routing", lead_id=str(lead.id))
+            return []
         rows = (
             (
                 await s.execute(
@@ -558,6 +574,16 @@ async def run_auction(lead: Lead) -> PingPostResult:
                 if lead_row:
                     lead_row.status = LeadStatus.SOLD.value if ok else LeadStatus.UNSOLD.value
                 if ok:
+                    s.add(
+                        DisclosureLogRow(
+                            lead_id=lead.id,
+                            recipient_type="buyer",
+                            recipient_id=str(buyer.id),
+                            recipient_name=buyer.company,
+                            channel="webhook_post",
+                            metadata_json={"bid_cents": bid_cents, "status": status},
+                        )
+                    )
                     s.add(
                         BillingEvent(
                             buyer_id=buyer.id,
