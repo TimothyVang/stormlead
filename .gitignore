@@ -16,6 +16,7 @@ build/
 .venv/
 venv/
 node_modules/
+test-results/
 .next/
 out/
 backups/

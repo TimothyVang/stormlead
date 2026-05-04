@@ -17,16 +17,17 @@ import asyncio
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from hatchet_sdk import Context, Hatchet
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
-
-from stormlead_core import BuyerStatus, Lead, configure_logging, get_logger
+from sqlalchemy import func, select
+from stormlead_core import BuyerSalesStage, BuyerStatus, Lead, configure_logging, get_logger
 from stormlead_db import BillingEvent, BuyerRow, LeadRow, PostResult, get_session
 
 from ping_post.auction import run_auction
@@ -42,6 +43,13 @@ VALID_RETURN_REASONS = {
     "spam",
     "job_already_completed",
 }
+
+os.environ.setdefault(
+    "HATCHET_CLIENT_TOKEN",
+    "eyJhbGciOiJub25lIn0.eyJzdWIiOiJkZXYiLCJzZXJ2ZXJfdXJsIjoiaHR0cDovL2xvY2FsaG9zdDo4MDgwIiwiZ3JwY19icm9hZGNhc3RfYWRkcmVzcyI6ImxvY2FsaG9zdDo3MDc3In0.",
+)
+os.environ.setdefault("HATCHET_CLIENT_HOST_PORT", "localhost:7077")
+os.environ.setdefault("HATCHET_CLIENT_TLS_STRATEGY", "none")
 
 
 class BuyerCreateRequest(BaseModel):
@@ -60,6 +68,13 @@ class BuyerCreateRequest(BaseModel):
     deposit_balance: Decimal = Field(default=Decimal("0.00"), ge=Decimal("0"))
     license_number: str | None = Field(default=None, max_length=128)
     license_state: str | None = Field(default=None, max_length=2)
+    sales_stage: BuyerSalesStage = BuyerSalesStage.PROSPECT
+    notes: str | None = Field(default=None, max_length=5000)
+    next_follow_up_at: datetime | None = None
+    services: list[str] = Field(default_factory=list)
+    target_zips: list[str] = Field(default_factory=list)
+    exclusive_zips: list[str] = Field(default_factory=list)
+    low_balance_threshold: Decimal = Field(default=Decimal("0.00"), ge=Decimal("0"))
 
     @field_validator("contact_phone_e164")
     @classmethod
@@ -72,6 +87,53 @@ class BuyerCreateRequest(BaseModel):
     @classmethod
     def license_state_uppercase(cls, value: str | None) -> str | None:
         return value.upper() if value else None
+
+    @field_validator("services", "target_zips", "exclusive_zips")
+    @classmethod
+    def normalize_string_list(cls, value: list[str]) -> list[str]:
+        return _normalize_string_list(value)
+
+
+class BuyerUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    company: str | None = Field(default=None, min_length=1, max_length=255)
+    contact_email: str | None = Field(default=None, min_length=3, max_length=255)
+    contact_phone_e164: str | None = Field(default=None, min_length=8, max_length=20)
+    status: BuyerStatus | None = None
+    webhook_url: str | None = Field(default=None, min_length=8)
+    webhook_secret: str | None = Field(default=None, min_length=16)
+    bid_per_lead_t1_t2: Decimal | None = Field(default=None, gt=Decimal("0"))
+    bid_per_lead_t3: Decimal | None = Field(default=None, gt=Decimal("0"))
+    bid_per_call: Decimal | None = Field(default=None, gt=Decimal("0"))
+    filter_expression: str | None = Field(default=None, min_length=1)
+    daily_cap: int | None = Field(default=None, ge=1, le=500)
+    monthly_budget: Decimal | None = Field(default=None, ge=Decimal("0"))
+    license_number: str | None = Field(default=None, max_length=128)
+    license_state: str | None = Field(default=None, max_length=2)
+    sales_stage: BuyerSalesStage | None = None
+    notes: str | None = Field(default=None, max_length=5000)
+    next_follow_up_at: datetime | None = None
+    services: list[str] | None = None
+    target_zips: list[str] | None = None
+    exclusive_zips: list[str] | None = None
+    low_balance_threshold: Decimal | None = Field(default=None, ge=Decimal("0"))
+
+    @field_validator("contact_phone_e164")
+    @classmethod
+    def phone_must_be_e164(cls, value: str | None) -> str | None:
+        if value is not None and not value.startswith("+"):
+            raise ValueError("contact_phone_e164 must start with +")
+        return value
+
+    @field_validator("license_state")
+    @classmethod
+    def license_state_uppercase(cls, value: str | None) -> str | None:
+        return value.upper() if value else None
+
+    @field_validator("services", "target_zips", "exclusive_zips")
+    @classmethod
+    def normalize_optional_string_list(cls, value: list[str] | None) -> list[str] | None:
+        return _normalize_string_list(value) if value is not None else None
 
 
 class DepositRequest(BaseModel):
@@ -93,43 +155,51 @@ class ReturnLeadRequest(BaseModel):
 
 
 hatchet = Hatchet(debug=False)
+_supports_legacy_hatchet_worker = hasattr(hatchet, "step")
 
 
-@hatchet.workflow(on_events=["lead.qualified", "lead.captured"])
-class PingPostWorkflow:
-    """fired on lead.qualified (prod path: agent-runtime qualified the lead)
-    or lead.captured (dev/smoke path: form-receiver emits straight through
-    while agent-runtime's qualify body is still a stub).
+async def _auction_step(context: Context) -> dict[str, Any]:
+    payload = context.workflow_input()
+    lead_id = payload["lead_id"]
 
-    upstream emitters: form-receiver (after consent + dedup), agent-runtime
-    (after qualification scoring). both push the event directly via the
-    hatchet python sdk; no nats bridge.
-    """
+    async with get_session() as s:
+        row = await s.get(LeadRow, lead_id)
+        if row is None:
+            raise ValueError(f"lead {lead_id} not found")
+        lead = _row_to_lead(row)
 
-    @hatchet.step(timeout="30s", retries=3)
-    async def auction(self, context: Context) -> dict[str, Any]:
-        payload = context.workflow_input()
-        lead_id = payload["lead_id"]
+    result = await run_auction(lead)
+    return {
+        "lead_id": str(result.lead_id),
+        "pinged": len(result.pinged_buyer_ids),
+        "winning_buyer_id": str(result.winning_buyer_id) if result.winning_buyer_id else None,
+        "winning_bid_cents": result.winning_bid_cents,
+        "duration_ms": result.duration_ms,
+    }
 
-        async with get_session() as s:
-            row = await s.get(LeadRow, lead_id)
-            if row is None:
-                raise ValueError(f"lead {lead_id} not found")
-            lead = _row_to_lead(row)
 
-        result = await run_auction(lead)
-        return {
-            "lead_id": str(result.lead_id),
-            "pinged": len(result.pinged_buyer_ids),
-            "winning_buyer_id": str(result.winning_buyer_id) if result.winning_buyer_id else None,
-            "winning_bid_cents": result.winning_bid_cents,
-            "duration_ms": result.duration_ms,
-        }
+if _supports_legacy_hatchet_worker:
+
+    @hatchet.workflow(name="ping-post-auction", on_events=["lead.qualified", "lead.captured"])
+    class PingPostWorkflow:
+        """Hatchet SDK v0.x workflow wrapper."""
+
+        @hatchet.step(timeout="30s", retries=3)
+        async def auction(self, context: Context) -> dict[str, Any]:
+            return await _auction_step(context)
+
+else:
+
+    class PingPostWorkflow:
+        """Placeholder so the API imports under Hatchet SDK versions with a different worker API."""
+
+        async def auction(self, context: Context) -> dict[str, Any]:
+            return await _auction_step(context)
 
 
 def _row_to_lead(row: LeadRow) -> Lead:
     """sqlalchemy row -> pydantic model. small adapter, not a repo."""
-    from stormlead_core.models import DamageTier, LeadSource, LeadStatus
+    from stormlead_core.models import DamageTier, LeadClass, LeadSource, LeadStatus
 
     return Lead(
         id=row.id,
@@ -158,6 +228,13 @@ def _row_to_lead(row: LeadRow) -> Lead:
         year_built=row.year_built,
         owner_occupied=row.owner_occupied,
         qualification_score=row.qualification_score,
+        lead_class=LeadClass(row.lead_class) if row.lead_class else None,
+        qualification_reason=row.qualification_reason,
+        requested_service=row.requested_service,
+        campaign_id=row.campaign_id,
+        campaign_source=row.campaign_source,
+        first_touch_source=row.first_touch_source,
+        last_touch_source=row.last_touch_source,
         rejection_reason=row.rejection_reason,
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -165,20 +242,85 @@ def _row_to_lead(row: LeadRow) -> Lead:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:  # noqa: ARG001
-    # start hatchet worker in background
-    worker = hatchet.worker("ping-post-worker", max_runs=10)
-    worker.register_workflow(PingPostWorkflow())
-    task = asyncio.create_task(worker.async_start())
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    task: asyncio.Task | None = None
+    if _supports_legacy_hatchet_worker:
+        worker = hatchet.worker("ping-post-worker", max_runs=10)
+        worker.register_workflow(PingPostWorkflow())
+        task = asyncio.create_task(worker.async_start())
+    else:
+        log.warning("hatchet.worker_skipped", reason="unsupported_sdk_api")
     log.info("startup.complete")
     try:
         yield
     finally:
-        task.cancel()
+        if task is not None:
+            task.cancel()
         log.info("shutdown.complete")
 
 
 app = FastAPI(title="stormlead ping-post", lifespan=lifespan)
+
+
+@app.get("/admin", response_class=HTMLResponse)
+async def admin() -> str:
+    return """
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>StormLead Admin</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 2rem; background: #0f172a; color: #e2e8f0; }
+    h1 { margin-bottom: 0.25rem; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin: 1.5rem 0; }
+    .card, table { background: #111827; border: 1px solid #334155; border-radius: 12px; }
+    .card { padding: 1rem; }
+    .metric { font-size: 1.8rem; font-weight: 700; color: #38bdf8; }
+    table { width: 100%; border-collapse: collapse; overflow: hidden; }
+    th, td { padding: 0.75rem; border-bottom: 1px solid #334155; text-align: left; }
+    th { color: #93c5fd; }
+  </style>
+</head>
+<body>
+  <h1>StormLead Admin</h1>
+  <p>Paid-pilot control surface</p>
+  <section class="grid" id="kpis"></section>
+  <h2>Buyers</h2>
+  <table aria-label="buyers">
+    <thead><tr><th>Company</th><th>Status</th><th>Stage</th><th>Wallet</th><th>Services</th><th>Zips</th></tr></thead>
+    <tbody id="buyers"></tbody>
+  </table>
+  <script>
+    const money = cents => `$${(cents / 100).toFixed(2)}`;
+    async function load() {
+      const [summaryRes, buyersRes] = await Promise.all([
+        fetch('/v1/admin/kpis'),
+        fetch('/v1/buyers'),
+      ]);
+      const summary = await summaryRes.json();
+      const buyers = await buyersRes.json();
+      document.querySelector('#kpis').innerHTML = [
+        ['Prepaid cash', money(summary.prepaid_cash_cents)],
+        ['Active buyers', summary.active_buyers],
+        ['Sold leads', summary.sold_leads],
+        ['Returned leads', summary.returned_leads],
+      ].map(([label, value]) => `<div class="card"><div>${label}</div><div class="metric">${value}</div></div>`).join('');
+      document.querySelector('#buyers').innerHTML = buyers.buyers.map(b => `
+        <tr>
+          <td>${b.company}</td><td>${b.status}</td><td>${b.sales_stage}</td>
+          <td>${money(b.deposit_balance_cents)}</td><td>${b.services.join(', ')}</td>
+          <td>${b.target_zips.join(', ')}</td>
+        </tr>`).join('');
+    }
+    load().catch(err => {
+      document.body.insertAdjacentHTML('beforeend', `<pre role="alert">${err}</pre>`);
+    });
+  </script>
+</body>
+</html>
+"""
 
 
 @app.get("/healthz")
@@ -192,7 +334,7 @@ async def readyz() -> dict[str, str]:
     try:
         async with get_session() as s:
             await s.execute("SELECT 1")
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise HTTPException(503, f"db: {e}") from e
     return {"status": "ready"}
 
@@ -212,9 +354,11 @@ async def trigger_auction(payload: dict[str, Any]) -> dict[str, Any]:
         result = await run_auction(lead)
     except HTTPException:
         raise
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.error("auction.trigger_failed", error=str(e))
-        raise HTTPException(500, "auction failed; retry after checking buyer and database health") from e
+        raise HTTPException(
+            500, "auction failed; retry after checking buyer and database health"
+        ) from e
     return {
         "lead_id": str(result.lead_id),
         "pinged_buyer_ids": [str(b) for b in result.pinged_buyer_ids],
@@ -226,6 +370,7 @@ async def trigger_auction(payload: dict[str, Any]) -> dict[str, Any]:
 
 @app.post("/v1/buyers")
 async def create_buyer(payload: BuyerCreateRequest) -> dict[str, Any]:
+    await _assert_no_exclusive_zip_conflict(payload.exclusive_zips)
     buyer = BuyerRow(
         name=payload.name,
         company=payload.company,
@@ -242,6 +387,13 @@ async def create_buyer(payload: BuyerCreateRequest) -> dict[str, Any]:
         filter_expression=payload.filter_expression,
         daily_cap=payload.daily_cap,
         monthly_budget=payload.monthly_budget,
+        sales_stage=payload.sales_stage.value,
+        notes=payload.notes,
+        next_follow_up_at=payload.next_follow_up_at,
+        services=payload.services,
+        target_zips=payload.target_zips,
+        exclusive_zips=payload.exclusive_zips,
+        low_balance_threshold=payload.low_balance_threshold,
         deposit_balance=payload.deposit_balance,
     )
     try:
@@ -258,10 +410,103 @@ async def create_buyer(payload: BuyerCreateRequest) -> dict[str, Any]:
                         metadata_json={"source": "buyer_create"},
                     )
                 )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.error("buyer.create_failed", error=str(e))
         raise HTTPException(500, "buyer could not be created; verify the request and retry") from e
-    return _buyer_wallet_response(buyer)
+    return _buyer_response(buyer)
+
+
+@app.get("/v1/buyers")
+async def list_buyers() -> dict[str, Any]:
+    try:
+        async with get_session() as s:
+            buyers = (
+                (await s.execute(select(BuyerRow).order_by(BuyerRow.created_at.desc())))
+                .scalars()
+                .all()
+            )
+            return {"buyers": [_buyer_response(buyer) for buyer in buyers]}
+    except Exception as e:
+        log.error("buyer.list_failed", error=str(e))
+        raise HTTPException(
+            500, "buyers could not be loaded; retry after checking database health"
+        ) from e
+
+
+@app.get("/v1/admin/kpis")
+async def admin_kpis() -> dict[str, Any]:
+    try:
+        async with get_session() as s:
+            prepaid = await s.scalar(select(func.coalesce(func.sum(BuyerRow.deposit_balance), 0)))
+            active_buyers = await s.scalar(
+                select(func.count(BuyerRow.id)).where(BuyerRow.status == BuyerStatus.ACTIVE.value)
+            )
+            sold_leads = await s.scalar(
+                select(func.count(PostResult.id)).where(PostResult.delivered.is_(True))
+            )
+            returned_leads = await s.scalar(
+                select(func.count(PostResult.id)).where(PostResult.returned.is_(True))
+            )
+            lead_revenue = await s.scalar(
+                select(func.coalesce(func.sum(PostResult.bid_cents), 0)).where(
+                    PostResult.delivered.is_(True),
+                    PostResult.returned.is_(False),
+                )
+            )
+        return {
+            "prepaid_cash_cents": _decimal_to_cents(Decimal(prepaid or 0)),
+            "active_buyers": int(active_buyers or 0),
+            "sold_leads": int(sold_leads or 0),
+            "returned_leads": int(returned_leads or 0),
+            "lead_revenue_cents": int(lead_revenue or 0),
+        }
+    except Exception as e:
+        log.error("admin.kpis_failed", error=str(e))
+        raise HTTPException(
+            500, "admin kpis could not be loaded; retry after checking database health"
+        ) from e
+
+
+@app.get("/v1/buyers/{buyer_id}")
+async def get_buyer(buyer_id: UUID) -> dict[str, Any]:
+    try:
+        async with get_session() as s:
+            buyer = await s.get(BuyerRow, buyer_id)
+            if buyer is None:
+                raise HTTPException(404, "buyer not found; verify the buyer id and try again")
+            return _buyer_response(buyer)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("buyer.lookup_failed", buyer_id=str(buyer_id), error=str(e))
+        raise HTTPException(
+            500, "buyer could not be loaded; retry after checking database health"
+        ) from e
+
+
+@app.patch("/v1/buyers/{buyer_id}")
+async def update_buyer(buyer_id: UUID, payload: BuyerUpdateRequest) -> dict[str, Any]:
+    updates = payload.model_dump(exclude_unset=True)
+    if "exclusive_zips" in updates:
+        await _assert_no_exclusive_zip_conflict(
+            updates["exclusive_zips"], exclude_buyer_id=buyer_id
+        )
+    try:
+        async with get_session() as s:
+            buyer = await s.get(BuyerRow, buyer_id)
+            if buyer is None:
+                raise HTTPException(404, "buyer not found; verify the buyer id and try again")
+            for key, value in updates.items():
+                if isinstance(value, (BuyerStatus, BuyerSalesStage)):
+                    value = value.value
+                setattr(buyer, key, value)
+            await s.flush()
+            return _buyer_response(buyer)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("buyer.update_failed", buyer_id=str(buyer_id), error=str(e))
+        raise HTTPException(500, "buyer could not be updated; verify the request and retry") from e
 
 
 @app.get("/v1/buyers/{buyer_id}/wallet")
@@ -274,9 +519,11 @@ async def get_wallet(buyer_id: UUID) -> dict[str, Any]:
             return _buyer_wallet_response(buyer)
     except HTTPException:
         raise
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.error("buyer.wallet_lookup_failed", buyer_id=str(buyer_id), error=str(e))
-        raise HTTPException(500, "wallet could not be loaded; retry after checking database health") from e
+        raise HTTPException(
+            500, "wallet could not be loaded; retry after checking database health"
+        ) from e
 
 
 @app.post("/v1/buyers/{buyer_id}/deposits")
@@ -301,9 +548,11 @@ async def add_deposit(buyer_id: UUID, payload: DepositRequest) -> dict[str, Any]
             return _buyer_wallet_response(buyer)
     except HTTPException:
         raise
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.error("buyer.deposit_failed", buyer_id=str(buyer_id), error=str(e))
-        raise HTTPException(500, "deposit could not be recorded; retry before routing more leads") from e
+        raise HTTPException(
+            500, "deposit could not be recorded; retry before routing more leads"
+        ) from e
 
 
 @app.post("/v1/leads/{lead_id}/return")
@@ -311,16 +560,24 @@ async def return_lead(lead_id: UUID, payload: ReturnLeadRequest) -> dict[str, An
     try:
         async with get_session() as s:
             result = (
-                await s.execute(
-                    select(PostResult)
-                    .where(PostResult.lead_id == lead_id, PostResult.delivered.is_(True))
-                    .order_by(PostResult.created_at.desc())
+                (
+                    await s.execute(
+                        select(PostResult)
+                        .where(PostResult.lead_id == lead_id, PostResult.delivered.is_(True))
+                        .order_by(PostResult.created_at.desc())
+                    )
                 )
-            ).scalars().first()
+                .scalars()
+                .first()
+            )
             if result is None:
-                raise HTTPException(404, "delivered lead sale not found; verify the lead id and try again")
+                raise HTTPException(
+                    404, "delivered lead sale not found; verify the lead id and try again"
+                )
             if result.returned:
-                raise HTTPException(409, "lead was already returned; check the existing return record")
+                raise HTTPException(
+                    409, "lead was already returned; check the existing return record"
+                )
             buyer = await s.get(BuyerRow, result.buyer_id)
             if buyer is None:
                 raise HTTPException(404, "buyer for this lead sale was not found; contact support")
@@ -348,13 +605,75 @@ async def return_lead(lead_id: UUID, payload: ReturnLeadRequest) -> dict[str, An
             }
     except HTTPException:
         raise
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.error("lead.return_failed", lead_id=str(lead_id), error=str(e))
-        raise HTTPException(500, "lead return could not be recorded; retry or contact support") from e
+        raise HTTPException(
+            500, "lead return could not be recorded; retry or contact support"
+        ) from e
 
 
 def _decimal_to_cents(amount: Decimal) -> int:
     return int(amount * Decimal(100))
+
+
+def _normalize_string_list(values: list[str]) -> list[str]:
+    normalized = []
+    seen = set()
+    for value in values:
+        item = value.strip().lower()
+        if item and item not in seen:
+            normalized.append(item)
+            seen.add(item)
+    return normalized
+
+
+async def _assert_no_exclusive_zip_conflict(
+    exclusive_zips: list[str],
+    *,
+    exclude_buyer_id: UUID | None = None,
+) -> None:
+    if not exclusive_zips:
+        return
+    requested = set(exclusive_zips)
+    async with get_session() as s:
+        rows = (
+            await s.execute(select(BuyerRow.id, BuyerRow.company, BuyerRow.exclusive_zips))
+        ).all()
+    for buyer_id, company, existing_zips in rows:
+        if exclude_buyer_id is not None and buyer_id == exclude_buyer_id:
+            continue
+        conflict = requested.intersection(existing_zips or [])
+        if conflict:
+            zips = ", ".join(sorted(conflict))
+            raise HTTPException(409, f"exclusive zip conflict with {company}: {zips}")
+
+
+def _buyer_response(buyer: BuyerRow) -> dict[str, Any]:
+    payload = _buyer_wallet_response(buyer)
+    payload.update(
+        {
+            "name": buyer.name,
+            "contact_email": buyer.contact_email,
+            "contact_phone_e164": buyer.contact_phone_e164,
+            "license_number": buyer.license_number,
+            "license_state": buyer.license_state,
+            "license_verified_at": buyer.license_verified_at.isoformat()
+            if buyer.license_verified_at
+            else None,
+            "sales_stage": buyer.sales_stage,
+            "notes": buyer.notes,
+            "next_follow_up_at": buyer.next_follow_up_at.isoformat()
+            if buyer.next_follow_up_at
+            else None,
+            "services": buyer.services or [],
+            "target_zips": buyer.target_zips or [],
+            "exclusive_zips": buyer.exclusive_zips or [],
+            "low_balance_threshold_cents": _decimal_to_cents(buyer.low_balance_threshold),
+            "filter_expression": buyer.filter_expression,
+            "webhook_url": buyer.webhook_url,
+        }
+    )
+    return payload
 
 
 def _buyer_wallet_response(buyer: BuyerRow) -> dict[str, Any]:

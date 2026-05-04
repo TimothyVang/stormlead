@@ -1,0 +1,12 @@
+{
+  "name": "stormlead-browser-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:playwright": "playwright test",
+    "test:playwright:headed": "playwright test --headed --workers=1"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.59.1"
+  }
+}

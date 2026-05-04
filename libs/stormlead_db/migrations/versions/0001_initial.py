@@ -5,10 +5,8 @@ Revises:
 Create Date: 2026-05-01
 
 """
+
 from __future__ import annotations
-
-from alembic import op
-
 
 revision = "0001_initial"
 down_revision = None

@@ -22,7 +22,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from hatchet_sdk import Hatchet
 from sqlalchemy import text as sa_text
-
 from stormlead_core import configure_logging, get_logger
 from stormlead_db import get_session
 
@@ -47,7 +46,7 @@ _hatchet: Hatchet | None = None
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):  # noqa: ARG001
+async def lifespan(app: FastAPI):
     global _hatchet
     _hatchet = Hatchet(debug=False)
     log.info("startup.complete")
@@ -69,7 +68,7 @@ def _client_ip(request: Request) -> str:
     xff = request.headers.get("x-forwarded-for")
     if xff:
         return xff.split(",")[0].strip()
-    return request.client.host if request.client else "0.0.0.0"
+    return request.client.host if request.client else "unknown"
 
 
 @app.get("/healthz")
@@ -82,7 +81,7 @@ async def readyz() -> dict[str, str]:
     try:
         async with get_session() as s:
             await s.execute(sa_text("SELECT 1"))
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise HTTPException(503, f"db: {e}") from e
     return {"status": "ready"}
 
@@ -113,7 +112,7 @@ async def formbricks_webhook(request: Request) -> dict[str, str]:
     # 2. parse + filter
     try:
         envelope = FormbricksEnvelope.model_validate_json(raw_body)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise HTTPException(400, f"malformed envelope: {e}") from e
 
     if envelope.event != "responseFinished":
@@ -141,9 +140,10 @@ async def formbricks_webhook(request: Request) -> dict[str, str]:
     )
     if was_new:
         try:
-            assert _hatchet is not None
+            if _hatchet is None:
+                raise RuntimeError("hatchet client not initialized")
             await emit_lead_captured(_hatchet, lead_id)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             # raise 5xx so formbricks retries — webhook_id dedup means
             # the lead/audit rows aren't double-written on retry.
             log.error("event.push_failed", error=str(e), lead_id=str(lead_id))

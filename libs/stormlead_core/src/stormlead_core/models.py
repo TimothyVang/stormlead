@@ -15,7 +15,6 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-
 # ============================================================================
 # enums
 # ============================================================================
@@ -52,6 +51,13 @@ class LeadSource(StrEnum):
     REFERRAL = "referral"
 
 
+class LeadClass(StrEnum):
+    A = "a"
+    B = "b"
+    C = "c"
+    D = "d"
+
+
 class DamageTier(StrEnum):
     """from photo classification + form description.
 
@@ -69,6 +75,14 @@ class BuyerStatus(StrEnum):
     PAUSED = "paused"
     SUSPENDED = "suspended"
     PENDING_VERIFICATION = "pending_verification"
+
+
+class BuyerSalesStage(StrEnum):
+    PROSPECT = "prospect"
+    CONTACTED = "contacted"
+    AGREEMENT_SENT = "agreement_sent"
+    FUNDED = "funded"
+    CHURNED = "churned"
 
 
 # ============================================================================
@@ -139,6 +153,13 @@ class Lead(BaseModel):
 
     # scoring (set by qualify agent)
     qualification_score: float | None = None  # 0..1
+    lead_class: LeadClass | None = None
+    qualification_reason: str | None = None
+    requested_service: str | None = None
+    campaign_id: str | None = None
+    campaign_source: str | None = None
+    first_touch_source: str | None = None
+    last_touch_source: str | None = None
     rejection_reason: str | None = None
 
     created_at: datetime = Field(default_factory=lambda: datetime.utcnow())
@@ -189,6 +210,13 @@ class Buyer(BaseModel):
     filter_expression: str  # see filters.py
     daily_cap: int = 100
     monthly_budget: Decimal = Decimal(5000)
+    sales_stage: BuyerSalesStage = BuyerSalesStage.PROSPECT
+    notes: str | None = None
+    next_follow_up_at: datetime | None = None
+    services: list[str] = Field(default_factory=list)
+    target_zips: list[str] = Field(default_factory=list)
+    exclusive_zips: list[str] = Field(default_factory=list)
+    low_balance_threshold: Decimal = Decimal(0)
 
     # billing
     deposit_balance: Decimal = Decimal(0)

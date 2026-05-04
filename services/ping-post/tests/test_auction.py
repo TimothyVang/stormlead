@@ -5,21 +5,32 @@ for integration: see scripts/smoke_e2e.py.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
 
-import pytest
-
-from stormlead_core import Buyer, BuyerStatus, DamageTier, Lead, LeadSource, LeadStatus
+from ping_post.auction import (
+    PingResponse,
+    _avm_band,
+    _buyer_can_afford_bid,
+    _buyer_matches_paid_pilot_rules,
+    _debit_amount,
+    _pick_winner,
+    _ping_payload,
+    _sign_webhook,
+)
+from stormlead_core import Buyer, BuyerStatus, DamageTier, Lead, LeadClass, LeadSource, LeadStatus
 from stormlead_core.filters import evaluate_filter
 
-from ping_post.auction import _avm_band, _buyer_can_afford_bid, _debit_amount, _pick_winner, _ping_payload, _sign_webhook
-from ping_post.auction import PingResponse
 
-
-def _lead(state="FL", tier=DamageTier.TIER_3_ON_STRUCTURE, avm=400_000) -> Lead:
-    now = datetime.now(timezone.utc)
+def _lead(
+    state="FL",
+    tier=DamageTier.TIER_3_ON_STRUCTURE,
+    avm=400_000,
+    lead_class=LeadClass.A,
+    requested_service="tree_removal",
+) -> Lead:
+    now = datetime.now(UTC)
     return Lead(
         id=uuid4(),
         source=LeadSource.LANDING_FORM,
@@ -33,6 +44,8 @@ def _lead(state="FL", tier=DamageTier.TIER_3_ON_STRUCTURE, avm=400_000) -> Lead:
         zip="33101",
         damage_description="tree on garage",
         damage_tier=tier,
+        lead_class=lead_class,
+        requested_service=requested_service,
         consent_text="I agree...",
         consent_ip="1.2.3.4",
         consent_user_agent="Mozilla/5.0",
@@ -52,7 +65,7 @@ def _buyer(filter_expr="lead.state == 'FL'") -> Buyer:
         contact_phone_e164="+15125550199",
         status=BuyerStatus.ACTIVE,
         webhook_url="https://buyer.stormlead.test/leads",
-        webhook_secret="s3cret-test-only",
+        webhook_secret="s3cret-test-only",  # noqa: S106 - inert test HMAC secret
         bid_per_lead_t1_t2=Decimal("65.00"),
         bid_per_lead_t3=Decimal("180.00"),
         bid_per_call=Decimal("100.00"),
@@ -111,12 +124,28 @@ def test_pick_winner_takes_highest_bid() -> None:
         b2: _buyer(),
     }
     responses = [
-        PingResponse(b1, accepted=True, bid_cents=8000, response_ms=120, status_code=200, body=None, error=None),
-        PingResponse(b2, accepted=True, bid_cents=12000, response_ms=200, status_code=200, body=None, error=None),
+        PingResponse(
+            b1,
+            accepted=True,
+            bid_cents=8000,
+            response_ms=120,
+            status_code=200,
+            body=None,
+            error=None,
+        ),
+        PingResponse(
+            b2,
+            accepted=True,
+            bid_cents=12000,
+            response_ms=200,
+            status_code=200,
+            body=None,
+            error=None,
+        ),
     ]
     winner = _pick_winner(responses, buyers, DamageTier.TIER_3_ON_STRUCTURE)
     assert winner is not None
-    pr, buyer = winner
+    pr, _winner_buyer = winner
     assert pr.buyer_id == b2
     assert pr.bid_cents == 12000
 
@@ -125,8 +154,24 @@ def test_pick_winner_ties_break_by_speed() -> None:
     b1, b2 = uuid4(), uuid4()
     buyers = {b1: _buyer(), b2: _buyer()}
     responses = [
-        PingResponse(b1, accepted=True, bid_cents=10000, response_ms=300, status_code=200, body=None, error=None),
-        PingResponse(b2, accepted=True, bid_cents=10000, response_ms=120, status_code=200, body=None, error=None),
+        PingResponse(
+            b1,
+            accepted=True,
+            bid_cents=10000,
+            response_ms=300,
+            status_code=200,
+            body=None,
+            error=None,
+        ),
+        PingResponse(
+            b2,
+            accepted=True,
+            bid_cents=10000,
+            response_ms=120,
+            status_code=200,
+            body=None,
+            error=None,
+        ),
     ]
     winner = _pick_winner(responses, buyers, DamageTier.TIER_3_ON_STRUCTURE)
     assert winner is not None
@@ -137,7 +182,15 @@ def test_pick_winner_none_when_all_reject() -> None:
     b1 = uuid4()
     buyers = {b1: _buyer()}
     responses = [
-        PingResponse(b1, accepted=False, bid_cents=None, response_ms=120, status_code=200, body=None, error=None),
+        PingResponse(
+            b1,
+            accepted=False,
+            bid_cents=None,
+            response_ms=120,
+            status_code=200,
+            body=None,
+            error=None,
+        ),
     ]
     assert _pick_winner(responses, buyers, DamageTier.TIER_1_BRANCHES) is None
 
@@ -150,8 +203,24 @@ def test_pick_winner_skips_buyer_without_wallet_balance() -> None:
     funded.deposit_balance = Decimal("500.00")
     buyers = {b1: broke, b2: funded}
     responses = [
-        PingResponse(b1, accepted=True, bid_cents=15000, response_ms=90, status_code=200, body=None, error=None),
-        PingResponse(b2, accepted=True, bid_cents=10000, response_ms=140, status_code=200, body=None, error=None),
+        PingResponse(
+            b1,
+            accepted=True,
+            bid_cents=15000,
+            response_ms=90,
+            status_code=200,
+            body=None,
+            error=None,
+        ),
+        PingResponse(
+            b2,
+            accepted=True,
+            bid_cents=10000,
+            response_ms=140,
+            status_code=200,
+            body=None,
+            error=None,
+        ),
     ]
     winner = _pick_winner(responses, buyers, DamageTier.TIER_3_ON_STRUCTURE)
     assert winner is not None
@@ -168,3 +237,25 @@ def test_wallet_helpers_convert_cents_to_dollars() -> None:
 
 def test_debit_amount_handles_zero_bid() -> None:
     assert _debit_amount(0) == Decimal("0")
+
+
+def test_paid_pilot_rules_block_class_c_and_d() -> None:
+    buyer = _buyer()
+    assert not _buyer_matches_paid_pilot_rules(buyer, _lead(lead_class=LeadClass.C))
+    assert not _buyer_matches_paid_pilot_rules(buyer, _lead(lead_class=LeadClass.D))
+
+
+def test_paid_pilot_rules_require_target_zip_when_configured() -> None:
+    buyer = _buyer()
+    buyer.target_zips = ["78701"]
+    assert not _buyer_matches_paid_pilot_rules(buyer, _lead())
+    buyer.target_zips = ["33101"]
+    assert _buyer_matches_paid_pilot_rules(buyer, _lead())
+
+
+def test_paid_pilot_rules_require_requested_service_when_configured() -> None:
+    buyer = _buyer()
+    buyer.services = ["roofing"]
+    assert not _buyer_matches_paid_pilot_rules(buyer, _lead(requested_service="tree_removal"))
+    buyer.services = ["tree_removal"]
+    assert _buyer_matches_paid_pilot_rules(buyer, _lead(requested_service="tree_removal"))

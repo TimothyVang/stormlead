@@ -16,9 +16,9 @@ from uuid import UUID, uuid4
 from geoalchemy2 import Geography
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
-    JSON,
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -29,7 +29,8 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PgUUID
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -45,7 +46,7 @@ class Base(DeclarativeBase):
 class StormRow(Base):
     __tablename__ = "storms"
 
-    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     external_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(128))
     source: Mapped[str] = mapped_column(String(16), index=True)
@@ -79,7 +80,7 @@ class StormRow(Base):
 class BuyerRow(Base):
     __tablename__ = "buyers"
 
-    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     name: Mapped[str] = mapped_column(String(255))
     company: Mapped[str] = mapped_column(String(255))
     contact_email: Mapped[str] = mapped_column(String(255))
@@ -102,6 +103,15 @@ class BuyerRow(Base):
     filter_expression: Mapped[str] = mapped_column(Text)  # cel
     daily_cap: Mapped[int] = mapped_column(Integer, default=100)
     monthly_budget: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal(5000))
+    sales_stage: Mapped[str] = mapped_column(String(32), default="prospect", index=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    next_follow_up_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    services: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    target_zips: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    exclusive_zips: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    low_balance_threshold: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal(0))
 
     deposit_balance: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal(0))
     lifetime_spend: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal(0))
@@ -122,7 +132,7 @@ class BuyerRow(Base):
 class LeadRow(Base):
     __tablename__ = "leads"
 
-    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     source: Mapped[str] = mapped_column(String(32), index=True)
     status: Mapped[str] = mapped_column(String(32), index=True, default="new")
 
@@ -137,7 +147,7 @@ class LeadRow(Base):
     geom = mapped_column(Geography("POINT", srid=4326), nullable=True)
 
     storm_id: Mapped[UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("storms.id"), nullable=True, index=True
+        PG_UUID(as_uuid=True), ForeignKey("storms.id"), nullable=True, index=True
     )
     damage_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     damage_tier: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
@@ -158,6 +168,13 @@ class LeadRow(Base):
     owner_occupied: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     qualification_score: Mapped[float | None] = mapped_column(nullable=True)
+    lead_class: Mapped[str | None] = mapped_column(String(1), nullable=True, index=True)
+    qualification_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    requested_service: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    campaign_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    campaign_source: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    first_touch_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_touch_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
     rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # for rag: embedding of damage description + photo summary
@@ -173,6 +190,9 @@ class LeadRow(Base):
     __table_args__ = (
         # idempotency: same phone + same hour = same lead
         UniqueConstraint("phone_e164", "page_html_hash", name="uq_lead_phone_hash"),
+        CheckConstraint(
+            "lead_class IS NULL OR lead_class IN ('a', 'b', 'c', 'd')", name="ck_leads_class"
+        ),
         Index("ix_leads_state_zip_status", "state", "zip", "status"),
     )
 
@@ -187,10 +207,10 @@ class PingAttempt(Base):
 
     __tablename__ = "ping_attempts"
 
-    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
-    lead_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("leads.id"), index=True)
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    lead_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("leads.id"), index=True)
     buyer_id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("buyers.id"), index=True
+        PG_UUID(as_uuid=True), ForeignKey("buyers.id"), index=True
     )
 
     # ping payload (sanitized: no full pii)
@@ -214,12 +234,10 @@ class PostResult(Base):
 
     __tablename__ = "post_results"
 
-    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
-    lead_id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("leads.id"), index=True
-    )
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    lead_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("leads.id"), index=True)
     buyer_id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("buyers.id"), index=True
+        PG_UUID(as_uuid=True), ForeignKey("buyers.id"), index=True
     )
     bid_cents: Mapped[int] = mapped_column(BigInteger)
     delivered: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -237,12 +255,16 @@ class BillingEvent(Base):
 
     __tablename__ = "billing_events"
 
-    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
-    buyer_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("buyers.id"), index=True)
-    lead_id: Mapped[UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("leads.id"), nullable=True
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    buyer_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("buyers.id"), index=True
     )
-    event_type: Mapped[str] = mapped_column(String(64), index=True)  # lead.posted, lead.returned, deposit.added
+    lead_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("leads.id"), nullable=True
+    )
+    event_type: Mapped[str] = mapped_column(
+        String(64), index=True
+    )  # lead.posted, lead.returned, deposit.added
     amount_cents: Mapped[int] = mapped_column(BigInteger)  # signed
     metadata_json: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(
@@ -268,7 +290,7 @@ class ConsentAudit(Base):
 
     webhook_id: Mapped[str] = mapped_column(Text, primary_key=True)
     lead_id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("leads.id"), nullable=False, index=True
+        PG_UUID(as_uuid=True), ForeignKey("leads.id"), nullable=False, index=True
     )
     received_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")

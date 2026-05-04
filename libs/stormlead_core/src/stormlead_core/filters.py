@@ -51,6 +51,8 @@ def _lead_to_cel(lead: Lead) -> dict[str, Any]:
             "zip": lead.zip,
             "damage_tier": lead.damage_tier.value if lead.damage_tier else "",
             "qualification_score": float(lead.qualification_score or 0.0),
+            "lead_class": lead.lead_class.value if lead.lead_class else "",
+            "requested_service": lead.requested_service or "",
             "property_avm": float(lead.property_avm or 0),
             "year_built": int(lead.year_built or 0),
             "owner_occupied": bool(lead.owner_occupied),
@@ -75,6 +77,6 @@ def evaluate_filter(expression: str, lead: Lead) -> FilterResult:
     except celpy.CELEvalError as e:
         log.error("cel.eval_error", expression=expression, error=str(e))
         return FilterResult(matches=False, error=f"eval_error: {e}")
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.exception("cel.unexpected_error", expression=expression)
         return FilterResult(matches=False, error=f"unexpected: {e}")

@@ -23,34 +23,36 @@ from pydantic import BaseModel, Field
 
 class FormbricksMeta(BaseModel):
     url: str | None = None
-    userAgent: str | None = None
+    userAgent: str | None = None  # noqa: N815 - external Formbricks field
     country: str | None = None
 
 
 class FormbricksContact(BaseModel):
     id: str | None = None
-    userId: str | None = None
+    userId: str | None = None  # noqa: N815 - external Formbricks field
 
 
 class FormbricksResponseData(BaseModel):
     """inner `data` of the envelope."""
 
     id: str  # response_id
-    surveyId: str
+    surveyId: str  # noqa: N815 - external Formbricks field
     data: dict[str, Any] = Field(default_factory=dict)  # question_id → answer
     ttc: dict[str, Any] = Field(default_factory=dict)  # time-to-completion per q
     contact: FormbricksContact | None = None
-    contactAttributes: dict[str, Any] = Field(default_factory=dict)
+    contactAttributes: dict[str, Any] = Field(  # noqa: N815 - external Formbricks field
+        default_factory=dict
+    )
     meta: FormbricksMeta | None = None
     finished: bool = False
-    endingId: str | None = None
+    endingId: str | None = None  # noqa: N815 - external Formbricks field
     variables: dict[str, Any] = Field(default_factory=dict)
     tags: list[str] = Field(default_factory=list)
 
 
 class FormbricksEnvelope(BaseModel):
     event: str
-    webhookId: str
+    webhookId: str  # noqa: N815 - external Formbricks field
     data: FormbricksResponseData
 
 
@@ -139,9 +141,7 @@ def extract_consent(envelope: FormbricksEnvelope) -> ExtractedConsent:
     if isinstance(raw_dwell, (int, float)):
         dwell_ms = int(raw_dwell)
     else:
-        ttc_total = sum(
-            int(v) for v in envelope.data.ttc.values() if isinstance(v, (int, float))
-        )
+        ttc_total = sum(int(v) for v in envelope.data.ttc.values() if isinstance(v, (int, float)))
         if ttc_total > 0:
             dwell_ms = ttc_total
 

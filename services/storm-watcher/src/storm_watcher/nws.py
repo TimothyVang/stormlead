@@ -9,12 +9,11 @@ we filter to severe + tornado + hurricane + tropical-storm warnings in our 8 tar
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
 import httpx
-
 from stormlead_core import Storm, StormSeverity, get_logger
 
 log = get_logger(__name__)
@@ -45,7 +44,9 @@ async def fetch_active_alerts() -> list[dict[str, Any]]:
             "message_type": "alert",
             "area": ",".join(TARGET_STATES),
         }
-        r = await client.get("https://api.weather.gov/alerts/active", params=params, headers=headers)
+        r = await client.get(
+            "https://api.weather.gov/alerts/active", params=params, headers=headers
+        )
         r.raise_for_status()
         return r.json().get("features", [])
 
@@ -89,11 +90,7 @@ def normalize_alert(feature: dict[str, Any]) -> Storm | None:
             affected_states.append(s)
 
     sent = props.get("sent")
-    detected_at = (
-        datetime.fromisoformat(sent.replace("Z", "+00:00"))
-        if sent
-        else datetime.now(timezone.utc)
-    )
+    detected_at = datetime.fromisoformat(sent.replace("Z", "+00:00")) if sent else datetime.now(UTC)
 
     return Storm(
         id=uuid4(),

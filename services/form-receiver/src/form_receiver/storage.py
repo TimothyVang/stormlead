@@ -12,13 +12,12 @@ same homeowner re-submitting the same page → same lead row reused.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from hatchet_sdk import Hatchet
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-
 from stormlead_core import get_logger
 from stormlead_db import ConsentAudit, LeadRow, get_session
 
@@ -31,7 +30,7 @@ async def upsert_lead(extracted: ExtractedConsent, *, ip: str) -> UUID:
     """upsert by (phone_e164, page_html_hash). returns the lead id (new or existing)."""
     page_html_hash = extracted.page_html_sha256 or ""  # column is non-null
     new_id = uuid4()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     async with get_session() as s:
         # try insert; on conflict (phone, hash), do nothing

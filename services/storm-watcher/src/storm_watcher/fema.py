@@ -12,12 +12,11 @@ declared status unlocks higher buyer bids ("post-disaster premium").
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
 import httpx
-
 from stormlead_core import Storm, StormSeverity, get_logger
 
 log = get_logger(__name__)
@@ -34,7 +33,7 @@ INCIDENT_TYPES = (
 
 async def fetch_recent_declarations(days_back: int = 90) -> list[dict[str, Any]]:
     base = os.getenv("FEMA_API_BASE", "https://www.fema.gov/api/open/v2")
-    since = (datetime.now(timezone.utc) - timedelta(days=days_back)).isoformat()
+    since = (datetime.now(UTC) - timedelta(days=days_back)).isoformat()
     states_filter = " or ".join(f"state eq '{s}'" for s in TARGET_STATES)
     types_filter = " or ".join(f"incidentType eq '{t}'" for t in INCIDENT_TYPES)
     flt = f"declarationDate gt '{since}' and ({states_filter}) and ({types_filter})"
@@ -51,9 +50,7 @@ async def fetch_recent_declarations(days_back: int = 90) -> list[dict[str, Any]]
 def normalize_declaration(d: dict[str, Any]) -> Storm:
     declared = d.get("declarationDate")
     declared_at = (
-        datetime.fromisoformat(declared.replace("Z", "+00:00"))
-        if declared
-        else datetime.now(timezone.utc)
+        datetime.fromisoformat(declared.replace("Z", "+00:00")) if declared else datetime.now(UTC)
     )
     return Storm(
         id=uuid4(),

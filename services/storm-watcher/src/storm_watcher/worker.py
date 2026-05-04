@@ -14,11 +14,10 @@ docs/research/2026-05-architectural-fit.md.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from hatchet_sdk import Context, Hatchet
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-
 from stormlead_core import configure_logging, get_logger
 from stormlead_db import StormRow, get_session
 
@@ -58,7 +57,7 @@ async def _upsert_storm(storm) -> bool:  # type: ignore[no-untyped-def]
         if result is None:
             return False
         # heuristic: created_at is "now" => new row
-        return (datetime.now(timezone.utc) - result.created_at).total_seconds() < 5
+        return (datetime.now(UTC) - result.created_at).total_seconds() < 5
 
 
 @hatchet.workflow(on_crons=["*/5 * * * *"])
@@ -67,7 +66,7 @@ class NwsCapPoller:
     async def poll(self, context: Context) -> dict:
         try:
             features = await fetch_active_alerts()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.error("nws.fetch_failed", error=str(e))
             return {"error": str(e), "found": 0}
 
@@ -79,7 +78,7 @@ class NwsCapPoller:
             try:
                 if await _upsert_storm(storm):
                     new_count += 1
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 log.error("nws.upsert_failed", external_id=storm.external_id, error=str(e))
 
         log.info("nws.poll_done", total=len(features), new=new_count)
@@ -92,7 +91,7 @@ class FemaPoller:
     async def poll(self, context: Context) -> dict:
         try:
             declarations = await fetch_recent_declarations(days_back=14)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.error("fema.fetch_failed", error=str(e))
             return {"error": str(e), "found": 0}
 
@@ -102,7 +101,7 @@ class FemaPoller:
             try:
                 if await _upsert_storm(storm):
                     new_count += 1
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 log.error("fema.upsert_failed", external_id=storm.external_id, error=str(e))
 
         log.info("fema.poll_done", total=len(declarations), new=new_count)

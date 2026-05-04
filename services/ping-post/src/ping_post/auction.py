@@ -17,13 +17,12 @@ import hmac
 import json
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
 import httpx
-from sqlalchemy import select, update
-
+from sqlalchemy import func, select, update
 from stormlead_core import (
     Buyer,
     DamageTier,
@@ -136,7 +135,7 @@ async def _ping_one(
         # buyer responds {"accept": true, "bid_cents": 7500} or {"accept": false}
         try:
             data = r.json()
-        except Exception:  # noqa: BLE001
+        except Exception:
             data = {}
         accepted = bool(data.get("accept"))
         bid_cents = int(data["bid_cents"]) if accepted and "bid_cents" in data else None
@@ -159,7 +158,7 @@ async def _ping_one(
             body=None,
             error="timeout",
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return PingResponse(
             buyer_id=buyer.id,
             accepted=False,
@@ -175,13 +174,17 @@ async def _select_eligible_buyers(lead: Lead) -> list[Buyer]:
     """pull buyers from db, filter by status + cel expression."""
     async with get_session() as s:
         rows = (
-            await s.execute(
-                select(BuyerRow).where(
-                    BuyerRow.status == "active",
-                    BuyerRow.deposit_balance > Decimal("0"),
+            (
+                await s.execute(
+                    select(BuyerRow).where(
+                        BuyerRow.status == "active",
+                        BuyerRow.deposit_balance > Decimal("0"),
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
 
     eligible = []
     for r in rows:
@@ -203,16 +206,63 @@ async def _select_eligible_buyers(lead: Lead) -> list[Buyer]:
             filter_expression=r.filter_expression,
             daily_cap=r.daily_cap,
             monthly_budget=r.monthly_budget,
+            sales_stage=r.sales_stage,
+            notes=r.notes,
+            next_follow_up_at=r.next_follow_up_at,
+            services=r.services or [],
+            target_zips=r.target_zips or [],
+            exclusive_zips=r.exclusive_zips or [],
+            low_balance_threshold=r.low_balance_threshold,
             deposit_balance=r.deposit_balance,
             lifetime_spend=r.lifetime_spend,
             created_at=r.created_at,
             updated_at=r.updated_at,
         )
         verdict = evaluate_filter(buyer.filter_expression, lead)
-        if verdict.matches:
+        if (
+            verdict.matches
+            and _buyer_matches_paid_pilot_rules(buyer, lead)
+            and await _buyer_within_caps(buyer)
+        ):
             eligible.append(buyer)
     log.info("buyers.eligible", lead_id=str(lead.id), count=len(eligible))
     return eligible
+
+
+def _buyer_matches_paid_pilot_rules(buyer: Buyer, lead: Lead) -> bool:
+    """Business eligibility that should not live inside freeform CEL."""
+    lead_class = lead.lead_class.value if lead.lead_class else None
+    if lead_class in {"c", "d"}:
+        return False
+    if buyer.target_zips and lead.zip not in buyer.target_zips:
+        return False
+    if lead.requested_service and buyer.services and lead.requested_service not in buyer.services:
+        return False
+    return True
+
+
+async def _buyer_within_caps(buyer: Buyer) -> bool:
+    now = datetime.now(UTC)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    async with get_session() as s:
+        day_count = await s.scalar(
+            select(func.count(PostResult.id)).where(
+                PostResult.buyer_id == buyer.id,
+                PostResult.delivered.is_(True),
+                PostResult.created_at >= day_start,
+            )
+        )
+        month_spend = await s.scalar(
+            select(func.coalesce(func.sum(PostResult.bid_cents), 0)).where(
+                PostResult.buyer_id == buyer.id,
+                PostResult.delivered.is_(True),
+                PostResult.created_at >= month_start,
+            )
+        )
+    if (day_count or 0) >= buyer.daily_cap:
+        return False
+    return Decimal(int(month_spend or 0)) / Decimal(100) < buyer.monthly_budget
 
 
 async def _record_pings(
@@ -375,9 +425,11 @@ async def _post_to_winner(
         "X-Stormlead-Mode": "post",
     }
     try:
-        r = await client.post(buyer.webhook_url, content=body, headers=headers, timeout=POST_TIMEOUT_S)
+        r = await client.post(
+            buyer.webhook_url, content=body, headers=headers, timeout=POST_TIMEOUT_S
+        )
         return (200 <= r.status_code < 300, r.status_code, r.text[:2048])
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return (False, None, f"{type(e).__name__}: {e}")
 
 
@@ -388,7 +440,7 @@ async def run_auction(lead: Lead) -> PingPostResult:
     if not buyers:
         return PingPostResult(
             event_id=uuid4(),
-            occurred_at=datetime.now(timezone.utc),
+            occurred_at=datetime.now(UTC),
             lead_id=lead.id,
             pinged_buyer_ids=[],
             winning_buyer_id=None,
@@ -414,7 +466,7 @@ async def run_auction(lead: Lead) -> PingPostResult:
                 asyncio.gather(*(bounded(b) for b in buyers), return_exceptions=False),
                 timeout=BID_WINDOW_S,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.warning("ping.bid_window_timeout", lead_id=str(lead.id))
             responses = []
 
@@ -474,7 +526,7 @@ async def run_auction(lead: Lead) -> PingPostResult:
 
         return PingPostResult(
             event_id=uuid4(),
-            occurred_at=datetime.now(timezone.utc),
+            occurred_at=datetime.now(UTC),
             lead_id=lead.id,
             pinged_buyer_ids=[b.id for b in buyers],
             winning_buyer_id=winning_buyer_id,

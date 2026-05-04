@@ -8,14 +8,12 @@ import hmac
 import time
 
 import pytest
-
 from form_receiver.signatures import (
     InvalidSignatureError,
     MissingHeaderError,
     ReplayError,
     verify,
 )
-
 
 SECRET = "whsec_" + base64.b64encode(b"unit-test-secret-32-bytes-padded!").decode()
 

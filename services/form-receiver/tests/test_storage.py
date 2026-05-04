@@ -7,7 +7,6 @@ since they need a real postgres + the migration applied.
 from __future__ import annotations
 
 import pytest
-
 from form_receiver.schemas import (
     ConsentExtractionError,
     FormbricksEnvelope,
