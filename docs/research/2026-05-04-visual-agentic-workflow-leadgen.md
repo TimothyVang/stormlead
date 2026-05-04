@@ -336,3 +336,104 @@ Execution style:
    - blockers and next step.
 4. Do not let the agent skip tests or migration checks.
 
+
+---
+
+## Repo-Specific Execution Prompt V2 (Exact File Targets)
+
+```text
+You are implementing in /workspace/stormlead. Execute in this exact order and touch only the listed targets unless required by compiler/tests.
+
+PHASE A (DB schema + migrations) targets:
+1) libs/stormlead_db/migrations/versions/0005_agent_run_tables.py
+2) libs/stormlead_db/src/stormlead_db/tables.py
+3) libs/stormlead_db/src/stormlead_db/__init__.py (only if exports are needed)
+4) docs/research/2026-05-04-visual-agentic-workflow-leadgen.md (progress notes)
+
+Implementation details:
+- Add tables: run_sessions, run_steps, run_events, run_artifacts.
+- Include FKs to leads and between run tables.
+- Include indexes on run_id/lead_id/status/ts and step linkage.
+- Ensure downgrade cleanly drops indexes then tables.
+- Keep migration idempotent where practical using IF EXISTS / IF NOT EXISTS.
+
+Verification commands:
+- python -m compileall libs/stormlead_db/src/stormlead_db
+- alembic -c libs/stormlead_db/alembic.ini upgrade head
+- alembic -c libs/stormlead_db/alembic.ini downgrade -1
+- alembic -c libs/stormlead_db/alembic.ini upgrade head
+
+Commit strategy:
+- Commit 1: migration file only.
+- Commit 2: ORM model/table definitions.
+- Commit 3: docs updates + task board sync.
+
+Output requirements for every checkpoint:
+- Changed files
+- Exact commands run
+- Pass/fail per command
+- Any follow-up fixes needed
+```
+
+---
+
+## One-Shot Task Breakdown Board (Execution Tickets)
+
+### EPIC A — Data Layer (Phase A)
+
+- [x] **A1: Create migration scaffold**
+  - File: `libs/stormlead_db/migrations/versions/0005_agent_run_tables.py`
+  - Done when: migration adds all 4 run tables with PK/FK and lifecycle timestamps.
+- [x] **A2: Add indexed query paths**
+  - File: `libs/stormlead_db/migrations/versions/0005_agent_run_tables.py`
+  - Done when: indexes exist for lead/status/run_id/step_id/ts lookups.
+- [x] **A3: Add downgrade safety**
+  - File: `libs/stormlead_db/migrations/versions/0005_agent_run_tables.py`
+  - Done when: downgrade drops dependent indexes then tables cleanly.
+- [x] **A4: Add ORM mappings**
+  - File: `libs/stormlead_db/src/stormlead_db/tables.py`
+  - Done when: `RunSessionRow`, `RunStepRow`, `RunEventRow`, `RunArtifactRow` exist and match schema.
+
+### EPIC B — Runtime Orchestration
+
+- [ ] **B1: Add run state machine module**
+  - Target: `services/agent-runtime/src/agent_runtime/execution.py`
+- [ ] **B2: Emit lifecycle events**
+  - Targets: `services/agent-runtime/src/agent_runtime/worker.py`, `libs/stormlead_core/src/stormlead_core/events.py`
+- [ ] **B3: Add retry + idempotency controls**
+  - Targets: `services/agent-runtime/src/agent_runtime/worker.py`, `services/agent-runtime/src/agent_runtime/hermes.py`
+
+### EPIC C — Playwright Worker & Evidence
+
+- [ ] **C1: Define browser step contract**
+  - Target: `services/agent-runtime/src/agent_runtime/execution.py`
+- [ ] **C2: Capture trace/video/screenshot artifacts**
+  - Targets: `tests/playwright/helpers/cowork.ts`, `playwright.config.ts`, worker glue code
+- [ ] **C3: Persist artifact metadata to run_artifacts**
+  - Targets: agent runtime persistence layer + DB integration
+
+### EPIC D — Compliance Gate Controls
+
+- [ ] **D1: Consent and signature validation before post/sell**
+  - Targets: `services/form-receiver/src/form_receiver/signatures.py`, runtime policy checks
+- [ ] **D2: Fraud/quality threshold enforcement**
+  - Targets: `services/agent-runtime/src/agent_runtime/qualify.py`, `services/ping-post/src/ping_post/auction.py`
+- [ ] **D3: Decision rationale persistence**
+  - Targets: runtime write path + run_events payload
+
+### EPIC E — Ops APIs + UI
+
+- [ ] **E1: Add run listing/detail endpoints**
+  - Target: `services/agent-runtime/src/agent_runtime/worker.py` or API module split
+- [ ] **E2: Add event/artifact APIs + approve/reject actions**
+  - Target: API module(s)
+- [ ] **E3: Build minimal ops UI pages**
+  - Target: UI app module (create if absent)
+
+### EPIC F — Testing & Demo
+
+- [ ] **F1: Unit tests for transitions/retries/gates**
+- [ ] **F2: Integration test for full run lifecycle**
+- [ ] **F3: Playwright demo flow with replay artifacts**
+- [ ] **F4: Demo runbook and checklist in docs**
+
