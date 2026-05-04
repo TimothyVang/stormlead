@@ -14,6 +14,8 @@ claude research artifacts that informed the scaffold's choices. the two `2026-05
 
 - **`2026-05-agent-auth-patterns.md`** — *can agents use `CLAUDE_CODE_OAUTH_TOKEN` instead of an api key?* counterexample-driven correction of an earlier "officially no" answer. coleam00's linear-coding-agent-harness is the canonical reference. verdict: oauth is viable for single-operator low-volume opus work (hermes self-evolution, complex qualification); api+litellm stays for high-volume / latency-sensitive paths. hybrid is the recommended shape when agent-runtime is built.
 
+- **`2026-05-04-visual-agentic-workflow-execution-prompt.md`** — execution prompt for the next visual workflow milestone: admin lead timeline, Playwright artifact linking, agent decision trace visibility, KPI/SLO dashboard, and future n8n/Temporal decision path.
+
 ## superseded claims (read `stack-improvements.md` and `architectural-fit.md` for current truth)
 
 - **litellm pin v1.83.4-stable** → **v1.83.7-stable** (cve-2026-42208).
