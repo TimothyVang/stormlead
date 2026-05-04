@@ -778,6 +778,80 @@ def _normalize_ratio(numerator: int, denominator: int) -> float:
     return round((numerator / denominator), 4) if denominator else 0.0
 
 
+
+
+@app.get("/v1/admin/launch-readiness")
+async def launch_readiness() -> dict[str, Any]:
+    """Evaluate first paid-launch gates from docs/research/README.md."""
+    try:
+        async with get_session() as s:
+            funded_buyers = await s.scalar(
+                select(func.count(BuyerRow.id)).where(
+                    BuyerRow.status == BuyerStatus.ACTIVE.value,
+                    BuyerRow.deposit_balance > 0,
+                )
+            )
+            configured_buyers = await s.scalar(
+                select(func.count(BuyerRow.id)).where(
+                    BuyerRow.status == BuyerStatus.ACTIVE.value,
+                    BuyerRow.deposit_balance > 0,
+                    func.jsonb_array_length(BuyerRow.target_zips) > 0,
+                    func.jsonb_array_length(BuyerRow.services) > 0,
+                    BuyerRow.daily_cap > 0,
+                    BuyerRow.monthly_budget > 0,
+                    BuyerRow.bid_per_lead_t1_t2 > 0,
+                    BuyerRow.bid_per_lead_t3 > 0,
+                )
+            )
+            total_wallet_cents = await s.scalar(
+                select(func.coalesce(func.sum(BuyerRow.deposit_balance * 100), 0)).where(
+                    BuyerRow.status == BuyerStatus.ACTIVE.value
+                )
+            )
+            delivered = await s.scalar(
+                select(func.count(PostResult.id)).where(PostResult.delivered.is_(True))
+            )
+            returned = await s.scalar(
+                select(func.count(PostResult.id)).where(PostResult.returned.is_(True))
+            )
+            attributed_leads = await s.scalar(
+                select(func.count(LeadRow.id)).where(
+                    LeadRow.campaign_source.is_not(None),
+                    LeadRow.campaign_source != "",
+                )
+            )
+
+        checks = {
+            "three_funded_buyers_in_market": int(funded_buyers or 0) >= 3,
+            "buyers_have_services_zips_caps_and_prices": int(configured_buyers or 0) >= 3,
+            "wallet_balance_present_for_campaign_risk": int(total_wallet_cents or 0) >= 100_000,
+            "ping_post_routed_test_lead": int(delivered or 0) > 0,
+            "invalid_lead_credit_flow_tested": int(returned or 0) > 0,
+            "campaign_source_attribution_visible": int(attributed_leads or 0) > 0,
+        }
+        ready = all(checks.values())
+        return {
+            "ready_for_paid_launch": ready,
+            "checks": checks,
+            "metrics": {
+                "funded_buyers": int(funded_buyers or 0),
+                "configured_buyers": int(configured_buyers or 0),
+                "active_wallet_total_cents": int(total_wallet_cents or 0),
+                "delivered_posts": int(delivered or 0),
+                "returned_posts": int(returned or 0),
+                "attributed_leads": int(attributed_leads or 0),
+            },
+            "notes": [
+                "wallet_balance_present_for_campaign_risk uses a conservative $1,000 seed threshold",
+                "expand this endpoint with explicit landing/call-tracking test artifacts as those services ship",
+            ],
+        }
+    except Exception as e:
+        log.error("admin.launch_readiness_failed", error=str(e))
+        raise HTTPException(
+            500, "launch readiness could not be computed; retry after checking database health"
+        ) from e
+
 @app.get('/v1/kpis/normalized')
 async def normalized_kpis(
     market_state: str | None = Query(default=None, min_length=2, max_length=2),
