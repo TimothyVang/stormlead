@@ -4,9 +4,12 @@
   "type": "module",
   "scripts": {
     "test:playwright": "playwright test",
-    "test:playwright:headed": "playwright test --headed --workers=1"
+    "test:playwright:headed": "playwright test --headed --workers=1",
+    "demo:admin": "node scripts/live_admin_demo.mjs",
+    "demo:admin:record": "cross-env STORMLEAD_KEEP_BROWSER_OPEN=0 node scripts/live_admin_demo.mjs"
   },
   "devDependencies": {
-    "@playwright/test": "1.59.1"
+    "@playwright/test": "1.59.1",
+    "cross-env": "7.0.3"
   }
 }

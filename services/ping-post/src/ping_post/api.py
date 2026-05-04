@@ -275,9 +275,19 @@ async def admin() -> str:
     body { font-family: Arial, sans-serif; margin: 2rem; background: #0f172a; color: #e2e8f0; }
     h1 { margin-bottom: 0.25rem; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin: 1.5rem 0; }
-    .card, table { background: #111827; border: 1px solid #334155; border-radius: 12px; }
+    .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .8rem; }
+    .card, table, form, .panel { background: #111827; border: 1px solid #334155; border-radius: 12px; }
     .card { padding: 1rem; }
     .metric { font-size: 1.8rem; font-weight: 700; color: #38bdf8; }
+    form, .panel { padding: 1rem; margin: 1rem 0; }
+    label { display: grid; gap: .35rem; color: #bfdbfe; font-size: .9rem; }
+    input, select, textarea { background: #020617; border: 1px solid #475569; border-radius: 8px; color: #e2e8f0; padding: .65rem; }
+    textarea { min-height: 4rem; }
+    button { background: #0284c7; border: 0; border-radius: 10px; color: white; cursor: pointer; font-weight: 700; padding: .8rem 1rem; }
+    button.secondary { background: #334155; }
+    button:hover { filter: brightness(1.08); }
+    .actions { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1rem; }
+    .status { border-left: 4px solid #38bdf8; margin: 1rem 0; padding: .75rem 1rem; white-space: pre-wrap; }
     table { width: 100%; border-collapse: collapse; overflow: hidden; }
     th, td { padding: 0.75rem; border-bottom: 1px solid #334155; text-align: left; }
     th { color: #93c5fd; }
@@ -287,13 +297,89 @@ async def admin() -> str:
   <h1>StormLead Admin</h1>
   <p>Paid-pilot control surface</p>
   <section class="grid" id="kpis"></section>
+  <section class="panel" aria-label="cowork workflow controls">
+    <h2>Cowork Workflow Controls</h2>
+    <p>Create a real buyer, activate/fund it, then verify dashboard KPIs and roster state.</p>
+    <div class="status" id="workflow-status">Ready. No mock data is used.</div>
+  </section>
+
+  <form id="buyer-form" aria-label="create buyer form">
+    <h2>Create Buyer</h2>
+    <div class="form-grid">
+      <label>Name <input name="name" value="Cowork Buyer" required /></label>
+      <label>Company <input name="company" value="Cowork Tree Pros" required /></label>
+      <label>Email <input name="contact_email" value="ops@cowork-tree.example" required /></label>
+      <label>Phone <input name="contact_phone_e164" value="+15125550199" required /></label>
+      <label>Webhook URL <input name="webhook_url" value="http://host.docker.internal:9999/cowork-buyer" required /></label>
+      <label>Webhook Secret <input name="webhook_secret" value="cowork-secret-minimum-16" required /></label>
+      <label>Tier 1/2 Bid <input name="bid_per_lead_t1_t2" value="75.00" required /></label>
+      <label>Tier 3 Bid <input name="bid_per_lead_t3" value="175.00" required /></label>
+      <label>Call Bid <input name="bid_per_call" value="100.00" required /></label>
+      <label>Filter <input name="filter_expression" value="lead.state == 'TX'" required /></label>
+      <label>Daily Cap <input name="daily_cap" value="25" required /></label>
+      <label>Monthly Budget <input name="monthly_budget" value="5000.00" required /></label>
+      <label>Initial Deposit <input name="deposit_balance" value="0.00" required /></label>
+      <label>Services <input name="services" value="tree_removal" required /></label>
+      <label>Target Zips <input name="target_zips" value="78701,78702" required /></label>
+      <label>Exclusive Zips <input name="exclusive_zips" value="" /></label>
+      <label>Low Balance Threshold <input name="low_balance_threshold" value="150.00" required /></label>
+      <label>Notes <textarea name="notes">Created from the real StormLead admin UI.</textarea></label>
+    </div>
+    <div class="actions">
+      <button type="submit">Create Real Buyer</button>
+    </div>
+  </form>
+
+  <form id="buyer-update-form" aria-label="update buyer form">
+    <h2>Activate / Fund Buyer</h2>
+    <div class="form-grid">
+      <label>Buyer ID <input name="buyer_id" id="selected-buyer-id" required /></label>
+      <label>Status
+        <select name="status"><option value="active">active</option><option value="paused">paused</option><option value="pending_verification">pending_verification</option></select>
+      </label>
+      <label>Sales Stage
+        <select name="sales_stage"><option value="funded">funded</option><option value="prospect">prospect</option><option value="contacted">contacted</option><option value="agreement_sent">agreement_sent</option></select>
+      </label>
+      <label>Services <input name="services" value="tree_removal" /></label>
+      <label>Target Zips <input name="target_zips" value="78701,78702" /></label>
+    </div>
+    <div class="actions">
+      <button type="submit">Update Real Buyer</button>
+    </div>
+  </form>
+
+  <form id="deposit-form" aria-label="deposit form">
+    <h2>Add Deposit</h2>
+    <div class="form-grid">
+      <label>Buyer ID <input name="buyer_id" id="deposit-buyer-id" required /></label>
+      <label>Amount Cents <input name="amount_cents" value="77700" required /></label>
+      <label>Reference <input name="external_reference" value="playwright-cowork-real-ui" /></label>
+    </div>
+    <div class="actions">
+      <button type="submit">Add Real Deposit</button>
+      <button type="button" class="secondary" onclick="load()">Refresh Dashboard</button>
+    </div>
+  </form>
+
   <h2>Buyers</h2>
   <table aria-label="buyers">
-    <thead><tr><th>Company</th><th>Status</th><th>Stage</th><th>Wallet</th><th>Services</th><th>Zips</th></tr></thead>
+    <thead><tr><th>Company</th><th>Status</th><th>Stage</th><th>Wallet</th><th>Services</th><th>Zips</th><th>Low Balance</th><th>ID</th></tr></thead>
     <tbody id="buyers"></tbody>
   </table>
   <script>
     const money = cents => `$${(cents / 100).toFixed(2)}`;
+    const statusBox = document.querySelector('#workflow-status');
+    const setStatus = msg => { statusBox.textContent = msg; };
+    const list = value => value.split(',').map(v => v.trim()).filter(Boolean);
+    const formJson = form => Object.fromEntries(new FormData(form).entries());
+    const api = async (path, options = {}) => {
+      const res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...options });
+      const text = await res.text();
+      const data = text ? JSON.parse(text) : {};
+      if (!res.ok) throw new Error(`${res.status}: ${JSON.stringify(data)}`);
+      return data;
+    };
+
     async function load() {
       const [summaryRes, buyersRes] = await Promise.all([
         fetch('/v1/admin/kpis'),
@@ -306,14 +392,68 @@ async def admin() -> str:
         ['Active buyers', summary.active_buyers],
         ['Sold leads', summary.sold_leads],
         ['Returned leads', summary.returned_leads],
+        ['Lead revenue', money(summary.lead_revenue_cents)],
       ].map(([label, value]) => `<div class="card"><div>${label}</div><div class="metric">${value}</div></div>`).join('');
       document.querySelector('#buyers').innerHTML = buyers.buyers.map(b => `
-        <tr>
+        <tr data-buyer-id="${b.buyer_id}">
           <td>${b.company}</td><td>${b.status}</td><td>${b.sales_stage}</td>
           <td>${money(b.deposit_balance_cents)}</td><td>${b.services.join(', ')}</td>
-          <td>${b.target_zips.join(', ')}</td>
+          <td>${b.target_zips.join(', ')}</td><td>${money(b.low_balance_threshold_cents)}</td><td>${b.buyer_id}</td>
         </tr>`).join('');
+      setStatus(`Dashboard loaded from real APIs. Buyers: ${buyers.buyers.length}`);
     }
+
+    document.querySelector('#buyer-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const raw = formJson(event.currentTarget);
+      setStatus('Creating real buyer through POST /v1/buyers...');
+      const buyer = await api('/v1/buyers', {
+        method: 'POST',
+        body: JSON.stringify({
+          ...raw,
+          services: list(raw.services),
+          target_zips: list(raw.target_zips),
+          exclusive_zips: list(raw.exclusive_zips || ''),
+        }),
+      });
+      document.querySelector('#selected-buyer-id').value = buyer.buyer_id;
+      document.querySelector('#deposit-buyer-id').value = buyer.buyer_id;
+      await load();
+      setStatus(`Created real buyer ${buyer.company} (${buyer.buyer_id}).`);
+    });
+
+    document.querySelector('#buyer-update-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const raw = formJson(event.currentTarget);
+      setStatus(`Updating real buyer ${raw.buyer_id} through PATCH /v1/buyers/{id}...`);
+      const buyer = await api(`/v1/buyers/${raw.buyer_id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          status: raw.status,
+          sales_stage: raw.sales_stage,
+          services: list(raw.services),
+          target_zips: list(raw.target_zips),
+        }),
+      });
+      await load();
+      setStatus(`Updated real buyer ${buyer.company}: ${buyer.status}/${buyer.sales_stage}.`);
+    });
+
+    document.querySelector('#deposit-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const raw = formJson(event.currentTarget);
+      setStatus(`Adding real deposit through POST /v1/buyers/${raw.buyer_id}/deposits...`);
+      const wallet = await api(`/v1/buyers/${raw.buyer_id}/deposits`, {
+        method: 'POST',
+        body: JSON.stringify({
+          amount_cents: Number(raw.amount_cents),
+          external_reference: raw.external_reference,
+        }),
+      });
+      await load();
+      setStatus(`Deposit recorded. New wallet: ${money(wallet.deposit_balance_cents)}.`);
+    });
+
     load().catch(err => {
       document.body.insertAdjacentHTML('beforeend', `<pre role="alert">${err}</pre>`);
     });

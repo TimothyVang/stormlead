@@ -11,3 +11,18 @@ This folder stores local proof that the app/browser surface was exercised.
 Latest browser smoke target: `GET /admin` from the `ping-post` FastAPI app.
 
 The browser smoke mocks backend JSON calls so the admin UI can be reviewed without requiring the Docker Postgres stack.
+
+## Human-Style Operator Runs
+
+Playwright workflows now write timestamped evidence folders under `testing/runs/`.
+
+Each run includes:
+
+- `screenshots/` - step-by-step screenshots with cursor/highlight overlays.
+- `logs/operator-log.md` - timestamped operator comments.
+- `logs/assertions.json` - assertions that passed.
+- `reviews/review.md` - product review notes and follow-up gaps.
+
+Use `npm run test:playwright -- --project=chromium` for repeatable automated evidence.
+
+Use `npm run demo:admin` for a visible browser demo that stays open until you close it or stop the saved process IDs in `testing/logs/live-demo-pids.txt`.
