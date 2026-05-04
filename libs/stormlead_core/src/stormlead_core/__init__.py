@@ -30,8 +30,17 @@ from stormlead_core.models import (
     Storm,
     StormSeverity,
 )
+from stormlead_core.observability import (
+    ERROR_SINK,
+    bind_correlation_id,
+    correlation_scope,
+    current_correlation_id,
+    emit_event,
+    emit_metric,
+)
 
 __all__ = [
+    "ERROR_SINK",
     "Buyer",
     "BuyerFilter",
     "BuyerSalesStage",
@@ -51,8 +60,13 @@ __all__ = [
     "StormDetected",
     "StormEvent",
     "StormSeverity",
+    "bind_correlation_id",
     "build_duplicate_window",
     "configure_logging",
+    "correlation_scope",
+    "current_correlation_id",
+    "emit_event",
+    "emit_metric",
     "evaluate_filter",
     "get_logger",
     "initial_quality_score",

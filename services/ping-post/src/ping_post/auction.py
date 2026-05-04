@@ -30,9 +30,7 @@ from stormlead_core import (
     Lead,
     LeadStatus,
     PingPostResult,
-    ERROR_SINK,
     bind_correlation_id,
-    current_correlation_id,
     emit_event,
     emit_metric,
     evaluate_filter,
@@ -156,7 +154,7 @@ async def _ping_one(
     buyer: Buyer,
     payload: dict,
 ) -> PingResponse:
-    bind_correlation_id(str(lead.id))
+    bind_correlation_id(payload.get("lead_id"))
     started = time.perf_counter()
     body = json.dumps(payload).encode()
     ts = str(int(time.time()))
