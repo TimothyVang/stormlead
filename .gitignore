@@ -40,7 +40,6 @@ volumes/
 # Generated Playwright/Cowork evidence. Keep local proof files out of git by default.
 testing/playwright-artifacts/*
 !testing/playwright-artifacts/
-!testing/playwright-artifacts/.gitkeep
 testing/playwright-report/*
 !testing/playwright-report/
 !testing/playwright-report/.gitkeep

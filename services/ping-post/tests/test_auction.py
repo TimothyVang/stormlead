@@ -10,12 +10,12 @@ from decimal import Decimal
 from uuid import uuid4
 
 from ping_post.auction import (
-    _delivery_idempotency_key,
     PingResponse,
     _avm_band,
     _buyer_can_afford_bid,
     _buyer_matches_paid_pilot_rules,
     _debit_amount,
+    _delivery_idempotency_key,
     _pick_winner,
     _ping_payload,
     _should_retry_post,

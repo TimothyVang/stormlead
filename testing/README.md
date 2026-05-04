@@ -30,10 +30,14 @@ Use `npm run demo:admin` for a visible browser demo that stays open until you cl
 
 Use `npm run demo:admin:record` to run the live demo in non-persistent recording mode.
 
+Use `npm run evidence:clean` to preview generated evidence cleanup. Use `npm run evidence:clean:apply` to remove ignored generated evidence while preserving the tracked `.gitkeep` placeholders.
+
 ## Artifact Hygiene
 
 Generated files under `playwright-artifacts/`, `playwright-report/`, `runs/`, `screenshots/`, `videos/`, and `logs/` are ignored by git. They remain available locally after a run, but should not be committed unless there is a specific review or release reason.
 
 If curated evidence needs to be shared, prefer a small screenshot plus the `reviews/review.md` summary. Use Git LFS or external artifact storage for videos and traces.
 
-The placeholder `.gitkeep` files preserve the evidence folder structure without tracking generated output.
+The placeholder `.gitkeep` files preserve stable evidence folders without tracking generated output. `testing/playwright-artifacts/` is recreated by Playwright and is not tracked because Playwright clears its output directory during runs.
+
+`testing/evidence-summary.md` is tracked and should be used for concise proof notes that are worth keeping in git.
