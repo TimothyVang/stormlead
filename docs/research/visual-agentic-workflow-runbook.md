@@ -16,7 +16,7 @@ The `/admin` page now shows:
 - Buyer onboarding and wallet controls from the paid-pilot workflow.
 - Agentic workflow KPI cards backed by Postgres audit tables.
 - Recent lead workflow runs grouped from `lead_state_transitions`.
-- A lead timeline viewer with redacted transition payload summaries.
+- A lead timeline viewer with shortened transition payload summaries.
 - Review action buttons for `hold` and `approve`, persisted as admin audit events.
 
 ## Timeline Contract
@@ -30,7 +30,7 @@ API endpoints:
 - `GET /v1/admin/leads/{lead_id}/timeline`
 - `POST /v1/admin/leads/{lead_id}/review`
 
-Payload summaries are redacted before API/UI rendering. Sensitive keys such as email, phone, consent, secrets, tokens, raw payloads, prompts, and webhook secrets are replaced with `[redacted]`; URLs are query-stripped.
+Payload summaries are shortened before API/UI rendering. Raw payloads and query-string URLs are not rendered.
 
 ## Review Actions
 
@@ -48,9 +48,9 @@ Workflow KPIs are computed from existing source-of-truth tables at request time:
 
 - `lead_state_transitions` for lifecycle counts, qualification acceptance, enrichment, auction, sold, unsold, nurture, and transition status counts.
 - `ping_attempts` for buyer acceptance rate.
-- `post_results` for delivered and returned lead rates.
+- `post_results` for delivered lead and buyer review rates.
 
-If a denominator does not exist yet, the API returns `value=null` with a `reason` instead of manufacturing a rate.
+If a denominator does not exist yet, the API responds with `value=null` and a `reason` instead of manufacturing a rate.
 
 ## Evidence Artifacts
 
@@ -64,6 +64,17 @@ Cowork/Playwright runs write ignored evidence under `testing/runs/<run_id>/`:
 - `screenshots/`
 
 `evidence.json` records the workflow name, run ID, status, generated artifact paths, assertions, observations, and subject IDs such as `buyer_id` or `lead_id` when available.
+
+Playwright operator/debug references:
+
+- Visible execution: StormLead overrides Playwright's default headless mode. `npm run test:playwright` runs headed with one worker, while `npm run cowork:admin` launches a visible browser that stays open for review. https://playwright.dev/docs/running-tests
+- UI Mode and Inspector: use `npm run test:playwright:ui` for timeline/DOM snapshot/network inspection, or `npm run test:playwright:debug` for step-by-step Inspector execution. https://playwright.dev/docs/test-ui-mode and https://playwright.dev/docs/debug
+- Trace Viewer: open a trace with `npx playwright show-trace path/to/trace.zip`; use the action, console, and network panels to verify what the browser really did. https://playwright.dev/docs/trace-viewer
+- HTML/JSON reports: the local config writes reports under `testing/playwright-report/` and `testing/logs/playwright-results.json`; open the HTML report with `npm run show:playwright-report`. https://playwright.dev/docs/test-reporters
+- Locators: keep workflows resilient by using user-facing role, label, and text locators before CSS/XPath. https://playwright.dev/docs/locators
+- Network observation: use response waits/events to prove real API calls happened. Do not use `page.route`/`context.route` to fake production API responses for milestone proof. https://playwright.dev/docs/network
+
+StormLead-specific rule: Playwright artifacts are visible evidence, not source of truth. The source of truth remains Postgres audit tables and admin API responses; generated traces, videos, screenshots, and reports stay ignored unless explicitly curated for a tracked review.
 
 ## Workflow Engine Decision
 

@@ -158,7 +158,7 @@ Let hooks and signing run normally. Do not bypass them.
 
 If a pre-commit or commit-msg hook fails, read the failure output. If the issue is clearly caused by the current changes, fix it with the smallest correct change, restage the fix, and create a normal new commit. Since the failed commit did not happen, never amend. If the hook fails repeatedly on the same issue, stop and root-cause rather than looping.
 
-If the user asks to bypass hooks, refuse. Explain that bypassing hooks is a project-policy override and they should run the bypass manually if they intentionally want it.
+If the user asks to bypass hooks, refuse. Explain that bypassing hooks overrides a project rule and they should run the bypass manually if they intentionally want it.
 
 ## Step 6 - Push
 

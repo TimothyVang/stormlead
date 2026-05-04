@@ -4,7 +4,7 @@ agentic storm-chase tree-removal lead-gen, fully self-hosted, python-first.
 
 ## what this is
 
-a monorepo for a single-operator b2b lead-gen business: detect storm events, capture homeowner leads on pseo landing pages, qualify with agents, run a ping-post auction to a buyer roster of licensed tree services, and dial unsold leads via voice ai.
+a monorepo for a single-operator b2b lead-gen business: detect storm events, capture homeowner leads on pseo landing pages, qualify with agents, run a ping-post auction to a buyer roster of tree services, and dial unsold leads via voice ai.
 
 dev runs on windows + wsl2 with docker compose. prod runs on hetzner + proxmox + lxc/vm. push via git, deploy with docker compose under systemd.
 
@@ -20,7 +20,7 @@ services/
   storm-watcher/            tropycal/nws/fema pollers, hatchet cron
   enrich-worker/            deterministic lead enrichment + lead.enriched event
   agent-runtime/            LiteLLM-routed qualify/nurture/hermes workers
-  form-receiver/            formbricks webhook ingestion + tcpa consent audit + lead.captured event
+  form-receiver/            formbricks webhook ingestion + lead.captured event
 
 libs/
   stormlead_core/           shared pydantic models, cel evaluator wrapper
@@ -55,8 +55,8 @@ cargo install just
 cp .env.example .env
 just up           # brings up the dev stack
 just migrate      # runs alembic migrations
-# just seed       # not yet implemented (scripts/seed_dev.py)
-# just smoke      # not yet implemented (scripts/smoke_e2e.py)
+just seed        # local dev seed data
+just smoke       # local ingest -> auction -> delivery -> return-review smoke
 
 # 3. dev loop
 just logs ping-post
@@ -70,9 +70,11 @@ prod compose + deploy script are placeholders (`infra/compose/prod/`, `.github/w
 
 ## documentation map
 
-- `docs/research/README.md` — current business and product operating model. start with `implementation guide`, `self-hosted framework review`, `40 percent irr operating model`, and `lead quality guarantee, credits, refunds, and ai voice nurture`.
+- `docs/research/README.md` — current business and product operating model. start with `implementation guide`, `self-hosted framework review`, and `40 percent irr operating model`.
 - `docs/research/2026-05-architectural-fit.md` — architecture decisions and why v1 uses postgres, hatchet, fastapi, and hetzner us regions.
 - `docs/research/visual-agentic-workflow-runbook.md` — admin workflow timeline, review actions, KPI semantics, and Cowork evidence manifests.
+- `docs/research/v1-paid-pilot-runbook.md` — local technical V1 controls, scoped readiness, and evidence commands.
+- `testing/README.md` — visible Playwright/Cowork evidence rules, headed automation commands, artifact hygiene, and official Playwright references.
 - `docs/research/2026-05-stack-improvements.md` — active technical risk register and implementation corrections.
 - `docs/research/2026-05-forkable-stack.md` and `docs/research/2026-05-stack-audit.md` — preserved source research; use the newer docs when they conflict.
 
@@ -85,8 +87,4 @@ prod compose + deploy script are placeholders (`infra/compose/prod/`, `.github/w
 5. **rust**: not used. python everywhere. rewrite ping-post hot path in go later if we cross 500 leads/sec sustained.
 6. **hetzner region**: deploy to ashburn (us-east) or hillsboro (us-west). a falkenstein/helsinki box adds 150–200ms rtt to every buyer ping/post — eats the auction's <5s budget. see `docs/research/2026-05-architectural-fit.md`.
 7. **nats / seaweedfs / openbao not in v1 compose**: cut after architectural-fit research. hatchet handles durable workflows on postgres; hetzner object storage replaces seaweedfs in prod; sops-encrypted `.env.prod` replaces openbao until 2nd operator. re-add any of these when a concrete need surfaces, not before.
-8. **self-hosted business framework**: current operating model, lead-quality guarantee, refund/credit policy, ai voice nurture, and 40% irr guardrails live in `docs/research/README.md` under `self-hosted framework review` and `40 percent irr operating model`. treat these as the business design constraints for future implementation.
-
-## license
-
-internal. not for redistribution. (no `LICENSE` file yet — decide before any external sharing.)
+8. **self-hosted business framework**: current operating model and 40% irr guardrails live in `docs/research/README.md` under `self-hosted framework review` and `40 percent irr operating model`. treat these as the business design constraints for future implementation.

@@ -10,7 +10,7 @@ Agent-runtime tasks should auto-retry when failures are likely transient:
 - Short-lived platform resource contention.
 - Model primary-route failure where fallback model succeeds.
 
-Current retry policy:
+Current retry rules:
 
 - `qualify_lead`: 2 retries, 120 second step timeout.
 - `hermes_self_evolution`: 1 retry, 600 second step timeout.
@@ -21,7 +21,7 @@ Require manual intervention when repeated failures indicate non-transient faults
 
 - Dead-letter emission (`agent.task.dead_lettered`) after retry budget exhausted.
 - Input payload schema defects (missing `lead_id`, invalid UUIDs).
-- Deterministic policy failures: token cap or cost cap exceeded.
+- Deterministic cap failures: token cap or cost cap exceeded.
 - Persistent data-layer failures (missing rows, migration drift).
 
 ## Dead-letter handling
@@ -29,7 +29,7 @@ Require manual intervention when repeated failures indicate non-transient faults
 When dead-lettered events appear in operator dashboards/log sinks:
 
 1. Inspect `correlation_id`, `run_id`, and `task_name`.
-2. Validate token/cost cap reason and adjust policy only with approval.
+2. Validate token/cost cap reason and adjust caps only with approval.
 3. Confirm whether fallback model was used before final failure.
 4. Requeue only after root-cause is fixed; do not blind-retry repeatedly.
 

@@ -1,7 +1,7 @@
 # 2026-05 Production Operations Playbook
 
 ## Scope
-This document defines backup/restore, secrets policy, smoke validation, and incident response for Stormlead production.
+This document defines backup/restore, secrets handling, smoke validation, and incident response for Stormlead production.
 
 ## RPO / RTO targets
 
@@ -63,7 +63,7 @@ mc mirror --overwrite backup/stormlead-prod-artifacts prod/stormlead-prod-artifa
 mc mirror --overwrite backup/stormlead-prod-langfuse prod/stormlead-prod-langfuse
 ```
 
-## Secrets handling policy and rotation cadence
+## Secrets handling and rotation cadence
 
 | Environment | Secret source of truth | Injection method | Rotation cadence |
 |---|---|---|---|
@@ -71,7 +71,7 @@ mc mirror --overwrite backup/stormlead-prod-langfuse prod/stormlead-prod-langfus
 | stage | managed secret manager (dedicated project) | CI/CD runtime injection | every 14 days |
 | prod | managed secret manager + dual-control approval | short-lived runtime tokens only, never committed | every 7 days for API keys, every 30 days for DB creds |
 
-Policy rules:
+Rules:
 1. No secrets in git, docker-compose YAML, or build args.
 2. Production secrets require dual-operator approval and audit trail.
 3. Emergency rotation SLA: begin within 15 minutes, complete within 60 minutes.

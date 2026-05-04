@@ -33,7 +33,7 @@ Why here: your current stack already has service boundaries and event-like flow 
 Why here: your `services/agent-runtime/` already contains domain agent modules (`qualify.py`, `execution.py`, `worker.py`), which maps directly to graph-based agent state machines.
 
 ### 3) Multi-agent teamwork option for specialized roles
-- **AutoGen** for agent-to-agent collaboration (e.g., verifier agent + compliance agent + outreach strategist).
+- **AutoGen** for agent-to-agent collaboration (e.g., verifier agent + routing agent + outreach strategist).
 - GitHub: https://github.com/microsoft/autogen
 - Docs: https://microsoft.github.io/autogen/stable/
 
@@ -161,9 +161,9 @@ Add periodic retraining/retuning workflow in n8n:
 
 ### 7. Human approval gates for high-risk actions
 Require human approval for:
-- low-confidence compliance leads
+- low-confidence review leads
 - large outbound spend actions
-- policy exceptions
+- routing exceptions
 
 Implement as n8n wait/approval nodes + audit log entry in Postgres.
 

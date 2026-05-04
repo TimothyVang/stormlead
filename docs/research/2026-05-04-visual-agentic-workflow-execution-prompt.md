@@ -28,7 +28,7 @@ Current stack constraints:
 - Alembic
 - Hatchet
 - LiteLLM only for model calls
-- Playwright for real browser workflows
+- Playwright for real, visible browser workflows
 - No mocked production behavior
 - No fake KPI/buyer/lead data outside explicit dev/test seed paths
 - No TODO stubs shipped as complete
@@ -143,9 +143,10 @@ Quality bar:
 - Prefer readable boring code over clever abstractions.
 - Keep new names and new tables to the minimum needed.
 - Write tests against behavior, not implementation details.
-- Redact PII at API/UI boundaries by default; only show raw PII where the existing admin UI already does and the operator needs it.
+- Shorten payloads at API/UI boundaries by default; only show full fields where the existing admin UI already does and the operator needs it.
 - Treat generated Playwright evidence as local artifacts, not source files.
 - Keep production runtime independent from Playwright test-only code.
+- Browser evidence must be visible/headed for operator review. Do not replace a visible browser workflow with headless-only proof.
 
 ## Parallel Subagent Protocol
 
@@ -168,7 +169,7 @@ Subagent dependency map:
 - Subagent B must inform Tasks 1, 3, 4, 5, and 7 because DB/audit shape is the backbone.
 - Subagent A depends on B's timeline shape but can independently research HTML/API patterns.
 - Subagent C depends on B only if DB artifact persistence is necessary; otherwise it can use ignored evidence manifests.
-- Subagent D depends on B for payload shape and must preserve the LiteLLM policy.
+- Subagent D depends on B for payload shape and must preserve the LiteLLM rule.
 - Subagent E depends on A for dashboard placement and B for transition/KPI queries.
 - Subagent F depends on all findings for docs, but can research validation and orchestration independently.
 
@@ -192,7 +193,7 @@ Subagent A: Admin UI + Timeline
 Prompt:
 
 ```text
-Research the existing StormLead admin UI and API patterns. Focus on `services/ping-post/src/ping_post/api.py`, existing admin HTML/forms, existing KPI endpoints, and DB access patterns. Return a minimal implementation plan for a lead/run timeline UI and API that uses real `lead_state_transitions` data, avoids PII leaks, and fits the current visual style. Include exact files/functions likely needing edits and tests to add. Do not modify files.
+Research the existing StormLead admin UI and API patterns. Focus on `services/ping-post/src/ping_post/api.py`, existing admin HTML/forms, existing KPI endpoints, and DB access patterns. Return a minimal implementation plan for a lead/run timeline UI and API that uses real `lead_state_transitions` data, avoids overexposed payloads, and fits the current visual style. Include exact files/functions likely needing edits and tests to add. Do not modify files.
 ```
 
 Subagent B: DB Timeline + Audit Data
@@ -216,7 +217,7 @@ Subagent D: Agent Decision + LiteLLM Traceability
 Prompt:
 
 ```text
-Research `services/agent-runtime`, `services/enrich-worker`, LiteLLM policy tests, and decision payloads written to transition audit. Return a minimal implementation plan to expose redacted decision reasons, score/confidence, model route, cost, latency, and failure/dead-letter events in the admin timeline while preserving LiteLLM-only policy. Include test targets. Do not modify files.
+Research `services/agent-runtime`, `services/enrich-worker`, LiteLLM static tests, and decision payloads written to transition audit. Return a minimal implementation plan to expose shortened decision reasons, score/confidence, model route, cost, latency, and failure/dead-letter events in the admin timeline while preserving the LiteLLM-only rule. Include test targets. Do not modify files.
 ```
 
 Subagent E: KPI/SLO + Review Actions
@@ -289,7 +290,7 @@ Repeat this loop until the global definition of done passes:
 
 Hard stop conditions:
 
-- Stop and ask before destructive git operations, schema rewrites that would drop data, replacing Hatchet with another orchestrator, introducing a new paid/cloud dependency, or exposing raw PII in UI/artifacts.
+- Stop and ask before destructive git operations, schema rewrites that would drop data, replacing Hatchet with another orchestrator, introducing a new paid/cloud dependency, or exposing raw payloads in UI/artifacts.
 - Do not stop for routine test failures, typing errors, formatting failures, missing helper functions, or local code integration issues; fix them.
 
 Failure recovery playbook:
@@ -297,6 +298,7 @@ Failure recovery playbook:
 - If DB migrations fail: inspect migration order, model metadata, and Alembic heads; fix migration/code mismatch and rerun migration/config validation.
 - If Playwright fails because services are down: run the documented stack/bootstrap fallback, verify `/readyz`, then rerun Playwright.
 - If Playwright fails because selectors changed: update selectors to match the real UI, not fake the route or bypass the browser.
+- If Playwright cannot open a visible browser because the host has no display, document the display blocker and do not count a headless run as milestone browser evidence.
 - If mypy fails in changed code: fix types. If it fails in unrelated legacy code, first verify it is genuinely unrelated, then decide whether the calibrated mypy config should be adjusted or the legacy error should be fixed.
 - If tests need data: use existing seed/smoke tooling or create test fixtures in tests only. Do not add fake production dashboard values.
 - If `just` is missing: record the exact `Get-Command just` or shell error, run equivalent `uv`/`docker compose` commands, and document the fallback.
@@ -449,7 +451,7 @@ Allowed keys:
   screenshot_path
   video_path
 
-Always redact/drop keys containing:
+Always shorten/drop keys containing:
   phone
   email
   address
@@ -458,7 +460,6 @@ Always redact/drop keys containing:
   token
   authorization
   prompt
-  consent_text
   raw_payload
 ```
 
@@ -504,16 +505,14 @@ Implementation shortcuts that are acceptable:
 - If operator identity/auth does not exist yet, use `local-admin` and document it as a dev/admin limitation.
 - If timeline HTML testing is easier through the FastAPI test client than Playwright, use the test client for unit coverage and Playwright for the existing Cowork smoke/demo path.
 
-Redaction rules:
+Payload summary rules:
 
-- Never render full phone numbers, raw addresses, email addresses, webhook secrets, API keys, auth tokens, or full model prompts in timeline payload summaries.
+- Never render full contact fields, webhook secrets, API keys, auth tokens, or full model prompts in timeline payload summaries.
 - It is acceptable to show city/state/zip, score, class, model route, latency, cost estimate, reason code, task name, workflow run ID, and artifact relative path.
 - If a payload contains unknown keys, summarize only allowlisted keys and include a `redacted_keys` count.
 
-Security and privacy checks:
+Security checks:
 
-- Treat lead PII as production-sensitive even in dev.
-- Do not put raw lead PII into Playwright artifact metadata manifests.
 - Do not expose webhook secrets, buyer webhook URLs with embedded tokens, LiteLLM keys, Hatchet tokens, Langfuse secrets, or `.env` contents in timeline UI.
 - Do not add screenshots/videos/traces to git.
 - Do not make admin endpoints public-facing or unauthenticated beyond the current local/dev assumptions without documenting the risk.
@@ -658,7 +657,7 @@ Implement:
   - click a lead to view timeline
   - show states: captured, enriched, qualified/rejected, auctioned, sold/unsold, nurtured
   - show task status, timestamps, retry/idempotency metadata
-  - show payload summaries without leaking raw PII unnecessarily
+  - show payload summaries without exposing raw payloads unnecessarily
 - Add API endpoint(s), for example:
   - `GET /admin/leads/{lead_id}/timeline`
   - or equivalent existing admin pattern
@@ -670,7 +669,7 @@ Checklist:
 - [ ] Operator can open admin UI and inspect a lead timeline.
 - [ ] Timeline is DB-backed, not hardcoded.
 - [ ] Empty/error states are clear.
-- [ ] PII is not overexposed.
+- [ ] Raw payloads are not overexposed.
 
 Deliverables:
 
@@ -759,7 +758,7 @@ Acceptance tests:
 
 - Qualification timeline payload includes model name, latency, cost estimate, score/confidence, and redacted reasoning summary.
 - Failed/dead-letter model execution is visible as a timeline event or structured audit payload.
-- Static LiteLLM policy test still rejects direct provider SDK imports.
+- Static LiteLLM test still rejects direct provider SDK imports.
 
 ## Task 5: KPI/SLO Dashboard For Commercial Visibility
 
@@ -930,7 +929,7 @@ Before the final full validation, add or update focused tests so these behaviors
 DB timeline helper:
   - ordered timeline for fixture transitions
   - empty timeline returns [] or empty response cleanly
-  - payload summary redacts unknown/PII-like keys
+  - payload summary shortens unknown keys
 
 Admin/API:
   - timeline JSON endpoint returns real fixture data
@@ -1005,7 +1004,7 @@ Global definition of done:
 - [ ] Agent decision details are visible and redacted.
 - [ ] Commercial KPI dashboard is real-data-backed.
 - [ ] Replay/recovery links to timeline behavior.
-- [ ] LiteLLM-only policy still enforced.
+- [ ] LiteLLM-only rule still enforced.
 - [ ] No fake production behavior.
 - [ ] Ruff passes.
 - [ ] Format check passes.

@@ -14,6 +14,8 @@ Latest browser workflow target: `GET /admin` from the `ping-post` FastAPI app.
 
 The browser workflow does not mock backend JSON calls. It creates, activates/funds, deposits into, and reviews a real buyer through the admin UI against the running API and database.
 
+The local V1 smoke path in `scripts/smoke_e2e.py` covers non-browser backend evidence: form capture, ping/post delivery with idempotency, buyer review, operator approval, buyer daily report, admin timeline, and scoped readiness.
+
 ## StormLead Cowork Mode
 
 Playwright workflows now run as StormLead Cowork Mode: Request -> Analysis -> Plan -> Review/Approve -> Execute -> Verify. The browser shows a Cowork panel with task, analysis, plan, current action, typed notes, verification status, output paths, a visible cursor, and highlighted UI elements.
@@ -31,15 +33,41 @@ Each run includes:
 - `logs/assertions.json` - assertions that passed.
 - `reviews/review.md` - product review notes and follow-up gaps.
 
-Use `npm run test:playwright -- --project=chromium` for repeatable automated evidence.
+Use `npm run test:playwright -- --project=chromium` for repeatable visible automated evidence. The default npm script runs headed with one worker so the browser window is observable.
+
+Use `npm run test:playwright:ui` when you want Playwright UI Mode with timeline, DOM snapshots, console, and network panels.
+
+Use `npm run test:playwright:debug` when you want the Playwright Inspector and step-by-step visible execution.
 
 Use `npm run cowork:admin` for a visible browser demo that stays open until you close it.
 
-Use `npm run cowork:admin:record` to run the live demo in non-persistent recording mode.
+Use `npm run cowork:admin:record` to run the live demo in non-persistent capture mode.
 
 `npm run demo:admin` and `npm run demo:admin:record` are compatibility aliases for the Cowork commands.
 
 Use `npm run evidence:clean` to preview generated evidence cleanup. Use `npm run evidence:clean:apply` to remove ignored generated evidence while preserving the tracked `.gitkeep` placeholders.
+
+## Playwright Reference Rules
+
+StormLead uses Playwright as real browser evidence, not as a production mock layer. The local config is `playwright.config.ts`:
+
+- Tests live in `tests/playwright/`.
+- Raw output goes to `testing/playwright-artifacts/`.
+- HTML report goes to `testing/playwright-report/`.
+- JSON report goes to `testing/logs/playwright-results.json`.
+- Browser execution is headed/visible by default with `headless: false`, `--headed`, and one worker in npm scripts.
+- `STORMLEAD_PLAYWRIGHT_SLOW_MO_MS` controls visible slow motion; default is `150` ms.
+- Screenshots, traces, and videos are enabled for the Chromium project.
+
+Use official Playwright docs for the test-runner mechanics, but apply StormLead's stricter production-proof rules:
+
+- Locators: prefer user-facing `getByRole`, `getByLabel`, and `getByText` locators; use `getByTestId` only for explicit test contracts. Avoid brittle CSS/XPath selectors unless there is no stable user-facing target. Reference: https://playwright.dev/docs/locators
+- Visible runs: Playwright defaults to headless, so StormLead overrides this with headed scripts/config. Use `--headed`, `--ui`, or `--debug` for browser-visible automation. References: https://playwright.dev/docs/running-tests and https://playwright.dev/docs/test-cli
+- UI/debug mode: UI Mode is preferred when an operator needs time-travel inspection; Inspector/debug mode opens a browser and inspector with step controls. References: https://playwright.dev/docs/test-ui-mode and https://playwright.dev/docs/debug
+- Traces: open a local trace with `npx playwright show-trace path/to/trace.zip`. Trace Viewer shows actions, DOM snapshots, console logs, and network requests for debugging. Reference: https://playwright.dev/docs/trace-viewer
+- Reports: `playwright.config.ts` writes line, HTML, and JSON reports. Open the latest HTML report with `npm run show:playwright-report` or `npx playwright show-report testing/playwright-report`. Reference: https://playwright.dev/docs/test-reporters
+- Network: Playwright can monitor, wait for, and route network traffic, but StormLead V1 proof must not use `page.route` or `context.route` to fake production API behavior. Use network events or `waitForResponse` for observation; reserve routing for explicit test-only negative cases. Reference: https://playwright.dev/docs/network
+- Screenshots/videos: keep generated browser artifacts local and ignored. If sharing proof, summarize it in tracked docs and link/copy only curated artifacts outside git unless there is an explicit review reason. References: https://playwright.dev/docs/screenshots and https://playwright.dev/docs/videos
 
 ## Artifact Hygiene
 

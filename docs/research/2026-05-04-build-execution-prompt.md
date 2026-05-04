@@ -60,7 +60,7 @@ When done with each task:
 
 **Checklist**
 - [ ] States include: `captured, enriched, qualified, auctioned, sold, unsold, nurtured`.
-- [ ] Illegal transitions are blocked with clear errors.
+- [ ] Invalid transitions are blocked with clear errors.
 - [ ] Unit tests cover full transition matrix.
 - [ ] Mypy + Ruff pass for new module.
 
@@ -146,7 +146,7 @@ When done with each task:
 
 ---
 
-### task 5 — litellm-only model access + policy guard
+### task 5 — litellm-only model access guard
 
 **Goal:** Prevent any direct provider calls from app services.
 
@@ -163,7 +163,7 @@ When done with each task:
 
 **Deliverables**
 - `libs/stormlead_core/stormlead_core/llm_client.py`
-- lint/test guard for policy enforcement.
+- lint/test guard for enforcement.
 
 ---
 
