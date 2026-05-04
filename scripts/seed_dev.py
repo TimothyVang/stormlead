@@ -9,14 +9,12 @@ usage: uv run python scripts/seed_dev.py
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-
 from stormlead_db import BuyerRow, LeadRow, StormRow, get_session
-
 
 # fixed uuids — re-running this script must not create duplicates
 STORM_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -31,7 +29,7 @@ SEED_PAGE_HASH = "0" * 64
 
 
 async def _seed() -> dict[str, int]:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     async with get_session() as s:
         await s.execute(
             pg_insert(StormRow)
@@ -58,15 +56,31 @@ async def _seed() -> dict[str, int]:
                 contact_phone_e164="+15125550199",
                 status="active",
                 webhook_url="http://host.docker.internal:9999/buyer-a",
-                webhook_secret="seedsecret-a",
+                webhook_secret="seedsecret-a",  # noqa: S106 - inert local seed secret
                 bid_per_lead_t1_t2=Decimal("50.00"),
                 bid_per_lead_t3=Decimal("200.00"),
                 bid_per_call=Decimal("100.00"),
                 filter_expression="lead.state == 'TX'",
                 daily_cap=100,
                 monthly_budget=Decimal("5000.00"),
+                services=["tree_removal"],
+                target_zips=["78701"],
+                deposit_balance=Decimal("500.00"),
             )
-            .on_conflict_do_nothing(index_elements=["id"])
+            .on_conflict_do_update(
+                index_elements=["id"],
+                set_={
+                    "status": "active",
+                    "webhook_url": "http://host.docker.internal:9999/buyer-a",
+                    "webhook_secret": "seedsecret-a",
+                    "filter_expression": "lead.state == 'TX'",
+                    "daily_cap": 100,
+                    "monthly_budget": Decimal("5000.00"),
+                    "services": ["tree_removal"],
+                    "target_zips": ["78701"],
+                    "deposit_balance": Decimal("500.00"),
+                },
+            )
         )
         await s.execute(
             pg_insert(BuyerRow)
@@ -78,15 +92,31 @@ async def _seed() -> dict[str, int]:
                 contact_phone_e164="+13055550199",
                 status="active",
                 webhook_url="http://host.docker.internal:9999/buyer-b",
-                webhook_secret="seedsecret-b",
+                webhook_secret="seedsecret-b",  # noqa: S106 - inert local seed secret
                 bid_per_lead_t1_t2=Decimal("55.00"),
                 bid_per_lead_t3=Decimal("220.00"),
                 bid_per_call=Decimal("100.00"),
                 filter_expression="lead.state == 'FL'",
                 daily_cap=100,
                 monthly_budget=Decimal("5000.00"),
+                services=["tree_removal"],
+                target_zips=["33101"],
+                deposit_balance=Decimal("500.00"),
             )
-            .on_conflict_do_nothing(index_elements=["id"])
+            .on_conflict_do_update(
+                index_elements=["id"],
+                set_={
+                    "status": "active",
+                    "webhook_url": "http://host.docker.internal:9999/buyer-b",
+                    "webhook_secret": "seedsecret-b",
+                    "filter_expression": "lead.state == 'FL'",
+                    "daily_cap": 100,
+                    "monthly_budget": Decimal("5000.00"),
+                    "services": ["tree_removal"],
+                    "target_zips": ["33101"],
+                    "deposit_balance": Decimal("500.00"),
+                },
+            )
         )
         await s.execute(
             pg_insert(LeadRow)

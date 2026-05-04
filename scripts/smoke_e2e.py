@@ -88,7 +88,7 @@ def _make_handler(name: str):
         except Exception:
             body = {}
         received[name].append({"headers": dict(request.headers), "body": body})
-        return web.json_response({"accepted": True, "bid_cents": 5000})
+        return web.json_response({"accept": True, "bid_cents": 5000})
 
     return handler
 

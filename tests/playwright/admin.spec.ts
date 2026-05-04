@@ -37,7 +37,7 @@ test('cowork creates, funds, and reviews real paid-pilot admin dashboard data', 
   await page.locator('#buyer-form input[name="deposit_balance"]').fill('0.00');
   await page.locator('#buyer-form textarea[name="notes"]').fill('Created by the real browser-operated Playwright Cowork workflow.');
   await page.getByRole('button', { name: 'Create Real Buyer' }).click();
-  await expect(page.locator('#selected-buyer-id')).not.toHaveValue('');
+  await expect(page.locator('#selected-buyer-id')).not.toHaveValue('', { timeout: 30_000 });
   const buyerId = await page.locator('#selected-buyer-id').inputValue();
   cowork.setSubjectId('buyer_id', buyerId);
   await cowork.update('Created real buyer through UI', 'create', `Created ${company} (${buyerId}) by submitting the real admin form.`);

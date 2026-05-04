@@ -694,7 +694,7 @@ async def run_auction(lead: Lead) -> PingPostResult:
 
     sem = asyncio.Semaphore(MAX_PARALLEL_PINGS)
 
-    async with httpx.AsyncClient(http2=True) as client:
+    async with httpx.AsyncClient() as client:
 
         async def bounded(b: Buyer) -> PingResponse:
             async with sem:

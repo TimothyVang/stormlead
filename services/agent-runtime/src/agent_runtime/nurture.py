@@ -30,7 +30,11 @@ async def nurture_lead(context: Context) -> dict[str, Any]:
             event_type="lead.nurtured",
             task_name="agent_runtime.nurture_lead",
             workflow_run_id=run_id,
-            payload={"source_event": source_event},
+            payload={
+                "source_event": source_event,
+                "external_contact_made": False,
+                "contact_channels": [],
+            },
         )
 
     emit_event("nurtured", lead_id=str(lead_id), service="agent-runtime")
@@ -38,4 +42,8 @@ async def nurture_lead(context: Context) -> dict[str, Any]:
     emit_metric(
         "unsold.recovery", lead_id=str(lead_id), service="agent-runtime", source=source_event
     )
-    return {"lead_id": str(lead_id), "status": LeadStatus.NURTURED.value}
+    return {
+        "lead_id": str(lead_id),
+        "status": LeadStatus.NURTURED.value,
+        "external_contact_made": False,
+    }

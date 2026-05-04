@@ -1620,6 +1620,12 @@ async def launch_readiness(
                 )
             )
 
+        local_simulation_checks = {
+            "synthetic_ping_post_routed_test_lead": int(delivered or 0) > 0,
+            "synthetic_return_review_credit_flow_tested": int(returned or 0) > 0
+            and int(approved_return_requests or 0) > 0,
+            "synthetic_campaign_source_attribution_visible": int(attributed_leads or 0) > 0,
+        }
         technical_checks = {
             "three_funded_buyers_in_scope": int(funded_buyers or 0) >= 3,
             "buyers_have_services_zips_caps_and_prices": int(configured_buyers or 0) >= 3,
@@ -1632,9 +1638,11 @@ async def launch_readiness(
         }
         commercial_approval = os.getenv("STORMLEAD_COMMERCIAL_LAUNCH_APPROVED") == "true"
         checks = {
+            **local_simulation_checks,
             **technical_checks,
             "commercial_launch_approval_present": commercial_approval,
         }
+        local_simulation_ready = all(local_simulation_checks.values())
         technical_ready = all(technical_checks.values())
         ready = technical_ready and commercial_approval
         return {
@@ -1648,8 +1656,12 @@ async def launch_readiness(
             if ready
             else "technical_local_ready"
             if technical_ready
+            else "local_simulation_ready"
+            if local_simulation_ready
             else "not_ready",
+            "local_simulation_ready": local_simulation_ready,
             "technical_local_ready": technical_ready,
+            "commercial_paid_launch_ready": ready,
             "ready_for_paid_launch": ready,
             "checks": checks,
             "metrics": {
