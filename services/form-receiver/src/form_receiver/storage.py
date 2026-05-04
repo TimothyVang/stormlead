@@ -33,13 +33,28 @@ async def upsert_lead(extracted: ExtractedConsent, *, ip: str) -> UUID:
     now = datetime.now(UTC)
 
     async with get_session() as s:
+        # additional dedup guard: same phone re-submitted within 24h
+        recent = (
+            await s.execute(
+                select(LeadRow.id, LeadRow.created_at)
+                .where(LeadRow.phone_e164 == extracted.phone_e164)
+                .order_by(LeadRow.created_at.desc())
+                .limit(1)
+            )
+        ).first()
+        if recent is not None:
+            age_s = (now - recent.created_at).total_seconds()
+            if age_s <= 24 * 60 * 60:
+                return recent.id
+
+        is_low_quality = extracted.quality_score < 0.6
         # try insert; on conflict (phone, hash), do nothing
         stmt = (
             pg_insert(LeadRow)
             .values(
                 id=new_id,
                 source="landing_form",
-                status="new",
+                status="rejected" if is_low_quality else "new",
                 name=extracted.name,
                 phone_e164=extracted.phone_e164,
                 email=extracted.email,
@@ -53,6 +68,12 @@ async def upsert_lead(extracted: ExtractedConsent, *, ip: str) -> UUID:
                 consent_at=now,
                 page_url=extracted.page_url,
                 page_html_hash=page_html_hash,
+                qualification_score=extracted.quality_score,
+                rejection_reason=(
+                    "quality_gate:" + ",".join(extracted.quality_reasons)
+                    if is_low_quality
+                    else None
+                ),
             )
             .on_conflict_do_nothing(constraint="uq_lead_phone_hash")
             .returning(LeadRow.id)
@@ -99,7 +120,15 @@ async def record_audit(
                 consent_text=extracted.consent_text,
                 page_html_sha256=extracted.page_html_sha256,
                 dwell_ms=extracted.dwell_ms,
-                raw_payload=parsed_payload,
+                raw_payload={
+                    **parsed_payload,
+                    "_stormlead": {
+                        "consent_proof_sha256": extracted.consent_proof_sha256,
+                        "consent_text_version": extracted.consent_text_version,
+                        "quality_score": extracted.quality_score,
+                        "quality_reasons": extracted.quality_reasons,
+                    },
+                },
             )
             .on_conflict_do_nothing(index_elements=["webhook_id"])
             .returning(ConsentAudit.webhook_id)

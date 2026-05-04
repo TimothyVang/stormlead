@@ -150,3 +150,40 @@ def test_extract_invalid_email_dropped_silently() -> None:
     )
     out = extract_consent(e)
     assert out.email is None  # phone is the primary identifier
+
+
+def test_extract_computes_tamper_evident_consent_proof() -> None:
+    e = _envelope(
+        {
+            "name": "Test User",
+            "phone": "+15125550123",
+            "address_line1": "1 Main St",
+            "city": "Austin",
+            "state": "TX",
+            "zip": "78701",
+            "consent_text": "I agree to be contacted for tree removal updates.",
+            "page_html_sha256": "a" * 64,
+        }
+    )
+    out = extract_consent(e)
+    assert len(out.consent_proof_sha256) == 64
+    assert out.consent_text_version == "v1"
+
+
+def test_extract_quality_score_penalizes_short_consent_and_low_dwell() -> None:
+    e = _envelope(
+        {
+            "name": "T",
+            "phone": "+15125550123",
+            "address_line1": "1",
+            "city": "A",
+            "state": "TX",
+            "zip": "78701",
+            "consent_text": "x",
+            "dwell_ms": 500,
+        }
+    )
+    out = extract_consent(e)
+    assert out.quality_score < 0.6
+    assert "consent_text_too_short" in out.quality_reasons
+    assert "low_dwell_time" in out.quality_reasons

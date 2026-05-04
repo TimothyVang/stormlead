@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from hatchet_sdk import Hatchet
-from sqlalchemy import text as sa_text
+from sqlalchemy import select, text as sa_text
 from stormlead_core import configure_logging, get_logger
 from stormlead_db import get_session
 
@@ -139,6 +139,11 @@ async def formbricks_webhook(request: Request) -> dict[str, str]:
         raw_payload=raw_body,
     )
     if was_new:
+        async with get_session() as s:
+            lead_status = await s.scalar(select(LeadRow.status).where(LeadRow.id == lead_id))
+        if lead_status == "rejected":
+            log.info("lead.quality_rejected", lead_id=str(lead_id))
+            return {"status": "rejected", "lead_id": str(lead_id)}
         try:
             if _hatchet is None:
                 raise RuntimeError("hatchet client not initialized")

@@ -59,8 +59,11 @@ just migrate      # runs alembic migrations
 
 # 3. dev loop
 just logs ping-post
+just logs form-receiver
 just test
 just smoke      # e2e workflow: ingest -> auction -> buyer delivery
+# inspect quality-gated / rejected leads
+just psql       # SELECT id,status,qualification_score,rejection_reason FROM leads ORDER BY created_at DESC LIMIT 20;
 ```
 
 ## production (hetzner)

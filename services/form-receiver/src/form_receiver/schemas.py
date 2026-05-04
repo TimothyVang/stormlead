@@ -14,6 +14,8 @@ defensible consent capture.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
 import phonenumbers
@@ -80,6 +82,12 @@ class ExtractedConsent(BaseModel):
     # tamper-evidence
     page_html_sha256: str | None = None
     dwell_ms: int | None = None
+    consent_text_version: str = "v1"
+    consent_proof_sha256: str
+
+    # quality gate
+    quality_score: float
+    quality_reasons: list[str] = Field(default_factory=list)
 
 
 class ConsentExtractionError(ValueError):
@@ -145,6 +153,25 @@ def extract_consent(envelope: FormbricksEnvelope) -> ExtractedConsent:
         if ttc_total > 0:
             dwell_ms = ttc_total
 
+    quality_score, quality_reasons = _quality_score(
+        phone=phone, email=email, consent_text=consent_text, dwell_ms=dwell_ms
+    )
+    proof_payload = {
+        "response_id": envelope.data.id,
+        "consent_text": consent_text,
+        "name": name,
+        "phone_e164": phone,
+        "address_line1": address_line1,
+        "city": city,
+        "state": state.upper()[:2],
+        "zip": zip_,
+        "page_url": meta.url,
+        "user_agent": meta.userAgent,
+        "page_html_sha256": page_html_sha256,
+    }
+    consent_proof_sha256 = hashlib.sha256(
+        json.dumps(proof_payload, sort_keys=True).encode()
+    ).hexdigest()
     return ExtractedConsent(
         formbricks_response_id=envelope.data.id,
         page_url=meta.url,
@@ -159,4 +186,31 @@ def extract_consent(envelope: FormbricksEnvelope) -> ExtractedConsent:
         zip=zip_,
         page_html_sha256=page_html_sha256,
         dwell_ms=dwell_ms,
+        consent_proof_sha256=consent_proof_sha256,
+        quality_score=quality_score,
+        quality_reasons=quality_reasons,
     )
+
+
+def _quality_score(
+    *,
+    phone: str,
+    email: str | None,
+    consent_text: str,
+    dwell_ms: int | None,
+) -> tuple[float, list[str]]:
+    score = 1.0
+    reasons: list[str] = []
+    if len(consent_text.strip()) < 20:
+        score -= 0.35
+        reasons.append("consent_text_too_short")
+    if dwell_ms is not None and dwell_ms < 1200:
+        score -= 0.25
+        reasons.append("low_dwell_time")
+    if not email:
+        score -= 0.1
+        reasons.append("missing_or_invalid_email")
+    if not phone.startswith("+1"):
+        score -= 0.1
+        reasons.append("non_us_phone")
+    return max(0.0, round(score, 3)), reasons
