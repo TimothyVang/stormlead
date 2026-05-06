@@ -13,9 +13,9 @@ import { z } from 'zod';
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const runsDir = path.join(repoRoot, 'testing', 'runs');
-const adminBaseUrl = process.env.STORMLEAD_ADMIN_URL || 'http://127.0.0.1:8003';
-const formReceiverBaseUrl = process.env.STORMLEAD_FORM_RECEIVER_URL || 'http://127.0.0.1:8002';
-const litellmBaseUrl = process.env.STORMLEAD_LITELLM_URL || 'http://127.0.0.1:4000';
+const adminBaseUrl = assertLoopbackBaseUrl('STORMLEAD_ADMIN_URL', process.env.STORMLEAD_ADMIN_URL || 'http://127.0.0.1:8003');
+const formReceiverBaseUrl = assertLoopbackBaseUrl('STORMLEAD_FORM_RECEIVER_URL', process.env.STORMLEAD_FORM_RECEIVER_URL || 'http://127.0.0.1:8002');
+const litellmBaseUrl = assertLoopbackBaseUrl('STORMLEAD_LITELLM_URL', process.env.STORMLEAD_LITELLM_URL || 'http://127.0.0.1:4000');
 
 const server = new McpServer({
   name: 'stormlead-local-ops',
@@ -32,6 +32,19 @@ function textResult(text) {
   return {
     content: [{ type: 'text', text }],
   };
+}
+
+function assertLoopbackBaseUrl(name, value) {
+  const url = new URL(value);
+  const hostname = url.hostname.toLowerCase();
+  const isLoopback = hostname === 'localhost'
+    || hostname === '::1'
+    || hostname === '[::1]'
+    || hostname.startsWith('127.');
+  if (!isLoopback) {
+    throw new Error(`${name} must use a loopback hostname for local-only MCP access: ${value}`);
+  }
+  return url.toString();
 }
 
 function relativePath(value) {
@@ -164,6 +177,43 @@ async function runLocalCommand({ script, args = [], timeoutSeconds }) {
     const result = await execFileAsync(
       'uv',
       ['run', 'python', script, ...args],
+      {
+        cwd: repoRoot,
+        timeout: timeoutMs,
+        maxBuffer: 10 * 1024 * 1024,
+        windowsHide: true,
+      },
+    );
+    return {
+      ok: true,
+      script,
+      started_at: startedAt.toISOString(),
+      finished_at: new Date().toISOString(),
+      stdout: trimOutput(result.stdout),
+      stderr: trimOutput(result.stderr),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      script,
+      started_at: startedAt.toISOString(),
+      finished_at: new Date().toISOString(),
+      exit_code: error?.code ?? null,
+      signal: error?.signal ?? null,
+      stdout: trimOutput(error?.stdout),
+      stderr: trimOutput(error?.stderr),
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+async function runNodeLocalCommand({ script, args = [], timeoutSeconds }) {
+  const timeoutMs = Math.max(5, Math.min(timeoutSeconds || 60, 180)) * 1000;
+  const startedAt = new Date();
+  try {
+    const result = await execFileAsync(
+      process.execPath,
+      [script, ...args],
       {
         cwd: repoRoot,
         timeout: timeoutMs,
@@ -352,6 +402,97 @@ server.registerTool(
       return textResult('Refusing to run. Call again with confirm_synthetic_local=true to run scripts/smoke_e2e.py against local/dev services.');
     }
     return jsonResult(await runLocalCommand({ script: 'scripts/smoke_e2e.py', timeoutSeconds: timeout_seconds }));
+  },
+);
+
+server.registerTool(
+  'run_chrome_observer_functional_test',
+  {
+    title: 'Run Chrome Observer Functional Test',
+    description: 'Run the functional Chrome observer test through local loopback pages and verify both CLI and MCP observer paths capture browser evidence. Requires explicit confirm_synthetic_local=true.',
+    inputSchema: {
+      confirm_synthetic_local: z.boolean().default(false),
+      timeout_seconds: z.number().int().min(30).max(180).default(120),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  },
+  async ({ confirm_synthetic_local, timeout_seconds }) => {
+    if (!confirm_synthetic_local) {
+      return textResult('Refusing to run. Call again with confirm_synthetic_local=true to run the local Chrome observer functional test and write testing/runs browser evidence.');
+    }
+
+    const result = await runNodeLocalCommand({
+      script: 'scripts/test_chrome_observer.mjs',
+      timeoutSeconds: timeout_seconds,
+    });
+    try {
+      return jsonResult({ local_only: true, result: JSON.parse(result.stdout), command: { ok: result.ok, stderr: result.stderr } });
+    } catch {
+      return jsonResult({ local_only: true, command: result });
+    }
+  },
+);
+
+server.registerTool(
+  'observe_chrome_page',
+  {
+    title: 'Observe Chrome Page',
+    description: 'Launch a local-only Chrome/Chromium page, stream browser console/network/page logs to testing/runs, and return an evidence summary. Requires explicit confirm_synthetic_local=true.',
+    inputSchema: {
+      confirm_synthetic_local: z.boolean().default(false),
+      url: z.string().url().optional(),
+      duration_seconds: z.number().int().min(0).max(45).default(10),
+      headless: z.boolean().default(true),
+      channel: z.string().min(1).max(40).optional(),
+      run_id: z.string().min(1).max(120).optional(),
+      actions: z.array(z.object({
+        type: z.enum([
+          'click',
+          'fill',
+          'press',
+          'wait',
+          'wait_for_selector',
+          'wait_for_response',
+          'screenshot',
+        ]),
+        selector: z.string().min(1).optional(),
+        value: z.union([z.string(), z.number(), z.boolean()]).optional(),
+        key: z.string().min(1).optional(),
+        ms: z.number().int().min(0).max(60_000).optional(),
+        state: z.enum(['attached', 'detached', 'visible', 'hidden']).optional(),
+        url_includes: z.string().optional(),
+        status: z.number().int().min(100).max(599).optional(),
+        timeout_ms: z.number().int().min(1).max(120_000).optional(),
+        name: z.string().min(1).max(80).optional(),
+        full_page: z.boolean().optional(),
+      })).default([]),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  },
+  async ({ confirm_synthetic_local, url, duration_seconds, headless, channel, run_id, actions }) => {
+    if (!confirm_synthetic_local) {
+      return textResult('Refusing to run. Call again with confirm_synthetic_local=true to launch Chrome against local/dev services and write testing/runs browser evidence.');
+    }
+
+    const commandArgs = [
+      '--duration-seconds', String(duration_seconds),
+      '--headless', String(headless),
+    ];
+    if (url) commandArgs.push('--url', url);
+    if (channel) commandArgs.push('--channel', channel);
+    if (run_id) commandArgs.push('--run-id', run_id);
+    if (actions?.length) commandArgs.push('--actions-json', JSON.stringify(actions));
+
+    const result = await runNodeLocalCommand({
+      script: 'scripts/chrome_observe.mjs',
+      args: commandArgs,
+      timeoutSeconds: Math.max(20, Math.min((duration_seconds || 0) + 35, 55)),
+    });
+    try {
+      return jsonResult({ local_only: true, result: JSON.parse(result.stdout), command: { ok: result.ok, stderr: result.stderr } });
+    } catch {
+      return jsonResult({ local_only: true, command: result });
+    }
   },
 );
 

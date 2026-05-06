@@ -26,6 +26,8 @@
     "test:playwright:ui": "playwright test --ui",
     "test:playwright:debug": "playwright test --debug",
     "show:playwright-report": "playwright show-report testing/playwright-report",
+    "observe:chrome": "node scripts/chrome_observe.mjs",
+    "test:chrome-observer": "node scripts/test_chrome_observer.mjs",
     "cowork:admin": "node scripts/live_admin_cowork.mjs",
     "cowork:admin:record": "cross-env STORMLEAD_KEEP_BROWSER_OPEN=0 node scripts/live_admin_cowork.mjs",
     "demo:admin": "npm run cowork:admin",
