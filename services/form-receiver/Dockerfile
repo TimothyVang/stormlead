@@ -11,13 +11,13 @@ COPY libs/stormlead_db/pyproject.toml libs/stormlead_db/
 COPY services/form-receiver/pyproject.toml services/form-receiver/
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-install-workspace --package form-receiver
+    uv sync --no-dev --frozen --no-install-workspace --package form-receiver
 
 COPY libs/ libs/
 COPY services/form-receiver/ services/form-receiver/
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --package form-receiver
+    uv sync --no-dev --frozen --package form-receiver
 
 ENV PATH="/app/.venv/bin:$PATH"
 CMD ["uvicorn", "form_receiver.api:app", "--host", "0.0.0.0", "--port", "8000"]

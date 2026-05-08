@@ -1,0 +1,70 @@
+# Local environments and dependency caches
+.venv/
+venv/
+.uv/
+node_modules/
+.npm/
+.pnpm-store/
+.yarn/
+
+# VCS and agent-local state
+.git/
+.github/
+.codex/
+.opencode/
+skills/
+
+# Python and test caches
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Generated evidence and local artifacts
+testing/
+test-results/
+playwright-report/
+backups/
+logs/
+data/
+volumes/
+dist/
+build/
+out/
+.next/
+
+# Local secrets and databases
+.env
+.env.*
+*.sqlite3
+*.db
+*.log
+*.tfstate*
+.terraform/
+
+# Repo-only docs and local tooling not needed by runtime images
+docs/
+tests/
+**/tests/
+README.md
+CLAUDE.md
+AGENTS.md
+tools/
+scripts/
+package.json
+package-lock.json
+playwright.config.ts
+opencode.json
+justfile
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/
+*:Zone.Identifier

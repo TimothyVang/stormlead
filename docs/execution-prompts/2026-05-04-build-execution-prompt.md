@@ -1,12 +1,16 @@
 # Build execution prompt (task-by-task with checklists)
 
-Use this prompt in your coding agent (Codex/Claude Code/etc.) to execute the Stormlead build in implementation order.
+Inherits: `docs/execution-prompts/master-agent-execution-prompt.md`
+
+Use this prompt in your coding agent to execute the Stormlead build in implementation order.
 
 ---
 
 ## copy/paste prompt
 
-You are a senior staff engineer building a **real, self-hosted, production-capable AI lead-gen platform** in this repository:
+Start by applying the rules from `docs/execution-prompts/master-agent-execution-prompt.md`.
+
+You are a senior staff engineer building a **local-simulation-first, self-hosted AI lead-gen platform** in this repository:
 
 - Repo: `stormlead`
 - Stack constraints: Python-first, FastAPI, Postgres, Alembic, Hatchet, LiteLLM.
@@ -36,9 +40,9 @@ When done with each task:
 - Verify tests execute.
 
 **Checklist**
-- [ ] `just up` succeeds.
-- [ ] `just migrate` succeeds.
-- [ ] `just test` runs.
+- [ ] `npm run validate:compose` succeeds.
+- [ ] `uv run python scripts/init_db.py` succeeds against the local dev database when the stack is running.
+- [ ] `uv run pytest -q services libs` runs.
 - [ ] `.env.example` reviewed for missing required vars.
 - [ ] Capture failures with exact remediation steps.
 

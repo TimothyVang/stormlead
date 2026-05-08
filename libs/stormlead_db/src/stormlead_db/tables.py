@@ -9,7 +9,7 @@ design choices:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -19,6 +19,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -86,6 +87,7 @@ class BuyerRow(Base):
     contact_email: Mapped[str] = mapped_column(String(255))
     contact_phone_e164: Mapped[str] = mapped_column(String(20))
     status: Mapped[str] = mapped_column(String(32), default="pending_verification", index=True)
+    api_key: Mapped[str | None] = mapped_column(String(128), unique=True, nullable=True, index=True)
 
     license_number: Mapped[str | None] = mapped_column(String(128), nullable=True)
     license_state: Mapped[str | None] = mapped_column(String(2), nullable=True)
@@ -108,10 +110,15 @@ class BuyerRow(Base):
     next_follow_up_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    follow_up_date: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     services: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    services_offered: Mapped[list[str]] = mapped_column(JSONB, default=list)
     target_zips: Mapped[list[str]] = mapped_column(JSONB, default=list)
     exclusive_zips: Mapped[list[str]] = mapped_column(JSONB, default=list)
     low_balance_threshold: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal(0))
+    low_balance_threshold_cents: Mapped[int] = mapped_column(BigInteger, default=10000)
 
     deposit_balance: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal(0))
     lifetime_spend: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal(0))
@@ -348,6 +355,68 @@ class BillingEvent(Base):
     metadata_json: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), index=True
+    )
+
+
+class CallEventRow(Base):
+    """Call tracking webhook event matched to a lead when possible."""
+
+    __tablename__ = "call_events"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    call_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    lead_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("leads.id"), nullable=True, index=True
+    )
+    phone_e164: Mapped[str] = mapped_column(String(20), index=True)
+    duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    outcome: Mapped[str] = mapped_column(String(32), index=True)
+    tracked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    raw_payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), index=True
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "outcome IN ('answered', 'voicemail', 'no_answer', 'busy')",
+            name="ck_call_events_outcome",
+        ),
+        Index("ix_call_events_lead_tracked_at", "lead_id", text("tracked_at DESC")),
+    )
+
+
+# ============================================================================
+# self-evolution proposals
+# ============================================================================
+
+
+class SkillProposalRow(Base):
+    """Pending Hermes skill/prompt proposal requiring operator review."""
+
+    __tablename__ = "skill_proposals"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    proposal_date: Mapped[date] = mapped_column(Date, index=True)
+    proposal_type: Mapped[str] = mapped_column(String(32), index=True)
+    skill_name: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    title: Mapped[str] = mapped_column(String(255))
+    rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
+    proposal_json: Mapped[dict] = mapped_column(JSONB, default=dict)
+    status: Mapped[str] = mapped_column(String(32), default="pending_review", index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), index=True
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "proposal_type IN ('prompt_update', 'new_skill', 'retire_skill')",
+            name="ck_skill_proposals_type",
+        ),
+        CheckConstraint(
+            "status IN ('pending_review', 'approved', 'rejected', 'applied')",
+            name="ck_skill_proposals_status",
+        ),
     )
 
 

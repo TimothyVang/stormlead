@@ -2,6 +2,8 @@ import { expect, type Page, type TestInfo } from '@playwright/test';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { BrowserLogObserver, type BrowserObserverSummary } from './browser-observer';
+
 type WorkflowStep = { key: string; label: string };
 
 export type CoworkWorkflow = {
@@ -29,6 +31,7 @@ export class CoworkRun {
   private readonly assertions: Record<string, unknown>[] = [];
   private readonly observations: string[] = [];
   private readonly subjectIds: Record<string, string> = {};
+  private readonly browserObserver: BrowserLogObserver;
 
   constructor(
     private readonly page: Page,
@@ -45,6 +48,11 @@ export class CoworkRun {
     mkdirSync(this.screenshotsDir, { recursive: true });
     mkdirSync(this.logsDir, { recursive: true });
     mkdirSync(this.reviewsDir, { recursive: true });
+    this.browserObserver = new BrowserLogObserver(page, {
+      runId: this.runId,
+      logsDir: this.logsDir,
+      testTitle: testInfo.title,
+    });
     this.note(`Playwright test: ${testInfo.title}`);
     this.note(`Run ID: ${this.runId}`);
     this.note(`Run folder: ${this.runDir}`);
@@ -253,6 +261,7 @@ export class CoworkRun {
 
   async finish(): Promise<void> {
     await this.update('Workflow verified; evidence saved', 'evidence', `Run artifacts written under ${this.runDir}.`);
+    const browserSummary = this.browserObserver.finish();
     writeFileSync(join(this.logsDir, 'cowork-log.md'), this.logLines.join('\n') + '\n');
     writeFileSync(join(this.logsDir, 'assertions.json'), JSON.stringify(this.assertions, null, 2));
     const review = [
@@ -264,7 +273,12 @@ export class CoworkRun {
       '- Submitted real buyer create, activation, and deposit forms through the browser UI.',
       '- Used real StormLead HTTP API calls and database-backed dashboard responses.',
       '- Moved a visible Cowork cursor through business-critical UI areas.',
-      '- Captured screenshots, Playwright video, trace, logs, assertions, and review notes.',
+      '- Captured screenshots, Playwright video, trace, logs, assertions, review notes, and real-time browser events.',
+      '',
+      '## Browser Evidence',
+      `- Event log: \`${browserSummary.artifacts.browser_events_jsonl}\``,
+      `- Summary: \`${browserSummary.artifacts.browser_summary_json}\``,
+      `- Browser errors captured: ${browserSummary.error_count}`,
       '',
       '## Observations',
       ...this.observations.map((item) => `- ${item}`),
@@ -276,18 +290,20 @@ export class CoworkRun {
       '',
     ].join('\n');
     writeFileSync(join(this.reviewsDir, 'review.md'), review);
-    this.writeEvidenceManifest();
+    this.writeEvidenceManifest(browserSummary);
     this.note(`Review written: ${join(this.reviewsDir, 'review.md')}`);
     this.note(`Evidence manifest written: ${this.evidencePath}`);
   }
 
-  private writeEvidenceManifest(): void {
+  private writeEvidenceManifest(browserSummary: BrowserObserverSummary): void {
     const artifacts = {
       plan: join(this.runDir, 'plan.md'),
       log: join(this.logsDir, 'cowork-log.md'),
       assertions: join(this.logsDir, 'assertions.json'),
       review: join(this.reviewsDir, 'review.md'),
       screenshots_dir: this.screenshotsDir,
+      browser_events_jsonl: browserSummary.artifacts.browser_events_jsonl,
+      browser_summary_json: browserSummary.artifacts.browser_summary_json,
     };
     const manifest = {
       schema_version: 1,
@@ -303,6 +319,7 @@ export class CoworkRun {
       subject_ids: this.subjectIds,
       lead_id: this.subjectIds.lead_id ?? null,
       artifacts,
+      browser_observer: browserSummary,
       observations: this.observations,
       assertions: this.assertions,
     };

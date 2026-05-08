@@ -26,6 +26,10 @@ libs/
   stormlead_core/           shared pydantic models, cel evaluator wrapper
   stormlead_db/             sqlalchemy + alembic migrations
 
+apps/
+  landing/                  local/demo landing page + synthetic lead submit gate
+  buyer-portal/             buyer wallet, delivery report, and return review UI
+
 infra/
   compose/dev/              docker-compose for wsl2 (12 services post-cuts)
   compose/prod/             (placeholder) docker-compose for hetzner
@@ -38,30 +42,158 @@ docs/
   research/                 stack audit + integration risk register (informed the choices)
 
 skills/                     (placeholder) hermes-style agent skills
-scripts/                    (placeholder) one-shot ops
+scripts/                    smoke, simulation, replay, browser evidence, and ops checks
 .github/workflows/          (placeholder) ci/cd
 ```
 
-unimplemented yet (will return as they ship): `apps/landing`, `apps/buyer-portal`, `services/voice-bridge`.
+unimplemented yet (will return as they ship): `services/voice-bridge`.
 
-## quickstart (wsl2)
+## visual map
+
+### system architecture
+
+```mermaid
+flowchart LR
+  subgraph Sources["storm and lead sources"]
+    Storms["NWS / FEMA / Tropycal"]
+    Forms["Formbricks webhook<br/>synthetic local leads"]
+  end
+
+  subgraph Services["python services"]
+    Watcher["storm-watcher"]
+    Receiver["form-receiver"]
+    Enrich["enrich-worker"]
+    Agent["agent-runtime<br/>LiteLLM routed"]
+    PingPost["ping-post<br/>auction + admin"]
+  end
+
+  subgraph Control["control and data plane"]
+    Hatchet["Hatchet workflows"]
+    Postgres["Postgres<br/>PostGIS + Timescale + pgvector"]
+    LiteLLM["LiteLLM proxy"]
+  end
+
+  subgraph Proof["local proof surfaces"]
+    Admin["/admin dashboard"]
+    Playwright["headed Playwright / Cowork"]
+    Evidence["ignored testing/runs evidence"]
+  end
+
+  Storms --> Watcher
+  Forms --> Receiver
+  Receiver --> Hatchet
+  Watcher --> Hatchet
+  Hatchet --> Enrich
+  Hatchet --> Agent
+  Hatchet --> PingPost
+  Agent --> LiteLLM
+  Enrich --> Postgres
+  Agent --> Postgres
+  PingPost --> Postgres
+  PingPost --> Admin
+  Admin --> Playwright
+  Playwright --> Evidence
+```
+
+### lead lifecycle
+
+```mermaid
+flowchart TD
+  Captured["lead captured<br/>signed webhook"] --> Enriched["lead enriched"]
+  Enriched --> Qualified["agent qualified"]
+  Enriched --> Rejected["rejected low quality"]
+  Qualified --> Auction["ping-post auction"]
+  Auction --> Sold["sold to local buyer listener"]
+  Auction --> Unsold["unsold no buyer"]
+  Sold --> ReturnReview["return request + admin review"]
+  ReturnReview --> Credited["approved credit flow"]
+  Unsold --> Nurture["no-contact local nurture proof"]
+  Rejected --> Nurture
+  Nurture --> Evidence["audit timeline + evidence manifest"]
+  Credited --> Evidence
+```
+
+### local agent and tool routing
+
+```mermaid
+flowchart LR
+  subgraph Agents["coding agents"]
+    OpenCode["OpenCode"]
+    Codex["Codex CLI / IDE"]
+  end
+
+  subgraph Config["repo config"]
+    AgentGuide["AGENTS.md"]
+    OpenCodeConfig["opencode.json"]
+    CodexConfig[".codex/config.toml"]
+  end
+
+  subgraph MCP["MCP servers"]
+    StormleadMcp["StormLead Local Ops MCP"]
+    DockerMcp["Docker MCP Gateway"]
+    KubernetesMcp["Kubernetes MCP Gateway"]
+  end
+
+  subgraph LocalOnly["local-only targets"]
+    AdminApi["admin APIs"]
+    Scripts["smoke + V1 simulation scripts"]
+    Artifacts["testing/runs artifacts"]
+    Docker["local Docker Compose"]
+  end
+
+  OpenCode --> AgentGuide
+  Codex --> AgentGuide
+  OpenCode --> OpenCodeConfig
+  Codex --> CodexConfig
+  OpenCodeConfig --> StormleadMcp
+  OpenCodeConfig --> DockerMcp
+  OpenCodeConfig --> KubernetesMcp
+  CodexConfig --> StormleadMcp
+  CodexConfig --> DockerMcp
+  CodexConfig --> KubernetesMcp
+  StormleadMcp --> AdminApi
+  StormleadMcp --> Scripts
+  StormleadMcp --> Artifacts
+  DockerMcp --> Docker
+```
+
+## quickstart (windows local)
+
+Prerequisites: Docker Desktop running, Node.js/npm, Python 3.12+, and `uv` on PATH.
+
+```powershell
+npm run setup:local
+npm run verify:local
+```
+
+`setup:local` installs Node and Python dependencies, creates `.env` from `.env.example` if needed, starts the local Docker Compose pipeline stack, runs database initialization/migrations, seeds synthetic demo data, and runs the local readiness doctor.
+
+After setup:
+
+```text
+Admin:        http://127.0.0.1:8003/admin
+Landing:      http://127.0.0.1:8005
+Buyer Portal: http://127.0.0.1:8004
+```
+
+Useful local commands:
+
+```powershell
+npm run start:local      # start the local pipeline stack again
+npm run verify:local     # readiness doctor + synthetic smoke
+npm run simulate:v1      # broader synthetic V1 scenario simulation
+npm run doctor           # readiness status and next safe command
+npm run reset:demo       # re-seed fixed local demo buyers/leads
+```
+
+## quickstart (wsl2 / just optional)
 
 ```bash
-# 1. install uv + just (one time)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-cargo install just
-
-# 2. clone, env, up
 cp .env.example .env
-just up           # brings up the dev stack
-just migrate      # runs alembic migrations
-just seed        # local dev seed data
-just smoke       # local ingest -> auction -> delivery -> return-review smoke
-
-# 3. dev loop
-just logs ping-post
-just test
-just smoke      # e2e workflow: ingest -> auction -> buyer delivery
+just up-pipeline
+just migrate
+just seed
+just smoke
 ```
 
 ## production (hetzner)
@@ -74,8 +206,12 @@ prod compose + deploy script are placeholders (`infra/compose/prod/`, `.github/w
 - `docs/research/2026-05-architectural-fit.md` — architecture decisions and why v1 uses postgres, hatchet, fastapi, and hetzner us regions.
 - `docs/research/visual-agentic-workflow-runbook.md` — admin workflow timeline, review actions, KPI semantics, and Cowork evidence manifests.
 - `docs/research/v1-paid-pilot-runbook.md` — local technical V1 controls, scoped readiness, and evidence commands.
-- `testing/README.md` — visible Playwright/Cowork evidence rules, headed automation commands, artifact hygiene, and official Playwright references.
+- `testing/README.md` — visible Playwright/Cowork evidence rules, the MCP/Puppeteer self-learning loop, artifact hygiene, and official browser automation references.
 - `docs/research/2026-05-stack-improvements.md` — active technical risk register and implementation corrections.
+- `tools/TOOLS.md` — local-first tool routing, MCP safety rules, and validation commands.
+- `tools/mcp/README.md` — custom StormLead Local Ops MCP tools and safety model.
+- `.codex/README.md` — Codex CLI scripts and project-scoped MCP setup using the repo's Docker MCP profiles.
+- `AGENTS.md` — repo-local operating guide for coding agents.
 - `docs/research/2026-05-forkable-stack.md` and `docs/research/2026-05-stack-audit.md` — preserved source research; use the newer docs when they conflict.
 
 ## known traps (read these)

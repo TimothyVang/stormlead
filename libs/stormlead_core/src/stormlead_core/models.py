@@ -7,7 +7,7 @@ no service should redefine these.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any
@@ -168,8 +168,8 @@ class Lead(BaseModel):
     hold_for_review: bool = False
     blocked_for_fraud: bool = False
 
-    created_at: datetime = Field(default_factory=lambda: datetime.utcnow())
-    updated_at: datetime = Field(default_factory=lambda: datetime.utcnow())
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     @field_validator("phone_e164")
     @classmethod
@@ -228,5 +228,5 @@ class Buyer(BaseModel):
     deposit_balance: Decimal = Decimal(0)
     lifetime_spend: Decimal = Decimal(0)
 
-    created_at: datetime = Field(default_factory=lambda: datetime.utcnow())
-    updated_at: datetime = Field(default_factory=lambda: datetime.utcnow())
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

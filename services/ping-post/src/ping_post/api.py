@@ -14,16 +14,19 @@ hatchet workflow:
 from __future__ import annotations
 
 import asyncio
+import hmac
+import ipaddress
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from dataclasses import asdict
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from hatchet_sdk import Context, Hatchet
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import Integer, and_, func, select, text
@@ -38,6 +41,7 @@ from stormlead_core import (
 from stormlead_db import (
     BillingEvent,
     BuyerRow,
+    CallEventRow,
     LeadRow,
     LeadStateTransition,
     PingAttempt,
@@ -52,7 +56,11 @@ from stormlead_db import (
     summarize_transition_payload,
 )
 
+from ping_post.attribution import get_campaign_roi, get_roi_by_zip
 from ping_post.auction import run_auction
+from ping_post.buyer_crm import check_exclusive_zip_conflict
+from ping_post.guardrails import evaluate_buyer_guardrails
+from ping_post.mailer import export_mailer_csv
 
 configure_logging()
 log = get_logger(__name__)
@@ -222,7 +230,7 @@ class LeadReviewRequest(BaseModel):
         return action
 
 
-hatchet = Hatchet(debug=False)
+hatchet = Hatchet()
 _supports_legacy_hatchet_worker = hasattr(hatchet, "step")
 
 
@@ -271,21 +279,36 @@ if _supports_legacy_hatchet_worker:
     class PingPostWorkflow:
         """Hatchet SDK v0.x workflow wrapper."""
 
-        @hatchet.step(timeout="30s", retries=3)
+        @hatchet.step(timeout=timedelta(seconds=30), retries=3)
         async def auction(self, context: Context) -> dict[str, Any]:
             return await _auction_step(context)
+
+    @hatchet.workflow(name="GuardrailEvaluation", on_crons=["0 6 * * *"])
+    class GuardrailEvaluation:
+        @hatchet.step(timeout=timedelta(seconds=300), retries=1)
+        async def evaluate(self, context: Context) -> dict[str, Any]:
+            return {"actions": await evaluate_buyer_guardrails()}
 
 else:
 
     @hatchet.task(
         name="ping-post-auction",
         on_events=["lead.qualified"],
-        execution_timeout="30s",
+        execution_timeout=timedelta(seconds=30),
         retries=3,
     )
     async def ping_post_auction_task(task_input: Any, context: Context) -> dict[str, Any]:
         adapted = _ContextAdapter(_task_payload(task_input, context))
         return await _auction_step(cast(Context, adapted))
+
+    @hatchet.task(
+        name="GuardrailEvaluation",
+        on_crons=["0 6 * * *"],
+        execution_timeout=timedelta(seconds=300),
+        retries=1,
+    )
+    async def guardrail_evaluation_task(task_input: Any, context: Context) -> dict[str, Any]:
+        return {"actions": await evaluate_buyer_guardrails()}
 
 
 def _row_to_lead(row: LeadRow) -> Lead:
@@ -342,11 +365,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if _supports_legacy_hatchet_worker:
         worker = hatchet.worker("ping-post-worker", max_runs=10)
         worker.register_workflow(PingPostWorkflow())
+        worker.register_workflow(GuardrailEvaluation())
     else:
         worker = hatchet.worker(
             "ping-post-worker",
             slots=10,
-            workflows=[ping_post_auction_task],
+            workflows=[ping_post_auction_task, guardrail_evaluation_task],
         )
     async_start = getattr(worker, "async_start", None)
     if callable(async_start):
@@ -381,6 +405,85 @@ def _start_hatchet_worker_sync(worker: Any) -> None:
 app = FastAPI(title="stormlead ping-post", lifespan=lifespan)
 
 
+def _truthy_env(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _request_ip(request: Request) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    host = request.client.host if request.client else ""
+    try:
+        return ipaddress.ip_address(host)
+    except ValueError:
+        return None
+
+
+def _is_local_dev_request(request: Request) -> bool:
+    ip = _request_ip(request)
+    if ip is None:
+        return False
+    if ip.is_loopback:
+        return True
+    return _truthy_env("STORMLEAD_LOCAL_AUTH_BYPASS") and (ip.is_private or ip.is_link_local)
+
+
+def _authorization_bearer_token(request: Request) -> str | None:
+    auth = request.headers.get("authorization", "")
+    scheme, _, token = auth.partition(" ")
+    if scheme.lower() == "bearer" and token.strip():
+        return token.strip()
+    return None
+
+
+def _operator_token(request: Request) -> str | None:
+    header_token = request.headers.get("x-stormlead-operator-token", "").strip()
+    return header_token or _authorization_bearer_token(request)
+
+
+def _operator_path_requires_gate(path: str, method: str) -> bool:
+    if path.startswith("/v1/admin/"):
+        return True
+    if path == "/v1/auction":
+        return True
+    if path == "/v1/buyers":
+        return True
+    if path.startswith("/v1/return-requests/") and path.endswith("/review"):
+        return True
+    if path.startswith("/v1/buyers/") and method in {"PATCH", "DELETE"}:
+        return True
+    return path.startswith("/v1/buyers/") and path.endswith("/deposits")
+
+
+def _operator_authorized(request: Request) -> bool:
+    if not _truthy_env("STORMLEAD_REQUIRE_OPERATOR_TOKEN") and _is_local_dev_request(request):
+        return True
+    expected = os.getenv("STORMLEAD_OPERATOR_TOKEN", "").strip()
+    supplied = _operator_token(request)
+    return bool(expected and supplied and hmac.compare_digest(expected, supplied))
+
+
+@app.middleware("http")
+async def operator_surface_gate(request: Request, call_next: Any) -> Response:
+    if _operator_path_requires_gate(request.url.path, request.method) and not _operator_authorized(request):
+        return JSONResponse(
+            {"detail": "operator token required for admin or funding operations"},
+            status_code=401,
+        )
+    return await call_next(request)
+
+
+def _buyer_api_key_required(request: Request) -> bool:
+    return _truthy_env("STORMLEAD_REQUIRE_BUYER_API_KEY") or not _is_local_dev_request(request)
+
+
+def _require_buyer_api_key(request: Request, buyer: BuyerRow) -> None:
+    if not _buyer_api_key_required(request):
+        return
+    supplied = _authorization_bearer_token(request)
+    if buyer.api_key and supplied and hmac.compare_digest(str(buyer.api_key), supplied):
+        return
+    raise HTTPException(401, "valid buyer API key required")
+
+
 @app.get("/admin", response_class=HTMLResponse)
 async def admin() -> str:
     return """
@@ -389,153 +492,291 @@ async def admin() -> str:
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="StormLead local admin dashboard for synthetic lead workflow proof, buyer wallet controls, return review, and launch-readiness checks." />
   <title>StormLead Admin</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 2rem; background: #0f172a; color: #e2e8f0; }
-    h1 { margin-bottom: 0.25rem; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin: 1.5rem 0; }
-    .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .8rem; }
-    .card, table, form, .panel { background: #111827; border: 1px solid #334155; border-radius: 12px; }
-    .card { padding: 1rem; }
-    .metric { font-size: 1.8rem; font-weight: 700; color: #38bdf8; }
-    form, .panel { padding: 1rem; margin: 1rem 0; }
-    label { display: grid; gap: .35rem; color: #bfdbfe; font-size: .9rem; }
-    input, select, textarea { background: #020617; border: 1px solid #475569; border-radius: 8px; color: #e2e8f0; padding: .65rem; }
-    textarea { min-height: 4rem; }
-    button { background: #0284c7; border: 0; border-radius: 10px; color: white; cursor: pointer; font-weight: 700; padding: .8rem 1rem; }
-    button.secondary { background: #334155; }
-    button:hover { filter: brightness(1.08); }
+    :root { color-scheme: dark; --bg: #030303; --glass: rgba(10, 10, 10, .7); --glass-strong: rgba(8, 8, 8, .82); --border: rgba(255, 255, 255, .1); --border-soft: rgba(255, 255, 255, .05); --muted: #a3a3a3; --text: #fff; --accent: #06b6d4; --accent-2: #10b981; --violet: #8b5cf6; --warn: #f59e0b; --danger: #fb7185; --ease: cubic-bezier(.23, 1, .32, 1); }
+    * { box-sizing: border-box; }
+    html { background: var(--bg); scroll-behavior: smooth; }
+    body { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; min-height: 100vh; overflow-x: hidden; background: radial-gradient(circle at top center, rgba(139, 92, 246, .4), transparent 34rem), radial-gradient(circle at left center, rgba(6, 182, 212, .08), transparent 42rem), #030303; color: var(--text); }
+    body::before { background-image: linear-gradient(rgba(255,255,255,.032) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.032) 1px, transparent 1px); background-size: 72px 72px; content: ""; inset: 0; mask-image: linear-gradient(to bottom, rgba(0,0,0,.72), transparent 78%); pointer-events: none; position: fixed; }
+    @keyframes float-orb { from { transform: translateY(0) scale(1); } to { transform: translateY(-20px) scale(1.05); } }
+    @keyframes shimmer { from { background-position: 200% center; } to { background-position: -200% center; } }
+    @keyframes spin { to { transform: rotate(1turn); } }
+    @keyframes marquee { to { transform: translateX(-50%); } }
+    @keyframes enter { to { opacity: 1; transform: translateY(0); } }
+    @keyframes pulse { 50% { opacity: .35; transform: scale(.72); } }
+    .orb { border-radius: 999px; filter: blur(90px); opacity: .78; pointer-events: none; position: fixed; z-index: 0; animation: float-orb 12s var(--ease) infinite alternate; }
+    .orb.violet { background: rgba(139, 92, 246, .4); height: 18rem; right: 7vw; top: 11vh; width: 18rem; }
+    .orb.cyan { animation-duration: 15s; background: rgba(6, 182, 212, .4); bottom: 13vh; height: 15rem; left: 5vw; width: 15rem; }
+    h1, h2 { font-family: "Instrument Serif", Georgia, serif; font-weight: 400; letter-spacing: -.045em; margin: 0; }
+    h1 { font-size: clamp(3.6rem, 8vw, 7.2rem); line-height: .88; max-width: 920px; }
+    h2 { font-size: clamp(1.7rem, 3vw, 2.45rem); line-height: .96; }
+    p { color: var(--muted); font-weight: 300; line-height: 1.65; }
+    .admin-shell { margin: 0 auto; padding: 7.5rem 1rem 4rem; position: relative; width: min(1480px, 100%); z-index: 1; }
+    .nav-pill { align-items: center; backdrop-filter: blur(16px); background: var(--glass); border: 1px solid var(--border); border-radius: 999px; display: grid; gap: .75rem; grid-template-columns: 1fr auto 1fr; left: 50%; max-width: 672px; padding: .55rem .65rem; position: fixed; top: 1.5rem; transform: translateX(-50%); width: 95%; z-index: 10; }
+    .brand { align-items: center; color: #fff; display: inline-flex; font-family: "Instrument Serif", Georgia, serif; font-size: 1.2rem; gap: .5rem; letter-spacing: -.02em; text-decoration: none; white-space: nowrap; }
+    .brand-dot { background: linear-gradient(135deg, var(--violet), var(--accent)); border-radius: 999px; box-shadow: 0 0 20px -6px var(--violet); height: .45rem; width: .45rem; }
+    .nav-links { display: flex; gap: .85rem; justify-content: center; }
+    .nav-links a { color: #a3a3a3; font-size: .72rem; font-weight: 600; letter-spacing: .18em; text-decoration: none; text-transform: uppercase; transition: color .7s var(--ease); }
+    .nav-links a:hover { color: #fff; }
+    .nav-cta { background: #fff; border-radius: 999px; color: #000; font-size: .78rem; font-weight: 700; justify-self: end; padding: .62rem .95rem; text-decoration: none; }
+    .hero { backdrop-filter: blur(16px); border: 1px solid var(--border); border-radius: 1.5rem; padding: clamp(1.6rem, 4vw, 3rem); background: rgba(8, 8, 8, .8); box-shadow: 0 0 20px -10px rgba(139,92,246,.4); overflow: hidden; position: relative; }
+    .hero::before { background: radial-gradient(circle, rgba(139,92,246,.28), transparent 48%); content: ""; filter: blur(44px); height: 18rem; position: absolute; right: -4rem; top: -6rem; width: 18rem; }
+    .hero::after { background: linear-gradient(90deg, rgba(139,92,246,.85), rgba(6,182,212,.75), transparent); bottom: 0; content: ""; height: 1px; left: 0; position: absolute; right: 0; }
+    .hero-top, .section-header, .toolbar { align-items: center; display: flex; flex-wrap: wrap; gap: .75rem; justify-content: space-between; }
+    .eyebrow { color: #737373; font-size: .62rem; font-weight: 600; letter-spacing: .2em; text-transform: uppercase; }
+    .subtitle { color: var(--muted); font-size: 1.05rem; max-width: 760px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 1rem; margin: 1rem 0 1.5rem; }
+    .two-column { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(320px, .9fr); gap: 1rem; }
+    .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .85rem; }
+    .card, table, form, .panel { backdrop-filter: blur(16px); background: rgba(255, 255, 255, .02); border: 1px solid var(--border-soft); border-radius: 1.5rem; box-shadow: 0 0 20px -14px #8b5cf6; }
+    .card { min-height: 112px; opacity: 0; overflow: hidden; padding: 1.35rem; position: relative; transform: translateY(20px); animation: enter .9s var(--ease) forwards; transition: transform .9s var(--ease), border-color .9s var(--ease), background .9s var(--ease), box-shadow .9s var(--ease); }
+    .card::after { background: linear-gradient(90deg, var(--violet), var(--accent), transparent); bottom: 0; content: ""; height: 1px; left: 0; position: absolute; right: 0; }
+    .card:hover { background: rgba(255,255,255,.045); border-color: rgba(139,92,246,.4); box-shadow: 0 0 20px -10px rgba(139,92,246,.4); transform: translateY(-12px); }
+    .metric { color: #fff; font-size: clamp(1.65rem, 4vw, 2.25rem); font-weight: 600; letter-spacing: -.03em; margin-top: .35rem; }
+    form, .panel { margin: 1rem 0; padding: 1.2rem; }
+    label { display: grid; gap: .45rem; color: #d4d4d4; font-size: .72rem; font-weight: 600; letter-spacing: .13em; text-transform: uppercase; }
+    input, select, textarea { background: rgba(3,3,3,.88); border: 1px solid var(--border); border-radius: 1rem; color: var(--text); min-height: 2.9rem; padding: .76rem .86rem; transition: border-color .7s var(--ease), box-shadow .7s var(--ease); width: 100%; }
+    input:focus, select:focus, textarea:focus { border-color: rgba(6,182,212,.72); box-shadow: 0 0 0 4px rgba(6,182,212,.12); outline: none; }
+    textarea { min-height: 4.75rem; resize: vertical; }
+    button { background: #fff; border: 0; border-radius: 999px; color: #000; cursor: pointer; font-weight: 700; min-height: 2.9rem; padding: .8rem 1.2rem; transition: transform .7s var(--ease), filter .7s var(--ease); }
+    button.secondary { background: rgba(255,255,255,.06); border: 1px solid var(--border); color: #fff; }
+    button.ghost { background: rgba(10,10,10,.7); border: 1px solid var(--border); color: #fff; }
+    button:hover { filter: brightness(.95); transform: translateY(-2px); }
+    button:disabled { cursor: wait; filter: grayscale(.4); opacity: .7; transform: none; }
     .actions { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1rem; }
-    .status { border-left: 4px solid #38bdf8; margin: 1rem 0; padding: .75rem 1rem; white-space: pre-wrap; }
-    .muted { color: #94a3b8; }
-    .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .85rem; }
+    .status { backdrop-filter: blur(16px); background: rgba(10,10,10,.7); border: 1px solid var(--border); border-left: 5px solid var(--accent); border-radius: 1.1rem; margin: 1rem 0; padding: .9rem 1rem; white-space: pre-wrap; }
+    .status.ok { border-left-color: var(--accent-2); }
+    .status.error { border-left-color: var(--danger); }
+    .muted { color: var(--muted); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .84rem; }
+    .pill { align-items: center; background: rgba(10,10,10,.7); border: 1px solid var(--border); border-radius: 999px; color: #d4d4d4; display: inline-flex; font-size: .7rem; font-weight: 600; gap: .35rem; letter-spacing: .16em; padding: .4rem .75rem; text-transform: uppercase; }
+    .pill.ok { border-color: rgba(16,185,129,.45); color: #6ee7b7; }
+    .pill.warn { border-color: rgba(245,158,11,.45); color: #fde68a; }
+    .pill.danger { border-color: rgba(251,113,133,.45); color: #fecdd3; }
+    .shimmer { animation: shimmer 5s linear infinite; background: linear-gradient(90deg, #a78bfa 0%, #fff 40%, #fff 60%, #22d3ee 100%); background-clip: text; background-size: 200%; color: transparent; }
+    .ticker { border-bottom: 1px solid var(--border-soft); border-top: 1px solid var(--border-soft); background: rgba(0,0,0,.4); height: 60px; margin: 1rem calc(50% - 50vw); overflow: hidden; }
+    .ticker-track { align-items: center; animation: marquee 40s linear infinite; display: flex; gap: 2.5rem; height: 100%; min-width: max-content; width: max-content; }
+    .ticker-item { align-items: baseline; display: inline-flex; gap: .65rem; white-space: nowrap; }
+    .ticker-label { color: #737373; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .62rem; letter-spacing: .2em; text-transform: uppercase; }
+    .ticker-value { color: #fff; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 1rem; }
+    .accent-violet { color: #a78bfa; } .accent-cyan { color: #22d3ee; } .accent-emerald { color: #34d399; }
+    .readiness-grid { display: grid; gap: .75rem; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); margin-top: .9rem; }
+    .check-list { display: grid; gap: .45rem; margin-top: .9rem; }
+    .check-row { align-items: center; display: flex; gap: .5rem; justify-content: space-between; }
     .timeline { display: grid; gap: .75rem; margin-top: 1rem; }
-    .timeline-event { background: #020617; border: 1px solid #334155; border-left: 4px solid #38bdf8; border-radius: 10px; padding: .85rem; }
+    .timeline-event { background: rgba(8,8,8,.8); border: 1px solid var(--border-soft); border-left: 4px solid var(--accent); border-radius: 1.1rem; padding: .9rem; }
     .timeline-event.review { border-left-color: #facc15; }
-    .timeline-event.attention { border-left-color: #fb7185; }
-    .payload { background: #0f172a; border-radius: 8px; color: #cbd5e1; overflow: auto; padding: .75rem; }
-    table { width: 100%; border-collapse: collapse; overflow: hidden; }
-    th, td { padding: 0.75rem; border-bottom: 1px solid #334155; text-align: left; }
-    th { color: #93c5fd; }
-    tr[data-lead-id] { cursor: pointer; }
-    tr[data-lead-id]:hover { background: #1e293b; }
+    .timeline-event.attention { border-left-color: var(--danger); }
+    .payload { background: rgba(3,3,3,.88); border: 1px solid var(--border-soft); border-radius: 1rem; color: #d4d4d4; overflow: auto; padding: .75rem; }
+    .table-wrap { border: 1px solid var(--border-soft); border-radius: 1.5rem; overflow-x: auto; }
+    table { border: 0; border-collapse: collapse; min-width: 780px; width: 100%; }
+    th, td { padding: 0.78rem; border-bottom: 1px solid var(--border-soft); text-align: left; vertical-align: top; }
+    th { background: rgba(8,8,8,.82); color: #737373; font-size: .62rem; font-weight: 600; letter-spacing: .2em; position: sticky; text-transform: uppercase; top: 0; }
+    tr[data-lead-id], tr[data-buyer-id] { cursor: pointer; }
+    tr[data-lead-id]:hover, tr[data-buyer-id]:hover { background: rgba(139,92,246,.1); }
+    @media (max-width: 900px) { .nav-pill { grid-template-columns: 1fr auto; } .nav-links { display: none; } .two-column { grid-template-columns: 1fr; } .hero { border-radius: 20px; } }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: .001ms !important; } }
   </style>
 </head>
 <body>
-  <h1>StormLead Admin</h1>
-  <p>Paid-pilot control surface</p>
-  <section class="grid" id="kpis"></section>
-  <section class="panel" aria-label="cowork workflow controls">
-    <h2>Cowork Workflow Controls</h2>
-    <p>Create a real buyer, activate/fund it, then verify dashboard KPIs and roster state.</p>
-    <div class="status" id="workflow-status">Ready. No mock data is used.</div>
-  </section>
+  <div class="orb violet"></div>
+  <div class="orb cyan"></div>
+  <nav class="nav-pill" aria-label="primary navigation">
+    <a class="brand" href="/admin"><span class="brand-dot"></span><span>StormLead</span></a>
+    <div class="nav-links"><a href="#kpis">Metrics</a><a href="#workflow-runs">Runs</a><a href="#buyers">Buyers</a></div>
+    <a class="nav-cta" href="#buyer-form">Create</a>
+  </nav>
+  <main class="admin-shell">
+    <section class="hero">
+      <div class="hero-top">
+        <span class="eyebrow">Local simulation operations</span>
+        <div class="toolbar">
+          <span class="pill ok">Synthetic data only</span>
+          <span class="pill danger">Commercial launch locked</span>
+          <button type="button" class="ghost" onclick="load()">Refresh Dashboard</button>
+        </div>
+      </div>
+      <h1>StormLead <span class="shimmer">Admin</span></h1>
+      <p class="subtitle">Paid-pilot control surface for proving the local lead workflow, buyer wallet controls, returns, and audit timeline without contacting real homeowners or buyers.</p>
+    </section>
 
-  <h2>Agentic Workflow KPIs</h2>
-  <section class="grid" id="workflow-kpis"></section>
+    <section class="ticker" aria-label="local operating status">
+      <div class="ticker-track">
+        <div class="ticker-item"><span class="ticker-label">Mode</span><span class="ticker-value accent-violet">Synthetic Local</span></div>
+        <div class="ticker-item"><span class="ticker-label">LLM</span><span class="ticker-value accent-cyan">LiteLLM Routed</span></div>
+        <div class="ticker-item"><span class="ticker-label">Launch</span><span class="ticker-value accent-emerald">Locked Safe</span></div>
+        <div class="ticker-item"><span class="ticker-label">Evidence</span><span class="ticker-value">Audited</span></div>
+        <div class="ticker-item"><span class="ticker-label">Buyers</span><span class="ticker-value">Wallet Gated</span></div>
+        <div class="ticker-item"><span class="ticker-label">Mode</span><span class="ticker-value accent-violet">Synthetic Local</span></div>
+        <div class="ticker-item"><span class="ticker-label">LLM</span><span class="ticker-value accent-cyan">LiteLLM Routed</span></div>
+        <div class="ticker-item"><span class="ticker-label">Launch</span><span class="ticker-value accent-emerald">Locked Safe</span></div>
+        <div class="ticker-item"><span class="ticker-label">Evidence</span><span class="ticker-value">Audited</span></div>
+        <div class="ticker-item"><span class="ticker-label">Buyers</span><span class="ticker-value">Wallet Gated</span></div>
+      </div>
+    </section>
 
-  <section class="panel" aria-label="workflow timeline">
-    <h2>Lead Workflow Timeline</h2>
-    <p class="muted">Inspect append-only state transitions, agent decisions, review actions, and redacted payload summaries from real database audit rows.</p>
-    <form id="timeline-form" aria-label="load lead timeline form">
+    <section class="grid" id="kpis" aria-label="business kpis"></section>
+
+    <section class="panel" aria-label="launch readiness">
+      <div class="section-header">
+        <div>
+          <h2>Launch Readiness</h2>
+          <p class="muted">Separates local simulation readiness from technical paid-pilot gates and commercial approval.</p>
+        </div>
+        <span class="pill" id="readiness-label">loading</span>
+      </div>
+      <div id="readiness"></div>
+    </section>
+
+    <section class="panel" aria-label="cowork workflow controls">
+      <div class="section-header">
+        <div>
+          <h2>Cowork Workflow Controls</h2>
+          <p>Create a real buyer, activate/fund it, then verify dashboard KPIs and roster state.</p>
+        </div>
+      </div>
+      <div class="status" id="workflow-status">Ready. No mock data is used.</div>
+    </section>
+
+    <div class="two-column">
+      <section>
+        <div class="section-header"><h2>Agentic Workflow KPIs</h2></div>
+        <section class="grid" id="workflow-kpis"></section>
+
+        <section class="panel" aria-label="workflow timeline">
+          <h2>Lead Workflow Timeline</h2>
+          <p class="muted">Inspect append-only state transitions, agent decisions, review actions, and redacted payload summaries from real database audit rows.</p>
+          <form id="timeline-form" aria-label="load lead timeline form">
+            <div class="form-grid">
+              <label>Lead ID <input name="lead_id" id="timeline-lead-id" placeholder="Paste a lead UUID" /></label>
+              <label>Review Notes <input name="notes" id="review-notes" value="Reviewed in StormLead admin timeline." /></label>
+            </div>
+            <div class="actions">
+              <button type="submit">Load Timeline</button>
+              <button type="button" class="secondary" id="review-hold">Hold For Review</button>
+              <button type="button" class="secondary" id="review-approve">Approve / Clear Hold</button>
+            </div>
+          </form>
+          <div id="timeline-summary" class="status">Select a lead from Recent Workflow Runs or paste a lead UUID.</div>
+          <div class="timeline" id="timeline"></div>
+        </section>
+      </section>
+
+      <section>
+        <section class="panel" aria-label="recent workflow runs">
+          <h2>Recent Workflow Runs</h2>
+          <p class="muted">Rows are grouped from lead_state_transitions and can be opened in the timeline.</p>
+          <div class="table-wrap">
+            <table aria-label="workflow runs">
+              <thead><tr><th>Updated</th><th>State</th><th>Status</th><th>Events</th><th>Latest Event</th><th>Lead ID</th></tr></thead>
+              <tbody id="workflow-runs"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+    </div>
+
+    <form id="buyer-form" aria-label="create buyer form">
+      <div class="section-header"><h2>Create Buyer</h2><span class="pill">Step 1</span></div>
       <div class="form-grid">
-        <label>Lead ID <input name="lead_id" id="timeline-lead-id" placeholder="Paste a lead UUID" /></label>
-        <label>Review Notes <input name="notes" id="review-notes" value="Reviewed in StormLead admin timeline." /></label>
+        <label>Name <input name="name" value="Cowork Buyer" required /></label>
+        <label>Company <input name="company" value="Cowork Tree Pros" required /></label>
+        <label>Email <input name="contact_email" value="ops@cowork-tree.example" required /></label>
+        <label>Phone <input name="contact_phone_e164" value="+15125550199" required /></label>
+        <label>Webhook URL <input name="webhook_url" value="http://host.docker.internal:9999/cowork-buyer" required /></label>
+        <label>Webhook Secret <input name="webhook_secret" value="cowork-secret-minimum-16" required /></label>
+        <label>Tier 1/2 Bid <input name="bid_per_lead_t1_t2" value="75.00" required /></label>
+        <label>Tier 3 Bid <input name="bid_per_lead_t3" value="175.00" required /></label>
+        <label>Call Bid <input name="bid_per_call" value="100.00" required /></label>
+        <label>Filter <input name="filter_expression" value="lead.state == 'TX'" required /></label>
+        <label>Daily Cap <input name="daily_cap" value="25" required /></label>
+        <label>Monthly Budget <input name="monthly_budget" value="5000.00" required /></label>
+        <label>Initial Deposit <input name="deposit_balance" value="0.00" required /></label>
+        <label>Services <input name="services" value="tree_removal" required /></label>
+        <label>Target Zips <input name="target_zips" value="78701,78702" required /></label>
+        <label>Exclusive Zips <input name="exclusive_zips" value="" /></label>
+        <label>Low Balance Threshold <input name="low_balance_threshold" value="150.00" required /></label>
+        <label>Notes <textarea name="notes">Created from the real StormLead admin UI.</textarea></label>
       </div>
       <div class="actions">
-        <button type="submit">Load Timeline</button>
-        <button type="button" class="secondary" id="review-hold">Hold For Review</button>
-        <button type="button" class="secondary" id="review-approve">Approve / Clear Hold</button>
+        <button type="submit">Create Real Buyer</button>
       </div>
     </form>
-    <div id="timeline-summary" class="status">Select a lead from Recent Workflow Runs or paste a lead UUID.</div>
-    <div class="timeline" id="timeline"></div>
-  </section>
 
-  <section class="panel" aria-label="recent workflow runs">
-    <h2>Recent Workflow Runs</h2>
-    <p class="muted">Rows are grouped from lead_state_transitions and can be opened in the timeline.</p>
-    <table aria-label="workflow runs">
-      <thead><tr><th>Updated</th><th>State</th><th>Status</th><th>Events</th><th>Latest Event</th><th>Lead ID</th></tr></thead>
-      <tbody id="workflow-runs"></tbody>
-    </table>
-  </section>
+    <div class="two-column">
+      <form id="buyer-update-form" aria-label="update buyer form">
+        <div class="section-header"><h2>Activate / Fund Buyer</h2><span class="pill">Step 2</span></div>
+        <div class="form-grid">
+          <label>Buyer ID <input name="buyer_id" id="selected-buyer-id" required /></label>
+          <label>Status
+            <select name="status"><option value="active">active</option><option value="paused">paused</option><option value="pending_verification">pending_verification</option></select>
+          </label>
+          <label>Sales Stage
+            <select name="sales_stage"><option value="funded">funded</option><option value="prospect">prospect</option><option value="contacted">contacted</option><option value="agreement_sent">agreement_sent</option></select>
+          </label>
+          <label>Services <input name="services" value="tree_removal" /></label>
+          <label>Target Zips <input name="target_zips" value="78701,78702" /></label>
+        </div>
+        <div class="actions">
+          <button type="submit">Update Real Buyer</button>
+        </div>
+      </form>
 
-  <form id="buyer-form" aria-label="create buyer form">
-    <h2>Create Buyer</h2>
-    <div class="form-grid">
-      <label>Name <input name="name" value="Cowork Buyer" required /></label>
-      <label>Company <input name="company" value="Cowork Tree Pros" required /></label>
-      <label>Email <input name="contact_email" value="ops@cowork-tree.example" required /></label>
-      <label>Phone <input name="contact_phone_e164" value="+15125550199" required /></label>
-      <label>Webhook URL <input name="webhook_url" value="http://host.docker.internal:9999/cowork-buyer" required /></label>
-      <label>Webhook Secret <input name="webhook_secret" value="cowork-secret-minimum-16" required /></label>
-      <label>Tier 1/2 Bid <input name="bid_per_lead_t1_t2" value="75.00" required /></label>
-      <label>Tier 3 Bid <input name="bid_per_lead_t3" value="175.00" required /></label>
-      <label>Call Bid <input name="bid_per_call" value="100.00" required /></label>
-      <label>Filter <input name="filter_expression" value="lead.state == 'TX'" required /></label>
-      <label>Daily Cap <input name="daily_cap" value="25" required /></label>
-      <label>Monthly Budget <input name="monthly_budget" value="5000.00" required /></label>
-      <label>Initial Deposit <input name="deposit_balance" value="0.00" required /></label>
-      <label>Services <input name="services" value="tree_removal" required /></label>
-      <label>Target Zips <input name="target_zips" value="78701,78702" required /></label>
-      <label>Exclusive Zips <input name="exclusive_zips" value="" /></label>
-      <label>Low Balance Threshold <input name="low_balance_threshold" value="150.00" required /></label>
-      <label>Notes <textarea name="notes">Created from the real StormLead admin UI.</textarea></label>
+      <form id="deposit-form" aria-label="deposit form">
+        <div class="section-header"><h2>Add Deposit</h2><span class="pill">Step 3</span></div>
+        <div class="form-grid">
+          <label>Buyer ID <input name="buyer_id" id="deposit-buyer-id" required /></label>
+          <label>Amount Cents <input name="amount_cents" value="77700" required /></label>
+          <label>Reference <input name="external_reference" value="playwright-cowork-real-ui" /></label>
+        </div>
+        <div class="actions">
+          <button type="submit">Add Real Deposit</button>
+          <button type="button" class="secondary" onclick="load()">Refresh Dashboard</button>
+        </div>
+      </form>
     </div>
-    <div class="actions">
-      <button type="submit">Create Real Buyer</button>
-    </div>
-  </form>
 
-  <form id="buyer-update-form" aria-label="update buyer form">
-    <h2>Activate / Fund Buyer</h2>
-    <div class="form-grid">
-      <label>Buyer ID <input name="buyer_id" id="selected-buyer-id" required /></label>
-      <label>Status
-        <select name="status"><option value="active">active</option><option value="paused">paused</option><option value="pending_verification">pending_verification</option></select>
-      </label>
-      <label>Sales Stage
-        <select name="sales_stage"><option value="funded">funded</option><option value="prospect">prospect</option><option value="contacted">contacted</option><option value="agreement_sent">agreement_sent</option></select>
-      </label>
-      <label>Services <input name="services" value="tree_removal" /></label>
-      <label>Target Zips <input name="target_zips" value="78701,78702" /></label>
-    </div>
-    <div class="actions">
-      <button type="submit">Update Real Buyer</button>
-    </div>
-  </form>
-
-  <form id="deposit-form" aria-label="deposit form">
-    <h2>Add Deposit</h2>
-    <div class="form-grid">
-      <label>Buyer ID <input name="buyer_id" id="deposit-buyer-id" required /></label>
-      <label>Amount Cents <input name="amount_cents" value="77700" required /></label>
-      <label>Reference <input name="external_reference" value="playwright-cowork-real-ui" /></label>
-    </div>
-    <div class="actions">
-      <button type="submit">Add Real Deposit</button>
-      <button type="button" class="secondary" onclick="load()">Refresh Dashboard</button>
-    </div>
-  </form>
-
-  <h2>Buyers</h2>
-  <table aria-label="buyers">
-    <thead><tr><th>Company</th><th>Status</th><th>Stage</th><th>Wallet</th><th>Services</th><th>Zips</th><th>Low Balance</th><th>ID</th></tr></thead>
-    <tbody id="buyers"></tbody>
-  </table>
+    <section class="panel" aria-label="buyer roster">
+      <div class="section-header"><h2>Buyers</h2><span class="pill" id="buyer-count">loading</span></div>
+      <div class="table-wrap">
+        <table aria-label="buyers">
+          <thead><tr><th>Company</th><th>Status</th><th>Stage</th><th>Wallet</th><th>Services</th><th>Zips</th><th>Low Balance</th><th>ID</th></tr></thead>
+          <tbody id="buyers"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
   <script>
     const money = cents => `$${(cents / 100).toFixed(2)}`;
     const statusBox = document.querySelector('#workflow-status');
-    const setStatus = msg => { statusBox.textContent = msg; };
+    const setStatus = (msg, kind = '') => {
+      statusBox.textContent = msg;
+      statusBox.className = ['status', kind].filter(Boolean).join(' ');
+    };
     const htmlEscapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
     const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, ch => htmlEscapeMap[ch]);
     const list = value => value.split(',').map(v => v.trim()).filter(Boolean);
     const formJson = form => Object.fromEntries(new FormData(form).entries());
+    const operatorHeaders = () => {
+      const token = window.localStorage.getItem('stormlead_operator_token') || '';
+      return token ? { Authorization: `Bearer ${token}` } : {};
+    };
     const api = async (path, options = {}) => {
-      const res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...options });
+      const res = await fetch(path, {
+        ...options,
+        headers: { 'Content-Type': 'application/json', ...operatorHeaders(), ...(options.headers || {}) },
+      });
       const text = await res.text();
       const data = text ? JSON.parse(text) : {};
+      if (res.status === 401) {
+        const token = window.prompt('Operator token required for protected admin operations.');
+        if (token) {
+          window.localStorage.setItem('stormlead_operator_token', token);
+          return api(path, options);
+        }
+      }
       if (!res.ok) throw new Error(`${res.status}: ${JSON.stringify(data)}`);
       return data;
     };
@@ -552,6 +793,30 @@ async def admin() -> str:
       if (metric.unit === 'ratio') return `${metric.numerator}/${metric.denominator}`;
       return metric.unit || '';
     };
+
+    const titleize = value => String(value || '').replaceAll('_', ' ');
+    const readinessClass = data => data.commercial_paid_launch_ready ? 'ok' : data.local_simulation_ready ? 'warn' : 'danger';
+
+    function renderReadiness(data) {
+      const label = document.querySelector('#readiness-label');
+      label.textContent = titleize(data.readiness_label);
+      label.className = `pill ${readinessClass(data)}`;
+      const metrics = data.metrics || {};
+      const checks = Object.entries(data.checks || {}).map(([name, passed]) => `
+        <div class="check-row">
+          <span>${escapeHtml(titleize(name))}</span>
+          <span class="pill ${passed ? 'ok' : 'danger'}">${passed ? 'pass' : 'blocked'}</span>
+        </div>`).join('');
+      document.querySelector('#readiness').innerHTML = `
+        <div class="readiness-grid">
+          <div class="card"><div>Funded Buyers</div><div class="metric">${escapeHtml(metrics.funded_buyers ?? 0)}</div><div class="muted">Need 3 for technical local readiness</div></div>
+          <div class="card"><div>Wallet Coverage</div><div class="metric">${money(metrics.active_wallet_total_cents || 0)}</div><div class="muted">Against ${money((data.scope || {}).campaign_budget_cents || 0)} test budget</div></div>
+          <div class="card"><div>Runway Buyers</div><div class="metric">${escapeHtml(metrics.runway_ready_buyers ?? 0)}</div><div class="muted">Need 3 above ${escapeHtml(metrics.required_runway_days ?? 0)} days</div></div>
+          <div class="card"><div>Routed Posts</div><div class="metric">${escapeHtml(metrics.delivered_posts ?? 0)}</div><div class="muted">Synthetic ping/post evidence</div></div>
+          <div class="card"><div>Approved Returns</div><div class="metric">${escapeHtml(metrics.approved_return_requests ?? 0)}</div><div class="muted">Credit review evidence</div></div>
+        </div>
+        <div class="check-list">${checks || '<div class="muted">No readiness checks returned.</div>'}</div>`;
+    }
 
     function renderWorkflowKpis(data) {
       const metrics = data.metrics || [];
@@ -614,12 +879,37 @@ async def admin() -> str:
       setStatus(`Timeline loaded from lead_state_transitions. Events: ${(data.events || []).length}`);
     }
 
+    function renderBuyers(buyers) {
+      const rows = buyers.buyers || [];
+      document.querySelector('#buyer-count').textContent = `${rows.length} buyers`;
+      document.querySelector('#buyers').innerHTML = rows.length ? rows.map(b => `
+        <tr data-buyer-id="${escapeHtml(b.buyer_id)}">
+          <td>${escapeHtml(b.company)}</td><td>${escapeHtml(b.status)}</td><td>${escapeHtml(b.sales_stage)}</td>
+          <td>${money(b.deposit_balance_cents)}</td><td>${escapeHtml((b.services || []).join(', '))}</td>
+          <td>${escapeHtml((b.target_zips || []).join(', '))}</td><td>${money(b.low_balance_threshold_cents)}</td><td class="mono">${escapeHtml(b.buyer_id)}</td>
+        </tr>`).join('') : '<tr><td colspan="8" class="muted">No buyers have been created yet.</td></tr>';
+      document.querySelectorAll('tr[data-buyer-id]').forEach(row => {
+        row.addEventListener('click', () => {
+          const buyerId = row.getAttribute('data-buyer-id');
+          document.querySelector('#selected-buyer-id').value = buyerId;
+          document.querySelector('#deposit-buyer-id').value = buyerId;
+          setStatus(`Selected buyer ${buyerId} for update/deposit actions.`);
+        });
+      });
+    }
+
+    function updateBuyerWallet(buyerId, cents) {
+      const row = Array.from(document.querySelectorAll('tr[data-buyer-id]')).find(candidate => candidate.getAttribute('data-buyer-id') === buyerId);
+      if (row) row.children[3].textContent = money(cents);
+    }
+
     async function load() {
-      const [summary, buyers, workflowKpis, workflowRuns] = await Promise.all([
+      const [summary, buyers, workflowKpis, workflowRuns, readiness] = await Promise.all([
         api('/v1/admin/kpis'),
         api('/v1/buyers'),
         api('/v1/admin/workflow-kpis'),
         api('/v1/admin/workflow-runs/recent'),
+        api('/v1/admin/launch-readiness'),
       ]);
       document.querySelector('#kpis').innerHTML = [
         ['Prepaid cash', money(summary.prepaid_cash_cents)],
@@ -628,15 +918,11 @@ async def admin() -> str:
         ['Returned leads', summary.returned_leads],
         ['Lead revenue', money(summary.lead_revenue_cents)],
       ].map(([label, value]) => `<div class="card"><div>${label}</div><div class="metric">${value}</div></div>`).join('');
-      document.querySelector('#buyers').innerHTML = buyers.buyers.map(b => `
-        <tr data-buyer-id="${b.buyer_id}">
-          <td>${b.company}</td><td>${b.status}</td><td>${b.sales_stage}</td>
-          <td>${money(b.deposit_balance_cents)}</td><td>${b.services.join(', ')}</td>
-          <td>${b.target_zips.join(', ')}</td><td>${money(b.low_balance_threshold_cents)}</td><td>${b.buyer_id}</td>
-        </tr>`).join('');
+      renderBuyers(buyers);
       renderWorkflowKpis(workflowKpis);
       renderWorkflowRuns(workflowRuns.runs || []);
-      setStatus(`Dashboard loaded from real APIs. Buyers: ${buyers.buyers.length}`);
+      renderReadiness(readiness);
+      setStatus(`Dashboard loaded from real APIs. Buyers: ${(buyers.buyers || []).length}`);
     }
 
     document.querySelector('#buyer-form').addEventListener('submit', async event => {
@@ -655,7 +941,7 @@ async def admin() -> str:
       document.querySelector('#selected-buyer-id').value = buyer.buyer_id;
       document.querySelector('#deposit-buyer-id').value = buyer.buyer_id;
       await load();
-      setStatus(`Created real buyer ${buyer.company} (${buyer.buyer_id}).`);
+      setStatus(`Created real buyer ${buyer.company} (${buyer.buyer_id}).`, 'ok');
     });
 
     document.querySelector('#buyer-update-form').addEventListener('submit', async event => {
@@ -672,7 +958,7 @@ async def admin() -> str:
         }),
       });
       await load();
-      setStatus(`Updated real buyer ${buyer.company}: ${buyer.status}/${buyer.sales_stage}.`);
+      setStatus(`Updated real buyer ${buyer.company}: ${buyer.status}/${buyer.sales_stage}.`, 'ok');
     });
 
     document.querySelector('#deposit-form').addEventListener('submit', async event => {
@@ -686,8 +972,10 @@ async def admin() -> str:
           external_reference: raw.external_reference,
         }),
       });
+      updateBuyerWallet(raw.buyer_id, wallet.deposit_balance_cents);
+      setStatus(`Deposit recorded. New wallet: ${money(wallet.deposit_balance_cents)}.`, 'ok');
       await load();
-      setStatus(`Deposit recorded. New wallet: ${money(wallet.deposit_balance_cents)}.`);
+      setStatus(`Deposit recorded. New wallet: ${money(wallet.deposit_balance_cents)}.`, 'ok');
     });
 
     document.querySelector('#timeline-form').addEventListener('submit', async event => {
@@ -717,7 +1005,8 @@ async def admin() -> str:
     document.querySelector('#review-approve').addEventListener('click', () => reviewLead('approve'));
 
     load().catch(err => {
-      document.body.insertAdjacentHTML('beforeend', `<pre role="alert">${err}</pre>`);
+      setStatus(`Dashboard load failed: ${err}`, 'error');
+      document.body.insertAdjacentHTML('beforeend', `<pre role="alert">${escapeHtml(err)}</pre>`);
     });
   </script>
 </body>
@@ -728,6 +1017,11 @@ async def admin() -> str:
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon() -> Response:
+    return Response(content=b"", media_type="image/x-icon")
 
 
 @app.get("/readyz")
@@ -779,6 +1073,7 @@ async def create_buyer(payload: BuyerCreateRequest) -> dict[str, Any]:
         contact_email=payload.contact_email,
         contact_phone_e164=payload.contact_phone_e164,
         status=BuyerStatus.PENDING_VERIFICATION.value,
+        api_key=uuid4().hex,
         license_number=payload.license_number,
         license_state=payload.license_state,
         webhook_url=payload.webhook_url,
@@ -792,10 +1087,13 @@ async def create_buyer(payload: BuyerCreateRequest) -> dict[str, Any]:
         sales_stage=payload.sales_stage.value,
         notes=payload.notes,
         next_follow_up_at=payload.next_follow_up_at,
+        follow_up_date=payload.next_follow_up_at,
         services=payload.services,
+        services_offered=payload.services,
         target_zips=payload.target_zips,
         exclusive_zips=payload.exclusive_zips,
         low_balance_threshold=payload.low_balance_threshold,
+        low_balance_threshold_cents=_decimal_to_cents(payload.low_balance_threshold),
         deposit_balance=payload.deposit_balance,
     )
     try:
@@ -855,18 +1153,66 @@ async def admin_kpis() -> dict[str, Any]:
                     PostResult.returned.is_(False),
                 )
             )
+            gross_lead_revenue = await s.scalar(
+                select(func.coalesce(func.sum(PostResult.bid_cents), 0)).where(
+                    PostResult.delivered.is_(True)
+                )
+            )
+            buyer_adjustments = await s.scalar(
+                select(func.coalesce(func.sum(BillingEvent.amount_cents), 0)).where(
+                    BillingEvent.event_type == "lead.returned"
+                )
+            )
+        lead_revenue_cents = int(lead_revenue or 0)
+        gross_lead_revenue_cents = int(gross_lead_revenue or 0)
+        buyer_adjustments_cents = int(buyer_adjustments or 0)
         return {
             "prepaid_cash_cents": _decimal_to_cents(Decimal(prepaid or 0)),
             "active_buyers": int(active_buyers or 0),
             "sold_leads": int(sold_leads or 0),
             "returned_leads": int(returned_leads or 0),
-            "lead_revenue_cents": int(lead_revenue or 0),
+            "lead_revenue_cents": lead_revenue_cents,
+            "gross_lead_revenue_cents": gross_lead_revenue_cents,
+            "buyer_adjustments_cents": buyer_adjustments_cents,
+            "campaign_spend_cents": 0,
+            "campaign_margin_cents": gross_lead_revenue_cents - buyer_adjustments_cents,
+            "campaign_margin_basis": "gross_lead_revenue_cents - buyer_adjustments_cents; campaign spend is not ingested in local proof",
         }
     except Exception as e:
         log.error("admin.kpis_failed", error=str(e))
         raise HTTPException(
             500, "admin kpis could not be loaded; retry after checking database health"
         ) from e
+
+
+@app.get("/v1/admin/attribution/campaign/{campaign_id}")
+async def admin_campaign_attribution(campaign_id: str) -> dict[str, Any] | None:
+    roi = await get_campaign_roi(campaign_id)
+    return asdict(roi) if roi is not None else None
+
+
+@app.get("/v1/admin/attribution/by-zip")
+async def admin_attribution_by_zip(state: str = Query(min_length=2, max_length=2)) -> list[dict[str, Any]]:
+    return await get_roi_by_zip(state)
+
+
+@app.get("/v1/admin/export/mailer-csv")
+async def admin_mailer_csv(
+    state: str | None = Query(default=None, min_length=2, max_length=2),
+    service: str | None = Query(default=None, min_length=1, max_length=64),
+    status: str = Query(default="unsold", min_length=1, max_length=32),
+) -> Response:
+    csv_body = await export_mailer_csv(state, service, status)
+    return Response(
+        content=csv_body,
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="stormlead-mailer.csv"'},
+    )
+
+
+@app.post("/v1/admin/guardrails/evaluate")
+async def admin_evaluate_guardrails() -> dict[str, Any]:
+    return {"actions": await evaluate_buyer_guardrails()}
 
 
 @app.get("/v1/admin/workflow-kpis")
@@ -1089,12 +1435,13 @@ async def review_lead(lead_id: UUID, payload: LeadReviewRequest) -> dict[str, An
 
 
 @app.get("/v1/buyers/{buyer_id}")
-async def get_buyer(buyer_id: UUID) -> dict[str, Any]:
+async def get_buyer(buyer_id: UUID, request: Request) -> dict[str, Any]:
     try:
         async with get_session() as s:
             buyer = await s.get(BuyerRow, buyer_id)
             if buyer is None:
                 raise HTTPException(404, "buyer not found; verify the buyer id and try again")
+            _require_buyer_api_key(request, buyer)
             return _buyer_response(buyer)
     except HTTPException:
         raise
@@ -1121,6 +1468,12 @@ async def update_buyer(buyer_id: UUID, payload: BuyerUpdateRequest) -> dict[str,
                 if isinstance(value, (BuyerStatus, BuyerSalesStage)):
                     value = value.value
                 setattr(buyer, key, value)
+                if key == "services":
+                    buyer.services_offered = value
+                elif key == "next_follow_up_at":
+                    buyer.follow_up_date = value
+                elif key == "low_balance_threshold":
+                    buyer.low_balance_threshold_cents = _decimal_to_cents(value)
             await s.flush()
             return _buyer_response(buyer)
     except HTTPException:
@@ -1131,12 +1484,13 @@ async def update_buyer(buyer_id: UUID, payload: BuyerUpdateRequest) -> dict[str,
 
 
 @app.get("/v1/buyers/{buyer_id}/wallet")
-async def get_wallet(buyer_id: UUID) -> dict[str, Any]:
+async def get_wallet(buyer_id: UUID, request: Request) -> dict[str, Any]:
     try:
         async with get_session() as s:
             buyer = await s.get(BuyerRow, buyer_id)
             if buyer is None:
                 raise HTTPException(404, "buyer not found; verify the buyer id and try again")
+            _require_buyer_api_key(request, buyer)
             return _buyer_wallet_response(buyer)
     except HTTPException:
         raise
@@ -1148,7 +1502,7 @@ async def get_wallet(buyer_id: UUID) -> dict[str, Any]:
 
 
 @app.post("/v1/buyers/{buyer_id}/deposits")
-async def add_deposit(buyer_id: UUID, payload: DepositRequest) -> dict[str, Any]:
+async def add_deposit(buyer_id: UUID, payload: DepositRequest, request: Request) -> dict[str, Any]:
     try:
         async with get_session() as s:
             buyer = await s.get(BuyerRow, buyer_id)
@@ -1177,7 +1531,7 @@ async def add_deposit(buyer_id: UUID, payload: DepositRequest) -> dict[str, Any]
 
 
 @app.post("/v1/leads/{lead_id}/return")
-async def return_lead(lead_id: UUID, payload: ReturnLeadRequest) -> dict[str, Any]:
+async def return_lead(lead_id: UUID, payload: ReturnLeadRequest, request: Request) -> dict[str, Any]:
     try:
         async with get_session() as s:
             result = (
@@ -1195,6 +1549,10 @@ async def return_lead(lead_id: UUID, payload: ReturnLeadRequest) -> dict[str, An
                 raise HTTPException(
                     404, "delivered lead sale not found; verify the lead id and try again"
                 )
+            buyer = await s.get(BuyerRow, result.buyer_id)
+            if buyer is None:
+                raise HTTPException(404, "buyer for delivered lead sale was not found")
+            _require_buyer_api_key(request, buyer)
             if result.returned:
                 raise HTTPException(
                     409, "lead was already returned; check the existing return record"
@@ -1360,7 +1718,7 @@ async def review_return_request(
 
 
 @app.get("/v1/buyers/{buyer_id}/daily-report")
-async def buyer_daily_report(buyer_id: UUID) -> dict[str, Any]:
+async def buyer_daily_report(buyer_id: UUID, request: Request) -> dict[str, Any]:
     now = datetime.now(UTC)
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     try:
@@ -1368,6 +1726,7 @@ async def buyer_daily_report(buyer_id: UUID) -> dict[str, Any]:
             buyer = await s.get(BuyerRow, buyer_id)
             if buyer is None:
                 raise HTTPException(404, "buyer not found; verify the buyer id and try again")
+            _require_buyer_api_key(request, buyer)
             delivered = await s.scalar(
                 select(func.count(PostResult.id)).where(
                     PostResult.buyer_id == buyer_id,
@@ -1415,6 +1774,22 @@ async def buyer_daily_report(buyer_id: UUID) -> dict[str, Any]:
                 .scalars()
                 .all()
             )
+            delivered_lead_details = (
+                (
+                    await s.execute(
+                        select(PostResult, LeadRow)
+                        .join(LeadRow, LeadRow.id == PostResult.lead_id)
+                        .where(
+                            PostResult.buyer_id == buyer_id,
+                            PostResult.delivered.is_(True),
+                            PostResult.created_at >= day_start,
+                        )
+                        .order_by(PostResult.created_at.desc())
+                        .limit(25)
+                    )
+                )
+                .all()
+            )
 
             balance_cents = _decimal_to_cents(buyer.deposit_balance)
             threshold_cents = _decimal_to_cents(buyer.low_balance_threshold)
@@ -1425,6 +1800,21 @@ async def buyer_daily_report(buyer_id: UUID) -> dict[str, Any]:
                 delivered_today=int(delivered or 0),
                 gross_spend_today_cents=int(gross_spend or 0),
             )
+            delivered_lead_detail_rows = [
+                {
+                    "lead_id": str(lead.id),
+                    "created_at": lead.created_at.isoformat() if lead.created_at else None,
+                    "delivered_at": post.created_at.isoformat() if post.created_at else None,
+                    "state": lead.state,
+                    "zip": lead.zip,
+                    "requested_service": lead.requested_service,
+                    "lead_class": lead.lead_class,
+                    "bid_cents": post.bid_cents,
+                    "returned": post.returned,
+                    "status": "returned" if post.returned else "delivered",
+                }
+                for post, lead in delivered_lead_details
+            ]
             return {
                 "buyer": _buyer_wallet_response(buyer),
                 "window": {"start_at": day_start.isoformat(), "end_at": now.isoformat()},
@@ -1441,6 +1831,8 @@ async def buyer_daily_report(buyer_id: UUID) -> dict[str, Any]:
                     "below_threshold": balance_cents < threshold_cents,
                     "recommended_refill_cents": refill_cents,
                 },
+                "delivered_lead_details": delivered_lead_detail_rows,
+                "delivered_leads": delivered_lead_detail_rows,
                 "recent_return_requests": [_return_request_response(row) for row in recent_returns],
             }
     except HTTPException:
@@ -1590,6 +1982,14 @@ async def launch_readiness(
                     and_(*buyer_scope)
                 )
             )
+            runway_multiplier = Decimal(str(KPI_THRESHOLDS.pause_wallet_runway_days)) / Decimal(30)
+            runway_ready_buyers = await s.scalar(
+                select(func.count(BuyerRow.id)).where(
+                    and_(*configured_scope),
+                    BuyerRow.monthly_budget > 0,
+                    BuyerRow.deposit_balance >= BuyerRow.monthly_budget * runway_multiplier,
+                )
+            )
             lead_ids_query = select(LeadRow.id)
             if lead_scope:
                 lead_ids_query = lead_ids_query.where(and_(*lead_scope))
@@ -1619,22 +2019,38 @@ async def launch_readiness(
                     LeadRow.id.in_(select(lead_ids_subq.c.id)),
                 )
             )
+            matched_call_events = await s.scalar(
+                select(func.count(CallEventRow.id)).where(
+                    CallEventRow.lead_id.in_(select(lead_ids_subq.c.id))
+                )
+            )
 
+        local_simulation_checks = {
+            "synthetic_ping_post_routed_test_lead": int(delivered or 0) > 0,
+            "synthetic_return_review_credit_flow_tested": int(returned or 0) > 0
+            and int(approved_return_requests or 0) > 0,
+            "synthetic_campaign_source_attribution_visible": int(attributed_leads or 0) > 0,
+            "synthetic_call_tracking_ingested": int(matched_call_events or 0) > 0,
+        }
         technical_checks = {
             "three_funded_buyers_in_scope": int(funded_buyers or 0) >= 3,
             "buyers_have_services_zips_caps_and_prices": int(configured_buyers or 0) >= 3,
             "wallet_balance_covers_campaign_budget": int(total_wallet_cents or 0)
             >= campaign_budget_cents,
+            "buyer_wallet_runway_covers_pause_threshold": int(runway_ready_buyers or 0) >= 3,
             "ping_post_routed_test_lead": int(delivered or 0) > 0,
             "return_review_credit_flow_tested": int(returned or 0) > 0
             and int(approved_return_requests or 0) > 0,
             "campaign_source_attribution_visible": int(attributed_leads or 0) > 0,
+            "call_tracking_ingested": int(matched_call_events or 0) > 0,
         }
         commercial_approval = os.getenv("STORMLEAD_COMMERCIAL_LAUNCH_APPROVED") == "true"
         checks = {
+            **local_simulation_checks,
             **technical_checks,
             "commercial_launch_approval_present": commercial_approval,
         }
+        local_simulation_ready = all(local_simulation_checks.values())
         technical_ready = all(technical_checks.values())
         ready = technical_ready and commercial_approval
         return {
@@ -1648,23 +2064,32 @@ async def launch_readiness(
             if ready
             else "technical_local_ready"
             if technical_ready
+            else "local_simulation_ready"
+            if local_simulation_ready
             else "not_ready",
+            "local_simulation_ready": local_simulation_ready,
             "technical_local_ready": technical_ready,
+            "commercial_paid_launch_ready": ready,
             "ready_for_paid_launch": ready,
             "checks": checks,
             "metrics": {
                 "funded_buyers": int(funded_buyers or 0),
                 "configured_buyers": int(configured_buyers or 0),
+                "runway_ready_buyers": int(runway_ready_buyers or 0),
+                "required_runway_days": KPI_THRESHOLDS.pause_wallet_runway_days,
                 "active_wallet_total_cents": int(total_wallet_cents or 0),
                 "delivered_posts": int(delivered or 0),
                 "returned_posts": int(returned or 0),
                 "approved_return_requests": int(approved_return_requests or 0),
                 "attributed_leads": int(attributed_leads or 0),
+                "matched_call_events": int(matched_call_events or 0),
             },
             "notes": [
                 "ready_for_paid_launch remains false unless STORMLEAD_COMMERCIAL_LAUNCH_APPROVED=true",
                 "market_state scopes lead evidence; market_zip additionally scopes buyer zip coverage",
                 "campaign_budget_cents defaults to a conservative $1,000 local validation threshold",
+                "call tracking readiness uses local synthetic call webhook events matched to scoped leads",
+                "buyer wallet runway must clear the configured pause threshold before technical readiness",
             ],
         }
     except Exception as e:
@@ -1918,18 +2343,7 @@ async def _assert_no_exclusive_zip_conflict(
 ) -> None:
     if not exclusive_zips:
         return
-    requested = set(exclusive_zips)
-    async with get_session() as s:
-        rows = (
-            await s.execute(select(BuyerRow.id, BuyerRow.company, BuyerRow.exclusive_zips))
-        ).all()
-    for buyer_id, company, existing_zips in rows:
-        if exclude_buyer_id is not None and buyer_id == exclude_buyer_id:
-            continue
-        conflict = requested.intersection(existing_zips or [])
-        if conflict:
-            zips = ", ".join(sorted(conflict))
-            raise HTTPException(409, f"exclusive zip conflict with {company}: {zips}")
+    await check_exclusive_zip_conflict(exclude_buyer_id, exclusive_zips)
 
 
 def _buyer_response(buyer: BuyerRow) -> dict[str, Any]:
@@ -1946,13 +2360,17 @@ def _buyer_response(buyer: BuyerRow) -> dict[str, Any]:
             else None,
             "sales_stage": buyer.sales_stage,
             "notes": buyer.notes,
+            "api_key_set": bool(buyer.api_key),
             "next_follow_up_at": buyer.next_follow_up_at.isoformat()
             if buyer.next_follow_up_at
             else None,
+            "follow_up_date": buyer.follow_up_date.isoformat() if buyer.follow_up_date else None,
             "services": buyer.services or [],
+            "services_offered": buyer.services_offered or [],
             "target_zips": buyer.target_zips or [],
             "exclusive_zips": buyer.exclusive_zips or [],
             "low_balance_threshold_cents": _decimal_to_cents(buyer.low_balance_threshold),
+            "crm_low_balance_threshold_cents": buyer.low_balance_threshold_cents,
             "filter_expression": buyer.filter_expression,
             "webhook_url": buyer.webhook_url,
         }

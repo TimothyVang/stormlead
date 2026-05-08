@@ -1,21 +1,21 @@
 """end-to-end smoke test for the validation-readiness phase.
 
-assumes the full dev stack is up + migrated + seeded:
-  just up            (postgres + redis + hatchet + litellm + python services)
+assumes the pipeline dev stack is up + migrated + seeded:
+  just up-pipeline   (postgres + hatchet + litellm + workflow services)
   just migrate       (0001_initial + 0002_consent_audits applied)
   just seed          (1 storm + 2 buyers + 1 lead with fixed UUIDs;
                       buyers point at host.docker.internal:9999/buyer-{a,b})
 
 steps:
-  1. start two in-process aiohttp listeners on localhost:9999/buyer-{a,b}
-     to catch the auction's POST-to-winner webhooks.
+  1. start two in-process aiohttp listeners on :9999/buyer-{a,b}
+     to catch the auction's POST-to-winner webhooks from Docker containers.
   2. build a synthetic formbricks `responseFinished` envelope.
   3. sign it with FORMBRICKS_WEBHOOK_SECRET via the standard-webhooks algo.
   4. POST to http://localhost:8002/webhooks/formbricks; expect 200.
      form-receiver's 200 response carries the persisted lead_id, so no
      host-side postgres connection is needed (and avoids the
      remapped-host-port DSN dance).
-  5. wait up to 10s for at least one buyer listener to receive a webhook.
+  5. wait up to 30s for at least one buyer listener to receive a webhook.
   6. print structured result + exit 0; on any failure exit 1.
 
 run: uv run python scripts/smoke_e2e.py
@@ -31,6 +31,7 @@ import json
 import os
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -38,9 +39,12 @@ import httpx
 from aiohttp import web
 
 FORM_RECEIVER_URL = os.environ.get("FORM_RECEIVER_URL", "http://localhost:8002/webhooks/formbricks")
+CALL_TRACKING_URL = os.environ.get(
+    "CALL_TRACKING_URL", FORM_RECEIVER_URL.replace("/webhooks/formbricks", "/webhooks/call-tracking")
+)
 PING_POST_URL = os.environ.get("PING_POST_URL", "http://localhost:8003")
 LISTENER_PORT = 9999
-LISTENER_HOST = os.environ.get("SMOKE_LISTENER_HOST", "127.0.0.1")
+LISTENER_HOST = os.environ.get("SMOKE_LISTENER_HOST", "0.0.0.0")  # noqa: S104 - Docker callback listener
 
 
 def _env_file_value(file_name: str, key: str) -> str | None:
@@ -72,10 +76,10 @@ def _candidate_secrets() -> list[str]:
 
 SYNTHETIC_PHONE = os.environ.get(
     "SMOKE_SYNTHETIC_PHONE",
-    f"+15125550{100 + (int(time.time()) % 100):03d}",
+    f"+1512{2000000 + (time.time_ns() % 8000000):07d}",
 )
 
-WEBHOOK_LISTENER_TIMEOUT_S = 10
+WEBHOOK_LISTENER_TIMEOUT_S = int(os.environ.get("SMOKE_WEBHOOK_LISTENER_TIMEOUT_S", "30"))
 
 
 received: dict[str, list[dict[str, Any]]] = {"buyer-a": [], "buyer-b": []}
@@ -88,7 +92,7 @@ def _make_handler(name: str):
         except Exception:
             body = {}
         received[name].append({"headers": dict(request.headers), "body": body})
-        return web.json_response({"accepted": True, "bid_cents": 5000})
+        return web.json_response({"accept": True, "bid_cents": 5000})
 
     return handler
 
@@ -114,11 +118,12 @@ def _sign(secret: str, webhook_id: str, ts: str, body: bytes) -> str:
 
 
 def _synthetic_envelope() -> dict[str, Any]:
+    unique_id = time.time_ns()
     return {
         "event": "responseFinished",
-        "webhookId": "smoke-test-webhook",
+        "webhookId": f"smoke-test-webhook-{unique_id}",
         "data": {
-            "id": f"resp_{int(time.time())}",
+            "id": f"resp_{unique_id}",
             "surveyId": "survey_smoke",
             "data": {
                 "name": "Smoke Test Homeowner",
@@ -230,6 +235,29 @@ async def main() -> None:
         if not lead_id:
             _fail("post-webhook", f"200 but no lead_id in body: {payload}")
         _ok(f"status={payload.get('status')} lead_id={lead_id}")
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            _step("posting synthetic call-tracking webhook")
+            call_response = await client.post(
+                CALL_TRACKING_URL,
+                json={
+                    "call_id": f"smoke-call-{int(time.time())}",
+                    "phone_e164": SYNTHETIC_PHONE,
+                    "duration_seconds": 91,
+                    "outcome": "answered",
+                    "tracked_at": datetime.now(UTC).isoformat(),
+                    "raw_payload": {"source": "local_smoke", "synthetic_only": True},
+                },
+            )
+            if call_response.status_code != 200:
+                _fail(
+                    "call-tracking-webhook",
+                    f"status={call_response.status_code} body={call_response.text}",
+                )
+            call_payload = call_response.json()
+            if call_payload.get("lead_id") != lead_id:
+                _fail("call-tracking-webhook", f"call did not match lead: {call_payload}")
+            _ok(f"event_id={call_payload.get('event_id')}")
 
         _step(f"waiting for buyer ping webhook (max {WEBHOOK_LISTENER_TIMEOUT_S}s)")
         ping_hit = await _wait_for_buyer_hit()

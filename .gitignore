@@ -33,6 +33,7 @@ volumes/
 .terraform/
 *.tfstate*
 .envrc
+.omx/
 
 # wsl ntfs alternate-data-stream artifacts
 *:Zone.Identifier
@@ -55,3 +56,4 @@ testing/videos/*
 !testing/logs/
 testing/logs/*
 !testing/logs/.gitkeep
+testing/.pytest_cache/

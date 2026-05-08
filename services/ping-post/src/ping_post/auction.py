@@ -93,15 +93,15 @@ def _lead_can_enter_auction(lead: Lead) -> tuple[bool, str]:
         return False, "blocked_for_fraud"
     if lead.hold_for_review:
         return False, "held_for_review"
+    lead_class = lead.lead_class.value if lead.lead_class else None
+    if lead_class in {"c", "d"}:
+        return False, "class_requires_review"
     score = lead.score if lead.score is not None else (lead.qualification_score or 0.0)
     ab_min, hold_min = _routing_thresholds()
     if score >= ab_min:
         return True, "route_ab"
     if score < hold_min:
         return False, "score_below_hold_threshold"
-    lead_class = lead.lead_class.value if lead.lead_class else None
-    if lead_class in {"c", "d"}:
-        return False, "class_requires_review"
     return True, "route_b"
 
 
@@ -312,22 +312,57 @@ async def _buyer_within_caps(buyer: Buyer) -> bool:
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     async with get_session() as s:
         day_count = await s.scalar(
-            select(func.count(PostResult.id)).where(
-                PostResult.buyer_id == buyer.id,
-                PostResult.delivered.is_(True),
-                PostResult.created_at >= day_start,
+            select(func.count(BillingEvent.id)).where(
+                BillingEvent.buyer_id == buyer.id,
+                BillingEvent.event_type == "lead.posted",
+                BillingEvent.created_at >= day_start,
             )
         )
         month_spend = await s.scalar(
-            select(func.coalesce(func.sum(PostResult.bid_cents), 0)).where(
-                PostResult.buyer_id == buyer.id,
-                PostResult.delivered.is_(True),
-                PostResult.created_at >= month_start,
+            select(func.coalesce(func.sum(BillingEvent.amount_cents), 0)).where(
+                BillingEvent.buyer_id == buyer.id,
+                BillingEvent.event_type == "lead.posted",
+                BillingEvent.created_at >= month_start,
             )
         )
     if (day_count or 0) >= buyer.daily_cap:
         return False
     return Decimal(int(month_spend or 0)) / Decimal(100) < buyer.monthly_budget
+
+
+async def _persist_unauctionable_lead(lead: Lead, reason: str) -> None:
+    lead_class = lead.lead_class.value if lead.lead_class else None
+    async with get_session() as s:
+        row = await s.get(LeadRow, lead.id)
+        if row is None:
+            return
+        if reason == "blocked_for_fraud" or lead_class == "d":
+            row.status = LeadStatus.REJECTED.value
+            row.rejection_reason = reason if lead_class != "d" else "lead_class_d"
+            await record_transition(
+                s,
+                lead_id=lead.id,
+                from_state=None,
+                to_state=PipelineState.REJECTED,
+                event_type="lead.rejected",
+                task_name="ping_post.run_auction",
+                payload={"reason": row.rejection_reason, "lead_class": lead_class},
+            )
+            _push_lead_event("lead.rejected", lead.id, {"reason": row.rejection_reason})
+            return
+
+        if reason in {"class_requires_review", "score_below_hold_threshold", "held_for_review"}:
+            row.hold_for_review = True
+            await record_transition(
+                s,
+                lead_id=lead.id,
+                from_state=None,
+                to_state=PipelineState.QUALIFIED,
+                event_type="lead.held_for_review",
+                task_name="ping_post.run_auction",
+                status="pending_review",
+                payload={"reason": reason, "lead_class": lead_class},
+            )
 
 
 async def _sold_delivery_for_lead(lead_id: UUID) -> PostResult | None:
@@ -620,6 +655,7 @@ async def run_auction(lead: Lead) -> PingPostResult:
     started = time.perf_counter()
     allowed, reason = _lead_can_enter_auction(lead)
     if not allowed:
+        await _persist_unauctionable_lead(lead, reason)
         log.info("lead.not_eligible_for_auction", lead_id=str(lead.id), reason=reason)
         return PingPostResult(
             event_id=uuid4(),
@@ -694,7 +730,7 @@ async def run_auction(lead: Lead) -> PingPostResult:
 
     sem = asyncio.Semaphore(MAX_PARALLEL_PINGS)
 
-    async with httpx.AsyncClient(http2=True) as client:
+    async with httpx.AsyncClient() as client:
 
         async def bounded(b: Buyer) -> PingResponse:
             async with sem:
@@ -790,7 +826,7 @@ async def run_auction(lead: Lead) -> PingPostResult:
                             buyer_id=buyer.id,
                             lead_id=lead.id,
                             event_type="lead.posted",
-                            amount_cents=0,
+                            amount_cents=bid_cents,
                             metadata_json={
                                 "reserved_cents": bid_cents,
                                 "post_result_status_code": status,

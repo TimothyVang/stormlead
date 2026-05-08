@@ -1,5 +1,6 @@
 # stormlead dev stack for wsl2
-# use: just up
+# use: just up for the lean local stack, just up-pipeline for synthetic
+# workflow tests, or just up-full when you need every optional service.
 #
 # CRITICAL pinning notes:
 # - litellm: pinned to a known-good tag AFTER the march 2026 supply-chain incident.
@@ -57,6 +58,7 @@ services:
 
   redis:
     image: redis:7-alpine
+    profiles: ["observability", "full"]
     restart: unless-stopped
     command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
     ports:
@@ -155,6 +157,7 @@ services:
   # combined api + frontend (v0.50 ships them as one image)
   hatchet-dashboard:
     image: ghcr.io/hatchet-dev/hatchet/hatchet-dashboard:v0.85.3
+    profiles: ["ui", "full"]
     command: sh ./entrypoint.sh --config /hatchet/config
     ports:
       - "127.0.0.1:8080:80"
@@ -170,6 +173,29 @@ services:
       - hatchet_certs:/hatchet/certs
       - hatchet_config:/hatchet/config
 
+  hatchet-token:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-admin:v0.85.3
+    entrypoint: sh
+    command:
+      - -c
+      - >
+        set -eu;
+        token=$$(/hatchet/hatchet-admin --config /hatchet/config token create --name stormlead-dev | sed -n '1p');
+        test -n "$$token";
+        umask 077;
+        printf 'export HATCHET_CLIENT_TOKEN=%s\n' "$$token" > /hatchet/runtime/client.env;
+        printf 'hatchet dev token written\n'
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER:-stormlead}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/hatchet?sslmode=disable"
+    depends_on:
+      hatchet-setup-config:
+        condition: service_completed_successfully
+      hatchet-migration:
+        condition: service_completed_successfully
+    volumes:
+      - hatchet_config:/hatchet/config
+      - hatchet_runtime:/hatchet/runtime
+
   # =========================================================================
   # llm gateway: litellm
   # =========================================================================
@@ -178,19 +204,24 @@ services:
   #   cosign verify ghcr.io/berriai/litellm:main-stable --certificate-identity-regexp ...
 
   litellm:
-    image: ghcr.io/berriai/litellm-database:main-v1.83.7-stable
+    image: ghcr.io/berriai/litellm:main-v1.83.7-stable
+    profiles: ["agents", "pipeline", "full"]
     restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
     environment:
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-master-change-me}
-      DATABASE_URL: "postgres://${POSTGRES_USER:-stormlead}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/litellm?sslmode=disable"
-      STORE_MODEL_IN_DB: "True"
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY_REAL:-}  # real upstream anthropic key, only here
     volumes:
       - ./../../litellm/config.yaml:/app/config.yaml:ro
-    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "2"]
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:4000/health/readiness', timeout=3)\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
     ports:
       - "127.0.0.1:4000:4000"
 
@@ -201,6 +232,7 @@ services:
 
   clickhouse:
     image: clickhouse/clickhouse-server:24.3-alpine
+    profiles: ["observability", "full"]
     restart: unless-stopped
     environment:
       CLICKHOUSE_DB: langfuse
@@ -214,6 +246,7 @@ services:
 
   langfuse-worker:
     image: langfuse/langfuse-worker:3
+    profiles: ["observability", "full"]
     restart: unless-stopped
     depends_on:
       postgres:
@@ -241,6 +274,7 @@ services:
 
   langfuse-web:
     image: langfuse/langfuse:3
+    profiles: ["observability", "full"]
     restart: unless-stopped
     depends_on:
       langfuse-worker:
@@ -294,6 +328,7 @@ services:
     # Set POSTGRES_MCP_IMAGE to a pinned non-latest tag before paid launch.
     # crystaldba/postgres-mcp-pro: read+write, parameterized, maintained.
     image: crystaldba/postgres-mcp:latest
+    profiles: ["agents", "full"]
     restart: unless-stopped
     depends_on:
       postgres:
@@ -309,8 +344,33 @@ services:
   # =========================================================================
   # services (python)
   # =========================================================================
-  # NOTE: landing, buyer-portal, and voice-bridge are intentionally absent until
-  # their source exists. Caddy fails closed for those routes.
+  # NOTE: voice-bridge is intentionally absent until its source exists.
+
+  landing:
+    build:
+      context: ./../../..
+      dockerfile: apps/landing/Dockerfile
+    restart: unless-stopped
+    environment:
+      FORMBRICKS_ENV_ID: ${FORMBRICKS_ENV_ID:-local-env}
+      FORMBRICKS_SURVEY_ID: ${FORMBRICKS_SURVEY_ID:-local-survey}
+      FORMBRICKS_SCRIPT_SRC: ${FORMBRICKS_SCRIPT_SRC:-/static/formbricks-placeholder.js}
+      FORMBRICKS_WEBHOOK_SECRET: ${FORMBRICKS_WEBHOOK_SECRET}
+      FORM_RECEIVER_URL: http://form-receiver:8000
+      STORMLEAD_LOCAL_DEMO_ENABLED: "true"
+    ports:
+      - "127.0.0.1:8005:8000"
+
+  buyer-portal:
+    build:
+      context: ./../../..
+      dockerfile: apps/buyer-portal/Dockerfile
+    restart: unless-stopped
+    environment:
+      PING_POST_BASE_URL: http://ping-post:8000
+      STORMLEAD_LOCAL_DEMO_ENABLED: "true"
+    ports:
+      - "127.0.0.1:8004:8000"
 
   ping-post:
     build:
@@ -322,16 +382,22 @@ services:
         condition: service_healthy
       hatchet-engine:
         condition: service_started
+      hatchet-token:
+        condition: service_completed_successfully
     environment:
       DATABASE_URL: ${DATABASE_URL}
       HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN}
       HATCHET_CLIENT_HOST_PORT: ${HATCHET_CLIENT_HOST_PORT}
       HATCHET_CLIENT_TLS_STRATEGY: none
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      STORMLEAD_LOCAL_AUTH_BYPASS: ${STORMLEAD_LOCAL_AUTH_BYPASS:-true}
     ports:
       # host port remapped from 8001 to avoid collisions with other local
       # docker projects. smoke_e2e.py + manual curl tests use 8003.
       - "127.0.0.1:8003:8000"
+    volumes:
+      - hatchet_runtime:/hatchet/runtime:ro
+    command: sh -c ". /hatchet/runtime/client.env; exec uvicorn ping_post.api:app --host 0.0.0.0 --port 8000"
     # so the auction's POST-to-buyer can reach a host-bound listener
     # (smoke_e2e.py runs in-process aiohttp on the host's :9999); seed
     # buyers point at host.docker.internal. linux/wsl2 needs the
@@ -343,12 +409,15 @@ services:
     build:
       context: ./../../..
       dockerfile: services/storm-watcher/Dockerfile
+    profiles: ["watchers", "full"]
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
       hatchet-engine:
         condition: service_started
+      hatchet-token:
+        condition: service_completed_successfully
     environment:
       DATABASE_URL: ${DATABASE_URL}
       HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN}
@@ -356,6 +425,9 @@ services:
       HATCHET_CLIENT_TLS_STRATEGY: none
       NWS_USER_AGENT: ${NWS_USER_AGENT}
       FEMA_API_BASE: ${FEMA_API_BASE}
+    volumes:
+      - hatchet_runtime:/hatchet/runtime:ro
+    command: sh -c ". /hatchet/runtime/client.env; exec python -m storm_watcher.worker"
 
   form-receiver:
     build:
@@ -367,6 +439,8 @@ services:
         condition: service_healthy
       hatchet-engine:
         condition: service_started
+      hatchet-token:
+        condition: service_completed_successfully
     environment:
       DATABASE_URL: ${DATABASE_URL}
       HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN}
@@ -377,17 +451,23 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:
       - "127.0.0.1:8002:8000"
+    volumes:
+      - hatchet_runtime:/hatchet/runtime:ro
+    command: sh -c ". /hatchet/runtime/client.env; exec uvicorn form_receiver.api:app --host 0.0.0.0 --port 8000"
 
   enrich-worker:
     build:
       context: ./../../..
       dockerfile: services/enrich-worker/Dockerfile
+    profiles: ["pipeline", "full"]
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
       hatchet-engine:
         condition: service_started
+      hatchet-token:
+        condition: service_completed_successfully
     environment:
       DATABASE_URL: ${DATABASE_URL}
       HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN}
@@ -395,11 +475,15 @@ services:
       HATCHET_CLIENT_TLS_STRATEGY: none
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       STORMLEAD_COMMERCIAL_LAUNCH_APPROVED: ${STORMLEAD_COMMERCIAL_LAUNCH_APPROVED:-false}
+    volumes:
+      - hatchet_runtime:/hatchet/runtime:ro
+    command: sh -c ". /hatchet/runtime/client.env; exec python -m enrich_worker.worker"
 
   agent-runtime:
     build:
       context: ./../../..
       dockerfile: services/agent-runtime/Dockerfile
+    profiles: ["agents", "pipeline", "full"]
     restart: unless-stopped
     depends_on:
       postgres:
@@ -407,19 +491,24 @@ services:
       hatchet-engine:
         condition: service_started
       litellm:
-        condition: service_started
+        condition: service_healthy
+      hatchet-token:
+        condition: service_completed_successfully
     environment:
       DATABASE_URL: ${DATABASE_URL}
       HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN}
       HATCHET_CLIENT_HOST_PORT: ${HATCHET_CLIENT_HOST_PORT}
       HATCHET_CLIENT_TLS_STRATEGY: none
       # all model traffic routes through LiteLLM
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      LITELLM_PROXY_URL: ${LITELLM_PROXY_URL}
+      LITELLM_API_KEY: ${LITELLM_API_KEY:-sk-master-change-me}
+      LITELLM_PROXY_URL: ${LITELLM_PROXY_URL:-http://litellm:4000}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
       LANGFUSE_HOST: ${LANGFUSE_HOST}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - hatchet_runtime:/hatchet/runtime:ro
+    command: sh -c ". /hatchet/runtime/client.env; exec python -m agent_runtime.worker"
 
 volumes:
   postgres_data:
@@ -427,3 +516,4 @@ volumes:
   rabbitmq_data:
   hatchet_config:
   hatchet_certs:
+  hatchet_runtime:

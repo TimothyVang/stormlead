@@ -1,9 +1,16 @@
 name: stormlead-prod
 
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "100m"
+    max-file: "3"
+
 services:
   postgres:
     image: timescale/timescaledb-ha:pg16-ts2.17
     restart: unless-stopped
+    logging: *default-logging
     environment:
       POSTGRES_DB: ${POSTGRES_DB:?set in secrets manager}
       POSTGRES_USER: ${POSTGRES_USER:?set in secrets manager}
@@ -33,12 +40,14 @@ services:
   redis:
     image: redis:7.2.5-alpine
     restart: unless-stopped
+    logging: *default-logging
     command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
 
   rabbitmq:
     image: rabbitmq:3.13.7-management
     hostname: rabbitmq
     restart: unless-stopped
+    logging: *default-logging
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:?set in secrets manager}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:?set in secrets manager}
@@ -52,6 +61,8 @@ services:
 
   hatchet-migration:
     image: ghcr.io/hatchet-dev/hatchet/hatchet-migrate:v0.85.3
+    restart: unless-stopped
+    logging: *default-logging
     environment:
       DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/hatchet?sslmode=disable"
     depends_on:
@@ -60,6 +71,8 @@ services:
 
   hatchet-setup-config:
     image: ghcr.io/hatchet-dev/hatchet/hatchet-admin:v0.85.3
+    restart: unless-stopped
+    logging: *default-logging
     command: /hatchet/hatchet-admin quickstart --skip certs --generated-config-dir /hatchet/config --overwrite=false
     environment:
       DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/hatchet?sslmode=disable"
@@ -79,7 +92,8 @@ services:
   hatchet-engine:
     image: ghcr.io/hatchet-dev/hatchet/hatchet-engine:v0.85.3
     command: /hatchet/hatchet-engine --config /hatchet/config
-    restart: on-failure
+    restart: unless-stopped
+    logging: *default-logging
     depends_on:
       hatchet-setup-config:
         condition: service_completed_successfully
@@ -92,7 +106,8 @@ services:
   hatchet-dashboard:
     image: ghcr.io/hatchet-dev/hatchet/hatchet-dashboard:v0.85.3
     command: sh ./entrypoint.sh --config /hatchet/config
-    restart: on-failure
+    restart: unless-stopped
+    logging: *default-logging
     depends_on:
       hatchet-setup-config:
         condition: service_completed_successfully
@@ -105,11 +120,13 @@ services:
   litellm:
     image: ghcr.io/berriai/litellm-database:main-v1.83.7-stable
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       postgres:
         condition: service_healthy
     environment:
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set in secrets manager}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY_REAL:?set upstream anthropic key in secrets manager}
       DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/litellm?sslmode=disable"
       STORE_MODEL_IN_DB: "True"
     volumes:
@@ -119,6 +136,7 @@ services:
   clickhouse:
     image: clickhouse/clickhouse-server:24.3.18-alpine
     restart: unless-stopped
+    logging: *default-logging
     environment:
       CLICKHOUSE_DB: langfuse
       CLICKHOUSE_USER: clickhouse
@@ -130,6 +148,7 @@ services:
   langfuse-worker:
     image: langfuse/langfuse-worker:3.63.1
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       postgres:
         condition: service_healthy
@@ -157,6 +176,7 @@ services:
   langfuse-web:
     image: langfuse/langfuse:3.63.1
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       langfuse-worker:
         condition: service_started
@@ -182,6 +202,7 @@ services:
   postgres-mcp:
     image: crystaldba/postgres-mcp:0.1.14
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       postgres:
         condition: service_healthy
@@ -189,9 +210,41 @@ services:
       DATABASE_URL: ${DATABASE_URL_RO}
     command: ["--access-mode=restricted"]
 
+  crowdsec:
+    image: crowdsecurity/crowdsec:v1.6.4
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      COLLECTIONS: crowdsecurity/caddy
+      BOUNCER_KEY_caddy: ${CROWDSEC_BOUNCER_KEY}
+    volumes:
+      - crowdsec_data:/var/lib/crowdsec/data
+      - crowdsec_config:/etc/crowdsec
+
+  landing:
+    image: ghcr.io/stormlead/landing:2026.05.0
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      FORMBRICKS_ENV_ID: ${FORMBRICKS_ENV_ID}
+      FORMBRICKS_SURVEY_ID: ${FORMBRICKS_SURVEY_ID}
+      FORMBRICKS_SCRIPT_SRC: ${FORMBRICKS_SCRIPT_SRC}
+
+  buyer-portal:
+    image: ghcr.io/stormlead/buyer-portal:2026.05.0
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      ping-post:
+        condition: service_started
+    environment:
+      PING_POST_BASE_URL: http://ping-post:8000
+      STORMLEAD_SECURE_COOKIES: ${STORMLEAD_SECURE_COOKIES:-true}
+
   ping-post:
     image: ghcr.io/stormlead/ping-post:2026.05.0
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       postgres:
         condition: service_healthy
@@ -202,10 +255,16 @@ services:
       HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN}
       HATCHET_CLIENT_HOST_PORT: ${HATCHET_CLIENT_HOST_PORT}
       HATCHET_CLIENT_TLS_STRATEGY: none
+      STORMLEAD_COMMERCIAL_LAUNCH_APPROVED: ${STORMLEAD_COMMERCIAL_LAUNCH_APPROVED:-false}
+      STORMLEAD_REQUIRE_OPERATOR_TOKEN: ${STORMLEAD_REQUIRE_OPERATOR_TOKEN:-true}
+      STORMLEAD_OPERATOR_TOKEN: ${STORMLEAD_OPERATOR_TOKEN:?set operator token in secrets manager}
+      STORMLEAD_REQUIRE_BUYER_API_KEY: ${STORMLEAD_REQUIRE_BUYER_API_KEY:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
 
   storm-watcher:
     image: ghcr.io/stormlead/storm-watcher:2026.05.0
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       postgres:
         condition: service_healthy
@@ -218,10 +277,12 @@ services:
       HATCHET_CLIENT_TLS_STRATEGY: none
       NWS_USER_AGENT: ${NWS_USER_AGENT}
       FEMA_API_BASE: ${FEMA_API_BASE}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
 
   form-receiver:
     image: ghcr.io/stormlead/form-receiver:2026.05.0
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       postgres:
         condition: service_healthy
@@ -233,10 +294,14 @@ services:
       HATCHET_CLIENT_HOST_PORT: ${HATCHET_CLIENT_HOST_PORT}
       HATCHET_CLIENT_TLS_STRATEGY: none
       FORMBRICKS_WEBHOOK_SECRET: ${FORMBRICKS_WEBHOOK_SECRET}
+      FORM_RECEIVER_MAX_WEBHOOK_BODY_BYTES: ${FORM_RECEIVER_MAX_WEBHOOK_BODY_BYTES:-262144}
+      TRUSTEDFORM_API_KEY: ${TRUSTEDFORM_API_KEY}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
 
   enrich-worker:
     image: ghcr.io/stormlead/enrich-worker:2026.05.0
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       postgres:
         condition: service_healthy
@@ -247,10 +312,13 @@ services:
       HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN}
       HATCHET_CLIENT_HOST_PORT: ${HATCHET_CLIENT_HOST_PORT}
       HATCHET_CLIENT_TLS_STRATEGY: none
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      STORMLEAD_COMMERCIAL_LAUNCH_APPROVED: ${STORMLEAD_COMMERCIAL_LAUNCH_APPROVED:-false}
 
   agent-runtime:
     image: ghcr.io/stormlead/agent-runtime:2026.05.0
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       postgres:
         condition: service_healthy
@@ -263,11 +331,46 @@ services:
       HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN}
       HATCHET_CLIENT_HOST_PORT: ${HATCHET_CLIENT_HOST_PORT}
       HATCHET_CLIENT_TLS_STRATEGY: none
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      LITELLM_API_KEY: ${LITELLM_API_KEY:?set LiteLLM proxy key in secrets manager}
       LITELLM_PROXY_URL: ${LITELLM_PROXY_URL}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
       LANGFUSE_HOST: ${LANGFUSE_HOST}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+  caddy:
+    image: ghcr.io/stormlead/caddy:2026.05.0
+    build:
+      context: ./../../caddy
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      landing:
+        condition: service_started
+      buyer-portal:
+        condition: service_started
+      form-receiver:
+        condition: service_started
+      ping-post:
+        condition: service_started
+      crowdsec:
+        condition: service_started
+      langfuse-web:
+        condition: service_started
+      hatchet-dashboard:
+        condition: service_started
+    environment:
+      CROWDSEC_API_URL: ${CROWDSEC_API_URL:-http://crowdsec:8080}
+      CROWDSEC_BOUNCER_KEY: ${CROWDSEC_BOUNCER_KEY}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./../../caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./../../caddy/coraza.conf:/etc/caddy/coraza.conf:ro
+      - caddy_data:/data
+      - caddy_config:/config
 
 volumes:
   postgres_data:
@@ -275,3 +378,7 @@ volumes:
   rabbitmq_data:
   hatchet_config:
   hatchet_certs:
+  caddy_data:
+  caddy_config:
+  crowdsec_data:
+  crowdsec_config:

@@ -14,11 +14,19 @@ defensible consent capture.
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Any
 
 import phonenumbers
 from email_validator import EmailNotValidError, validate_email
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+class CallOutcome(StrEnum):
+    answered = "answered"
+    voicemail = "voicemail"
+    no_answer = "no_answer"
+    busy = "busy"
 
 
 class FormbricksMeta(BaseModel):
@@ -87,6 +95,7 @@ class ExtractedConsent(BaseModel):
     campaign_source: str | None = None
     first_touch_source: str | None = None
     last_touch_source: str | None = None
+    trustedform_cert_url: str | None = None
 
 
 class SuppressionRequest(BaseModel):
@@ -236,4 +245,5 @@ def extract_consent(envelope: FormbricksEnvelope) -> ExtractedConsent:
         campaign_source=campaign_source,
         first_touch_source=first_touch_source,
         last_touch_source=last_touch_source,
+        trustedform_cert_url=_hidden_value(envelope, answers, "trustedform_cert_url"),
     )

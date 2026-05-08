@@ -14,10 +14,12 @@ members = [
     "services/agent-runtime",
     "services/enrich-worker",
     "services/form-receiver",
+    "apps/landing",
+    "apps/buyer-portal",
 ]
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "pytest-cov>=5.0",
@@ -68,3 +70,4 @@ ignore_errors = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["services", "libs"]
+cache_dir = "testing/.pytest_cache"

@@ -21,14 +21,14 @@ Status: local technical readiness.
 
 ```powershell
 cp .env.example .env
-docker compose --env-file .env -f infra/compose/dev/docker-compose.yml up -d
+docker compose --env-file .env -f infra/compose/dev/docker-compose.yml --profile pipeline up -d
 $env:DATABASE_URL="postgresql+psycopg://stormlead:change-me-in-openbao@localhost:5433/stormlead"
 uv run python scripts/init_db.py
 Push-Location libs/stormlead_db; uv run alembic upgrade head; Pop-Location
 uv run python scripts/seed_dev.py
 ```
 
-Use `just up`, `just migrate`, and `just seed` only when `just` is installed.
+Use `just up-pipeline`, `just migrate`, and `just seed` only when `just` is installed.
 
 ## Capture And Attribution
 

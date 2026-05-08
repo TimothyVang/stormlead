@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
 import httpx
+from geoalchemy2 import WKTElement
 from hatchet_sdk import Context, Hatchet
 from stormlead_core import LeadStatus, PipelineState, bind_correlation_id, emit_event, emit_metric
 from stormlead_db import LeadRow, get_session, record_transition
+
+from enrich_worker.geocode import geocode_address
+from enrich_worker.photo import classify_photo
 
 
 @dataclass(frozen=True)
@@ -71,6 +76,34 @@ async def fetch_enrichment_evidence(
         )
 
 
+async def fetch_from_s3(s3_key: str) -> bytes | None:
+    """Best-effort photo byte fetcher; tests can patch this for private S3."""
+    if s3_key.startswith(("http://", "https://")):
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.get(s3_key)
+                response.raise_for_status()
+                return response.content
+        except Exception:
+            return None
+    path = Path(s3_key)
+    if path.is_file():
+        return path.read_bytes()
+    return None
+
+
+async def _classify_lead_photos(photo_s3_keys: list[str]) -> list[dict[str, Any]]:
+    classifications: list[dict[str, Any]] = []
+    for key in photo_s3_keys[:3]:
+        image_bytes = await fetch_from_s3(key)
+        if image_bytes is None:
+            continue
+        classification = await classify_photo(image_bytes)
+        if classification is not None:
+            classifications.append({"s3_key": key, **classification})
+    return classifications
+
+
 async def enrich_lead(context: Context) -> dict[str, Any]:
     workflow_input = context.workflow_input
     payload = workflow_input() if callable(workflow_input) else workflow_input
@@ -84,8 +117,12 @@ async def enrich_lead(context: Context) -> dict[str, Any]:
             raise ValueError(f"lead {lead_id} not found")
         page_url = row.page_url
         damage_description = row.damage_description
+        address = (row.address_line1, row.city, row.state, row.zip)
+        photo_s3_keys = list(row.photo_s3_keys or [])
 
     evidence = await fetch_enrichment_evidence(page_url, damage_description)
+    geo_point = await geocode_address(*address)
+    photo_classifications = await _classify_lead_photos(photo_s3_keys)
 
     async with get_session() as s:
         row = await s.get(LeadRow, lead_id)
@@ -93,7 +130,16 @@ async def enrich_lead(context: Context) -> dict[str, Any]:
             raise ValueError(f"lead {lead_id} not found")
         if evidence.requested_service and not row.requested_service:
             row.requested_service = evidence.requested_service
+        if geo_point is not None:
+            row.geom = WKTElement(f"POINT({geo_point.lon} {geo_point.lat})", srid=4326)
+        if photo_classifications:
+            row.damage_tier = str(photo_classifications[0].get("damage_tier"))
         row.status = LeadStatus.ENRICHED.value
+        payload = {
+            **evidence.__dict__,
+            "geocode": geo_point.__dict__ if geo_point is not None else None,
+            "photo_classifications": photo_classifications,
+        }
         await record_transition(
             s,
             lead_id=lead_id,
@@ -102,7 +148,7 @@ async def enrich_lead(context: Context) -> dict[str, Any]:
             event_type="lead.enriched",
             task_name="enrich_worker.enrich_lead",
             workflow_run_id=run_id,
-            payload=evidence.__dict__,
+            payload=payload,
         )
 
     Hatchet(debug=False).event.push(
@@ -111,4 +157,4 @@ async def enrich_lead(context: Context) -> dict[str, Any]:
     )
     emit_event("enriched", lead_id=str(lead_id), service="enrich-worker")
     emit_metric("funnel.enriched", lead_id=str(lead_id), service="enrich-worker")
-    return {"lead_id": str(lead_id), "evidence": evidence.__dict__}
+    return {"lead_id": str(lead_id), "evidence": payload}

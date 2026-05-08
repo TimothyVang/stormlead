@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Delivered Leads{% endblock %}
+{% block content %}
+<section class="hero">
+  <div class="section-header">
+    <div>
+      <div class="eyebrow">Lead delivery</div>
+      <h1>Delivered Leads</h1>
+      <p>Use this page to reconcile delivered lead history before requesting a return review.</p>
+    </div>
+    <span class="pill">Buyer {{ buyer_id }}</span>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="section-header"><h2>Lead List</h2><span class="pill">{{ leads | length }} leads</span></div>
+  <div class="table-wrap">
+    <table aria-label="delivered leads">
+      <thead><tr><th>Lead ID</th><th>Date</th><th>Service</th><th>Status</th></tr></thead>
+      <tbody>
+        {% for lead in leads %}
+        <tr><td class="mono">{{ lead.lead_id }}</td><td>{{ lead.created_at }}</td><td>{{ lead.requested_service }}</td><td>{{ lead.status }}</td></tr>
+        {% else %}
+        <tr><td colspan="4" class="muted">No delivered lead list is exposed by ping-post yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="section-header"><h2>Raw Report</h2><span class="pill">Audit detail</span></div>
+  <pre>{{ report | tojson(indent=2) }}</pre>
+</section>
+{% endblock %}

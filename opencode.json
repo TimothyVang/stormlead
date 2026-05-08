@@ -1,0 +1,40 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "stormlead": {
+      "type": "local",
+      "command": [
+        "node",
+        "tools/mcp/stormlead-local-ops.mjs"
+      ],
+      "enabled": true,
+      "timeout": 300000
+    },
+    "docker": {
+      "type": "local",
+      "command": [
+        "docker",
+        "mcp",
+        "gateway",
+        "run",
+        "--profile",
+        "stormlead_docker"
+      ],
+      "enabled": true,
+      "timeout": 15000
+    },
+    "kubernetes": {
+      "type": "local",
+      "command": [
+        "docker",
+        "mcp",
+        "gateway",
+        "run",
+        "--profile",
+        "stormlead_kubernetes"
+      ],
+      "enabled": true,
+      "timeout": 15000
+    }
+  }
+}

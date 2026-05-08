@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Return Request{% endblock %}
+{% block content %}
+<section class="hero">
+  <div class="section-header">
+    <div>
+      <div class="eyebrow">Quality review</div>
+      <h1>Request Lead Return</h1>
+      <p>Submit one clear reason and concise notes. Operators can hold, approve, or reject the request from the admin timeline.</p>
+    </div>
+    <span class="pill danger">Manual review</span>
+  </div>
+</section>
+
+<form method="post" action="/buyer-portal/review" aria-label="return request form">
+  <div class="section-header"><h2>Return Details</h2><span class="pill">Buyer {{ buyer_id }}</span></div>
+  <div class="grid">
+    <label>Lead ID<input name="lead_id" placeholder="Paste the sold lead UUID" required></label>
+    <label>Reason
+      <select name="reason">
+        <option value="wrong_number">Wrong number</option>
+        <option value="duplicate">Duplicate</option>
+        <option value="outside_service_area">Outside service area</option>
+        <option value="renter_no_authority">Renter has no authority</option>
+        <option value="spam">Spam</option>
+        <option value="job_already_completed">Job already completed</option>
+      </select>
+    </label>
+  </div>
+  <label>Notes<textarea name="notes" placeholder="Add the evidence an operator needs to review this return."></textarea></label>
+  <button type="submit">Submit Return Request</button>
+</form>
+
+{% if result %}
+<section class="panel result">
+  <div class="section-header"><h2>Response</h2><span class="pill ok">Submitted</span></div>
+  <pre>{{ result | tojson(indent=2) }}</pre>
+</section>
+{% endif %}
+{% endblock %}

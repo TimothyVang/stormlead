@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Buyer Login{% endblock %}
+{% block shell_class %}login-shell{% endblock %}
+{% block content %}
+<section class="hero login-card">
+  <div class="eyebrow">Contractor access</div>
+  <h1>Buyer Portal</h1>
+  <p>Sign in with the buyer ID and API key issued by StormLead. Local proof data stays synthetic until commercial launch is explicitly approved.</p>
+  {% if error %}
+  <section class="panel result" role="alert"><span class="pill danger">Access denied</span><p>{{ error }}</p></section>
+  {% endif %}
+  <form method="post" action="/login" aria-label="buyer login form">
+    <label>Buyer ID<input name="buyer_id" autocomplete="username" required></label>
+    <label>Buyer API Key<input name="buyer_api_key" autocomplete="current-password" type="password" required></label>
+    <button type="submit">Open Wallet</button>
+  </form>
+</section>
+{% endblock %}

@@ -312,6 +312,12 @@ def test_low_score_or_cd_class_goes_to_manual_review() -> None:
     assert not ok2
     assert reason2 == "class_requires_review"
 
+    lead3 = _lead(lead_class=LeadClass.D)
+    lead3.score = 0.99
+    ok3, reason3 = _lead_can_enter_auction(lead3)
+    assert not ok3
+    assert reason3 == "class_requires_review"
+
 
 def test_recommended_refill_is_zero_above_threshold() -> None:
     assert (
