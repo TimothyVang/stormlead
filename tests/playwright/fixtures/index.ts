@@ -71,7 +71,7 @@ export const test = base.extend<StormLeadFixtures>({
       }
     });
 
-    server.listen(9999, '127.0.0.1');
+    server.listen(9999, process.env.PLAYWRIGHT_BUYER_LISTENER_HOST ?? '0.0.0.0');
     await once(server, 'listening');
     await use(undefined);
     await new Promise<void>((resolve, reject) => {
