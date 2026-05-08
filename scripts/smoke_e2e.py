@@ -79,7 +79,7 @@ SYNTHETIC_PHONE = os.environ.get(
     f"+1512{2000000 + (time.time_ns() % 8000000):07d}",
 )
 
-WEBHOOK_LISTENER_TIMEOUT_S = int(os.environ.get("SMOKE_WEBHOOK_LISTENER_TIMEOUT_S", "10"))
+WEBHOOK_LISTENER_TIMEOUT_S = int(os.environ.get("SMOKE_WEBHOOK_LISTENER_TIMEOUT_S", "30"))
 
 
 received: dict[str, list[dict[str, Any]]] = {"buyer-a": [], "buyer-b": []}

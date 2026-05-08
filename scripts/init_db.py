@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 
 from sqlalchemy import create_engine
-
+from sqlalchemy import text as sa_text
 from stormlead_db.tables import Base
 
 
@@ -29,6 +29,10 @@ def main() -> None:
     sync_dsn = dsn.replace("postgresql+asyncpg://", "postgresql+psycopg://", 1)
     engine = create_engine(sync_dsn)
     with engine.begin() as conn:
+        # CI-created databases do not run infra/sql/01-extensions.sql, so make
+        # create_all self-contained for PostGIS/pgvector-backed table types.
+        for extension in ("postgis", "vector"):
+            conn.execute(sa_text(f'CREATE EXTENSION IF NOT EXISTS "{extension}"'))
         Base.metadata.create_all(conn)
     engine.dispose()
     print(f"create_all ok ({len(Base.metadata.tables)} tables)")
