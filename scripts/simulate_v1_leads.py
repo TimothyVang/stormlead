@@ -46,7 +46,7 @@ CALL_TRACKING_URL = os.environ.get(
     "CALL_TRACKING_URL", f"{FORM_RECEIVER_BASE_URL}/webhooks/call-tracking"
 )
 PING_POST_URL = os.environ.get("PING_POST_URL", "http://localhost:8003")
-LISTENER_HOST = os.environ.get("SIM_LISTENER_HOST", "127.0.0.1")
+LISTENER_HOST = os.environ.get("SIM_LISTENER_HOST", "0.0.0.0")  # noqa: S104 - Docker callback listener
 LISTENER_PORT = int(os.environ.get("SIM_LISTENER_PORT", "9999"))
 WORKFLOW_TIMEOUT_S = int(os.environ.get("SIM_WORKFLOW_TIMEOUT_S", "45"))
 
