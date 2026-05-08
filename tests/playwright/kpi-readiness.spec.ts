@@ -10,6 +10,9 @@ test.describe('KPI and Readiness Checks', () => {
     expect(typeof body.prepaid_cash_cents).toBe('number');
     expect(typeof body.returned_leads).toBe('number');
     expect(typeof body.lead_revenue_cents).toBe('number');
+    expect(typeof body.gross_lead_revenue_cents).toBe('number');
+    expect(typeof body.buyer_adjustments_cents).toBe('number');
+    expect(typeof body.campaign_margin_cents).toBe('number');
   });
 
   test('workflow KPIs → valid response shape', async ({ apiClient }) => {
@@ -32,7 +35,9 @@ test.describe('KPI and Readiness Checks', () => {
     expect(status).toBe(200);
     const { checks } = body;
     expect(checks).toHaveProperty('synthetic_ping_post_routed_test_lead');
+    expect(checks).toHaveProperty('synthetic_call_tracking_ingested');
     expect(checks).toHaveProperty('ping_post_routed_test_lead');
+    expect(checks).toHaveProperty('call_tracking_ingested');
   });
 
   test('workflow KPIs → transition counts are numbers', async ({ apiClient }) => {

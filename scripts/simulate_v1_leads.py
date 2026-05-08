@@ -42,6 +42,9 @@ FORM_RECEIVER_URL = os.environ.get(
     "FORM_RECEIVER_URL", "http://localhost:8002/webhooks/formbricks"
 )
 FORM_RECEIVER_BASE_URL = os.environ.get("FORM_RECEIVER_BASE_URL", "http://localhost:8002")
+CALL_TRACKING_URL = os.environ.get(
+    "CALL_TRACKING_URL", f"{FORM_RECEIVER_BASE_URL}/webhooks/call-tracking"
+)
 PING_POST_URL = os.environ.get("PING_POST_URL", "http://localhost:8003")
 LISTENER_HOST = os.environ.get("SIM_LISTENER_HOST", "127.0.0.1")
 LISTENER_PORT = int(os.environ.get("SIM_LISTENER_PORT", "9999"))
@@ -248,7 +251,25 @@ async def _submit_lead(
     )
     if response.status_code != 200:
         raise RuntimeError(f"{scenario}: webhook failed {response.status_code}: {response.text}")
-    return _json(response)
+    payload = _json(response)
+    if payload.get("lead_id"):
+        call_response = await client.post(
+            CALL_TRACKING_URL,
+            json={
+                "call_id": f"v1-simulation-{scenario}-{uuid4()}",
+                "phone_e164": phone,
+                "duration_seconds": 77,
+                "outcome": "answered",
+                "tracked_at": datetime.now(UTC).isoformat(),
+                "raw_payload": {"scenario": scenario, "synthetic_only": True},
+            },
+        )
+        if call_response.status_code != 200:
+            raise RuntimeError(
+                f"{scenario}: call-tracking failed {call_response.status_code}: {call_response.text}"
+            )
+        payload["call_tracking"] = _json(call_response)
+    return payload
 
 
 async def _wait_for_transition(

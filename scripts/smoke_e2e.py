@@ -31,6 +31,7 @@ import json
 import os
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,9 @@ import httpx
 from aiohttp import web
 
 FORM_RECEIVER_URL = os.environ.get("FORM_RECEIVER_URL", "http://localhost:8002/webhooks/formbricks")
+CALL_TRACKING_URL = os.environ.get(
+    "CALL_TRACKING_URL", FORM_RECEIVER_URL.replace("/webhooks/formbricks", "/webhooks/call-tracking")
+)
 PING_POST_URL = os.environ.get("PING_POST_URL", "http://localhost:8003")
 LISTENER_PORT = 9999
 LISTENER_HOST = os.environ.get("SMOKE_LISTENER_HOST", "127.0.0.1")
@@ -72,7 +76,7 @@ def _candidate_secrets() -> list[str]:
 
 SYNTHETIC_PHONE = os.environ.get(
     "SMOKE_SYNTHETIC_PHONE",
-    f"+1512555{1000 + (time.time_ns() % 9000):04d}",
+    f"+1512{2000000 + (time.time_ns() % 8000000):07d}",
 )
 
 WEBHOOK_LISTENER_TIMEOUT_S = int(os.environ.get("SMOKE_WEBHOOK_LISTENER_TIMEOUT_S", "10"))
@@ -231,6 +235,29 @@ async def main() -> None:
         if not lead_id:
             _fail("post-webhook", f"200 but no lead_id in body: {payload}")
         _ok(f"status={payload.get('status')} lead_id={lead_id}")
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            _step("posting synthetic call-tracking webhook")
+            call_response = await client.post(
+                CALL_TRACKING_URL,
+                json={
+                    "call_id": f"smoke-call-{int(time.time())}",
+                    "phone_e164": SYNTHETIC_PHONE,
+                    "duration_seconds": 91,
+                    "outcome": "answered",
+                    "tracked_at": datetime.now(UTC).isoformat(),
+                    "raw_payload": {"source": "local_smoke", "synthetic_only": True},
+                },
+            )
+            if call_response.status_code != 200:
+                _fail(
+                    "call-tracking-webhook",
+                    f"status={call_response.status_code} body={call_response.text}",
+                )
+            call_payload = call_response.json()
+            if call_payload.get("lead_id") != lead_id:
+                _fail("call-tracking-webhook", f"call did not match lead: {call_payload}")
+            _ok(f"event_id={call_payload.get('event_id')}")
 
         _step(f"waiting for buyer ping webhook (max {WEBHOOK_LISTENER_TIMEOUT_S}s)")
         ping_hit = await _wait_for_buyer_hit()

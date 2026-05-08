@@ -14,12 +14,26 @@ This tracked summary records what the StormLead browser workflow proves without 
 
 ## Verification Commands
 
+- `npm run check:build-status` writes a timeout-resume status report under `testing/runs/free-build-current/` and reports the next safe command.
+- `npm run validate:local`
+- `npm run mcp:stormlead:check`
+- `npm run mcp:stormlead:smoke`
+- `npm run smoke`
+- `npm run simulate:v1`
+- `npm run test:playwright -- --project=api --reporter=line`
+- `npm run test:playwright -- --project=chromium`
+- `npm run test:chrome-observer`
+- `npm run learn:loop:api`
 - `uv run ruff check services libs scripts/smoke_e2e.py scripts/replay_lead.py`
 - `uv run pytest -q services libs`
 - `uv run python scripts/smoke_e2e.py`
 - `npm run test:playwright -- --project=chromium --reporter=line`
 - `npm run test:playwright:ui` for visible time-travel/debug review when needed
 - `npm run cowork:admin:record`
+
+## Resume After Timeout
+
+Run `npm run check:build-status` first. If it reports `blocked`, follow `next_command`. If it reports `resume_needed`, continue from `resume_phase`. If it reports `ready`, the next evidence step is `npm run learn:loop:api` or a PR/review handoff.
 
 ## Sharing Evidence
 

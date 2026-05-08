@@ -39,6 +39,7 @@ from stormlead_core import (
 from stormlead_db import (
     BillingEvent,
     BuyerRow,
+    CallEventRow,
     LeadRow,
     LeadStateTransition,
     PingAttempt,
@@ -410,6 +411,7 @@ async def admin() -> str:
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="StormLead local admin dashboard for synthetic lead workflow proof, buyer wallet controls, return review, and launch-readiness checks." />
   <title>StormLead Admin</title>
   <style>
     :root { color-scheme: dark; --bg: #030303; --glass: rgba(10, 10, 10, .7); --glass-strong: rgba(8, 8, 8, .82); --border: rgba(255, 255, 255, .1); --border-soft: rgba(255, 255, 255, .05); --muted: #a3a3a3; --text: #fff; --accent: #06b6d4; --accent-2: #10b981; --violet: #8b5cf6; --warn: #f59e0b; --danger: #fb7185; --ease: cubic-bezier(.23, 1, .32, 1); }
@@ -1055,12 +1057,30 @@ async def admin_kpis() -> dict[str, Any]:
                     PostResult.returned.is_(False),
                 )
             )
+            gross_lead_revenue = await s.scalar(
+                select(func.coalesce(func.sum(PostResult.bid_cents), 0)).where(
+                    PostResult.delivered.is_(True)
+                )
+            )
+            buyer_adjustments = await s.scalar(
+                select(func.coalesce(func.sum(BillingEvent.amount_cents), 0)).where(
+                    BillingEvent.event_type == "lead.returned"
+                )
+            )
+        lead_revenue_cents = int(lead_revenue or 0)
+        gross_lead_revenue_cents = int(gross_lead_revenue or 0)
+        buyer_adjustments_cents = int(buyer_adjustments or 0)
         return {
             "prepaid_cash_cents": _decimal_to_cents(Decimal(prepaid or 0)),
             "active_buyers": int(active_buyers or 0),
             "sold_leads": int(sold_leads or 0),
             "returned_leads": int(returned_leads or 0),
-            "lead_revenue_cents": int(lead_revenue or 0),
+            "lead_revenue_cents": lead_revenue_cents,
+            "gross_lead_revenue_cents": gross_lead_revenue_cents,
+            "buyer_adjustments_cents": buyer_adjustments_cents,
+            "campaign_spend_cents": 0,
+            "campaign_margin_cents": gross_lead_revenue_cents - buyer_adjustments_cents,
+            "campaign_margin_basis": "gross_lead_revenue_cents - buyer_adjustments_cents; campaign spend is not ingested in local proof",
         }
     except Exception as e:
         log.error("admin.kpis_failed", error=str(e))
@@ -1651,6 +1671,22 @@ async def buyer_daily_report(buyer_id: UUID) -> dict[str, Any]:
                 .scalars()
                 .all()
             )
+            delivered_lead_details = (
+                (
+                    await s.execute(
+                        select(PostResult, LeadRow)
+                        .join(LeadRow, LeadRow.id == PostResult.lead_id)
+                        .where(
+                            PostResult.buyer_id == buyer_id,
+                            PostResult.delivered.is_(True),
+                            PostResult.created_at >= day_start,
+                        )
+                        .order_by(PostResult.created_at.desc())
+                        .limit(25)
+                    )
+                )
+                .all()
+            )
 
             balance_cents = _decimal_to_cents(buyer.deposit_balance)
             threshold_cents = _decimal_to_cents(buyer.low_balance_threshold)
@@ -1661,6 +1697,21 @@ async def buyer_daily_report(buyer_id: UUID) -> dict[str, Any]:
                 delivered_today=int(delivered or 0),
                 gross_spend_today_cents=int(gross_spend or 0),
             )
+            delivered_lead_detail_rows = [
+                {
+                    "lead_id": str(lead.id),
+                    "created_at": lead.created_at.isoformat() if lead.created_at else None,
+                    "delivered_at": post.created_at.isoformat() if post.created_at else None,
+                    "state": lead.state,
+                    "zip": lead.zip,
+                    "requested_service": lead.requested_service,
+                    "lead_class": lead.lead_class,
+                    "bid_cents": post.bid_cents,
+                    "returned": post.returned,
+                    "status": "returned" if post.returned else "delivered",
+                }
+                for post, lead in delivered_lead_details
+            ]
             return {
                 "buyer": _buyer_wallet_response(buyer),
                 "window": {"start_at": day_start.isoformat(), "end_at": now.isoformat()},
@@ -1677,6 +1728,8 @@ async def buyer_daily_report(buyer_id: UUID) -> dict[str, Any]:
                     "below_threshold": balance_cents < threshold_cents,
                     "recommended_refill_cents": refill_cents,
                 },
+                "delivered_lead_details": delivered_lead_detail_rows,
+                "delivered_leads": delivered_lead_detail_rows,
                 "recent_return_requests": [_return_request_response(row) for row in recent_returns],
             }
     except HTTPException:
@@ -1855,12 +1908,18 @@ async def launch_readiness(
                     LeadRow.id.in_(select(lead_ids_subq.c.id)),
                 )
             )
+            matched_call_events = await s.scalar(
+                select(func.count(CallEventRow.id)).where(
+                    CallEventRow.lead_id.in_(select(lead_ids_subq.c.id))
+                )
+            )
 
         local_simulation_checks = {
             "synthetic_ping_post_routed_test_lead": int(delivered or 0) > 0,
             "synthetic_return_review_credit_flow_tested": int(returned or 0) > 0
             and int(approved_return_requests or 0) > 0,
             "synthetic_campaign_source_attribution_visible": int(attributed_leads or 0) > 0,
+            "synthetic_call_tracking_ingested": int(matched_call_events or 0) > 0,
         }
         technical_checks = {
             "three_funded_buyers_in_scope": int(funded_buyers or 0) >= 3,
@@ -1871,6 +1930,7 @@ async def launch_readiness(
             "return_review_credit_flow_tested": int(returned or 0) > 0
             and int(approved_return_requests or 0) > 0,
             "campaign_source_attribution_visible": int(attributed_leads or 0) > 0,
+            "call_tracking_ingested": int(matched_call_events or 0) > 0,
         }
         commercial_approval = os.getenv("STORMLEAD_COMMERCIAL_LAUNCH_APPROVED") == "true"
         checks = {
@@ -1908,11 +1968,13 @@ async def launch_readiness(
                 "returned_posts": int(returned or 0),
                 "approved_return_requests": int(approved_return_requests or 0),
                 "attributed_leads": int(attributed_leads or 0),
+                "matched_call_events": int(matched_call_events or 0),
             },
             "notes": [
                 "ready_for_paid_launch remains false unless STORMLEAD_COMMERCIAL_LAUNCH_APPROVED=true",
                 "market_state scopes lead evidence; market_zip additionally scopes buyer zip coverage",
                 "campaign_budget_cents defaults to a conservative $1,000 local validation threshold",
+                "call tracking readiness uses local synthetic call webhook events matched to scoped leads",
             ],
         }
     except Exception as e:

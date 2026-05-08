@@ -29,6 +29,7 @@
     "show:playwright-report": "playwright show-report testing/playwright-report",
     "observe:chrome": "node scripts/chrome_observe.mjs",
     "test:chrome-observer": "node scripts/test_chrome_observer.mjs",
+    "check:build-status": "node scripts/check_build_status.mjs",
     "learn:loop": "node scripts/self_learning_loop.mjs",
     "learn:loop:api": "node scripts/self_learning_loop.mjs --playwright-project api",
     "learn:loop:full": "node scripts/self_learning_loop.mjs --playwright-project chromium --include-smoke true --include-v1 true",

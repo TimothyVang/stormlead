@@ -93,15 +93,15 @@ def _lead_can_enter_auction(lead: Lead) -> tuple[bool, str]:
         return False, "blocked_for_fraud"
     if lead.hold_for_review:
         return False, "held_for_review"
+    lead_class = lead.lead_class.value if lead.lead_class else None
+    if lead_class in {"c", "d"}:
+        return False, "class_requires_review"
     score = lead.score if lead.score is not None else (lead.qualification_score or 0.0)
     ab_min, hold_min = _routing_thresholds()
     if score >= ab_min:
         return True, "route_ab"
     if score < hold_min:
         return False, "score_below_hold_threshold"
-    lead_class = lead.lead_class.value if lead.lead_class else None
-    if lead_class in {"c", "d"}:
-        return False, "class_requires_review"
     return True, "route_b"
 
 

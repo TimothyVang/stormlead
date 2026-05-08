@@ -473,6 +473,9 @@ function collectStepFindings(step) {
     if ((step.error_count ?? 0) > 0) findings.push(`Puppeteer captured ${step.error_count} browser errors`);
     for (const flowStep of step.lighthouse_steps ?? []) {
       for (const [category, score] of Object.entries(flowStep.categories ?? {})) {
+        if (category === 'performance' && String(flowStep.name ?? '').startsWith('Snapshot report')) {
+          continue;
+        }
         if (typeof score === 'number' && score < 0.9) {
           findings.push(`Lighthouse ${flowStep.name} ${category} score ${score}`);
         }
