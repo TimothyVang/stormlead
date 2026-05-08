@@ -10,10 +10,21 @@ default:
 
 # --- dev stack ---
 
-# bring up the wsl2 dev stack
+# bring up the lean wsl2 dev stack: local APIs + required workflow infra only
 up:
     docker compose --env-file .env -f infra/compose/dev/docker-compose.yml up -d
-    @echo "stack up. langfuse: http://localhost:3001  hatchet: http://localhost:8080  litellm: http://localhost:4000"
+    @echo "lean stack up. landing: http://localhost:8005  buyer: http://localhost:8004  form: http://localhost:8002  ping-post: http://localhost:8003"
+    @echo "need workflow workers? run: just up-pipeline. need every optional service? run: just up-full"
+
+# bring up the synthetic workflow stack: lean stack + workers + LiteLLM
+up-pipeline:
+    docker compose --env-file .env -f infra/compose/dev/docker-compose.yml --profile pipeline up -d
+    @echo "pipeline stack up. litellm: http://localhost:4000"
+
+# bring up every dev service, including observability, watcher, MCP, and UIs
+up-full:
+    docker compose --env-file .env -f infra/compose/dev/docker-compose.yml --profile full up -d
+    @echo "full stack up. langfuse: http://localhost:3001  hatchet: http://localhost:8080  litellm: http://localhost:4000"
 
 # tear it down
 down:

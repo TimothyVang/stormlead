@@ -162,7 +162,8 @@ cargo install just
 
 # 2. clone, env, up
 cp .env.example .env
-just up           # brings up the dev stack
+just up           # lean stack: local APIs + required workflow infra
+just up-pipeline  # add workflow workers + LiteLLM before smoke/simulation
 just migrate      # runs alembic migrations
 just seed        # local dev seed data
 just smoke       # local ingest -> auction -> delivery -> return-review smoke
@@ -182,6 +183,7 @@ npm run codex:version
 npm run codex
 npm run codex:review
 npm run mcp:stormlead:smoke
+npm run learn:loop
 npm run lint:python
 npm run typecheck:python
 npm run test:python
@@ -199,7 +201,7 @@ prod compose + deploy script are placeholders (`infra/compose/prod/`, `.github/w
 - `docs/research/2026-05-architectural-fit.md` — architecture decisions and why v1 uses postgres, hatchet, fastapi, and hetzner us regions.
 - `docs/research/visual-agentic-workflow-runbook.md` — admin workflow timeline, review actions, KPI semantics, and Cowork evidence manifests.
 - `docs/research/v1-paid-pilot-runbook.md` — local technical V1 controls, scoped readiness, and evidence commands.
-- `testing/README.md` — visible Playwright/Cowork evidence rules, headed automation commands, artifact hygiene, and official Playwright references.
+- `testing/README.md` — visible Playwright/Cowork evidence rules, the MCP/Puppeteer self-learning loop, artifact hygiene, and official browser automation references.
 - `docs/research/2026-05-stack-improvements.md` — active technical risk register and implementation corrections.
 - `tools/TOOLS.md` — local-first tool routing, MCP safety rules, and validation commands.
 - `tools/mcp/README.md` — custom StormLead Local Ops MCP tools and safety model.

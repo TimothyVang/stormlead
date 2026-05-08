@@ -18,4 +18,8 @@ docker mcp profile config stormlead_kubernetes --set kubernetes.config_path=$env
 
 Secrets and credentials stay in Docker Desktop's local secret store and are not stored in these files.
 
+Default profiles are inspect-first and local/dev only. The Docker Hub profile keeps mutating repository tools out of the default allowlist; the Kubernetes profile keeps apply/create/delete/patch/Helm/exec/scale tools out of the default allowlist. Do not configure Docker Hub PATs or production kubeconfigs for these profiles without explicit approval.
+
+Ask before any Docker/Kubernetes action that mutates state, including Docker Hub repository changes, deleting containers/volumes/images, changing kube contexts, applying manifests, installing Helm charts, or deleting namespaces/clusters.
+
 OpenCode reads `opencode.json`. Codex reads `.codex/config.toml` after this project is trusted.

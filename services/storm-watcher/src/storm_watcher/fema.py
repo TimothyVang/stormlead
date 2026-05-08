@@ -47,7 +47,10 @@ async def fetch_recent_declarations(days_back: int = 90) -> list[dict[str, Any]]
         return r.json().get("DisasterDeclarationsSummaries", [])
 
 
-def normalize_declaration(d: dict[str, Any]) -> Storm:
+def normalize_declaration(d: dict[str, Any]) -> Storm | None:
+    if d.get("incidentType") not in INCIDENT_TYPES:
+        return None
+
     declared = d.get("declarationDate")
     declared_at = (
         datetime.fromisoformat(declared.replace("Z", "+00:00")) if declared else datetime.now(UTC)

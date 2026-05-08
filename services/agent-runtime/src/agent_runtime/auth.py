@@ -14,7 +14,7 @@ def litellm_chat_completions_url() -> str:
 
 
 def litellm_headers() -> dict[str, str]:
-    api_key = os.getenv("LITELLM_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
+    api_key = os.getenv("LITELLM_API_KEY")
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"

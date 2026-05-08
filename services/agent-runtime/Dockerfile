@@ -9,13 +9,13 @@ COPY libs/stormlead_db/pyproject.toml libs/stormlead_db/
 COPY services/agent-runtime/pyproject.toml services/agent-runtime/
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-install-workspace --package agent-runtime
+    uv sync --no-dev --frozen --no-install-workspace --package agent-runtime
 
 COPY libs/ libs/
 COPY services/agent-runtime/ services/agent-runtime/
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --package agent-runtime
+    uv sync --no-dev --frozen --package agent-runtime
 
 ENV PATH="/app/.venv/bin:$PATH"
 CMD ["python", "-m", "agent_runtime.worker"]

@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Buyer Wallet{% endblock %}
+{% block content %}
+<section class="hero">
+  <div class="section-header">
+    <div>
+      <div class="eyebrow">Buyer operations</div>
+      <h1>Wallet</h1>
+      <p>Review prepaid balance, delivery activity, and return exposure for this buyer account.</p>
+    </div>
+    <span class="pill ok">Local account</span>
+  </div>
+</section>
+
+<section class="grid" aria-label="buyer wallet summary">
+  <article class="card">
+    <div class="muted">Buyer ID</div>
+    <div class="mono">{{ buyer_id }}</div>
+  </article>
+  <article class="card">
+    <div class="muted">Available Synthetic Credit</div>
+    <div class="metric" data-testid="wallet-balance">{{ wallet_view.balance }}</div>
+  </article>
+  <article class="card">
+    <div class="muted">Lifetime Spend</div>
+    <div class="metric">{{ wallet_view.lifetime_spend }}</div>
+  </article>
+  <article class="card">
+    <div class="muted">Daily Cap</div>
+    <div class="metric">{{ wallet_view.daily_cap }}</div>
+  </article>
+</section>
+
+{% if deposit_message %}
+<section class="panel result" data-testid="wallet-deposit-result" data-status="{{ deposit_status }}">
+  <div class="section-header"><h2>Refill Status</h2><span class="pill {% if deposit_status == 'ok' %}ok{% else %}danger{% endif %}">{{ deposit_status }}</span></div>
+  <p>{{ deposit_message }}</p>
+</section>
+{% endif %}
+
+{% if local_demo_enabled %}
+<section class="panel" aria-label="synthetic wallet refill">
+  <div class="section-header"><h2>Synthetic Refill</h2><span class="pill">No Stripe charge</span></div>
+  <p>Add local demo credit to this buyer wallet through StormLead's internal ledger. This does not run a real card charge, Stripe Checkout, payment processor call, or external webhook.</p>
+  <form method="post" action="/buyer-portal/wallet/deposit" data-testid="wallet-deposit-form" aria-label="synthetic wallet deposit form">
+    <label>Amount Cents<input name="amount_cents" data-testid="wallet-deposit-amount" inputmode="numeric" value="50000" required></label>
+    <label>Local Reference<input name="external_reference" value="buyer-portal-local-synthetic-refill"></label>
+    <button type="submit" data-testid="wallet-deposit-submit">Add synthetic wallet credit</button>
+  </form>
+</section>
+{% else %}
+<section class="panel" data-testid="wallet-deposit-disabled">
+  <div class="section-header"><h2>Wallet Funding</h2><span class="pill danger">Disabled</span></div>
+  <p>Synthetic self-refill controls are disabled outside local/dev proof mode. Real buyer funding requires an approved payment integration.</p>
+</section>
+{% endif %}
+
+<section class="panel">
+  <div class="section-header"><h2>Wallet Debug</h2><span class="pill">API backed</span></div>
+  <details>
+    <summary class="muted">Show raw wallet response</summary>
+    <pre>{{ wallet | tojson(indent=2) }}</pre>
+  </details>
+</section>
+
+<section class="panel">
+  <div class="section-header"><h2>Daily Report Debug</h2><span class="pill">Deliveries and returns</span></div>
+  <details>
+    <summary class="muted">Show raw daily report</summary>
+    <pre>{{ report | tojson(indent=2) }}</pre>
+  </details>
+</section>
+{% endblock %}

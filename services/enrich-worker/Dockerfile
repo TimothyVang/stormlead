@@ -8,13 +8,13 @@ COPY libs/stormlead_db/pyproject.toml libs/stormlead_db/
 COPY services/enrich-worker/pyproject.toml services/enrich-worker/
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-install-workspace --package enrich-worker
+    uv sync --no-dev --frozen --no-install-workspace --package enrich-worker
 
 COPY libs/ libs/
 COPY services/enrich-worker/ services/enrich-worker/
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --package enrich-worker
+    uv sync --no-dev --frozen --package enrich-worker
 
 ENV PATH="/app/.venv/bin:$PATH"
 CMD ["python", "-m", "enrich_worker.worker"]

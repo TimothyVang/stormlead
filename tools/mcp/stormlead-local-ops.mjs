@@ -208,7 +208,7 @@ async function runLocalCommand({ script, args = [], timeoutSeconds }) {
 }
 
 async function runNodeLocalCommand({ script, args = [], timeoutSeconds }) {
-  const timeoutMs = Math.max(5, Math.min(timeoutSeconds || 60, 180)) * 1000;
+  const timeoutMs = Math.max(5, Math.min(timeoutSeconds || 60, 900)) * 1000;
   const startedAt = new Date();
   try {
     const result = await execFileAsync(
@@ -423,6 +423,75 @@ server.registerTool(
 
     const result = await runNodeLocalCommand({
       script: 'scripts/test_chrome_observer.mjs',
+      timeoutSeconds: timeout_seconds,
+    });
+    try {
+      return jsonResult({ local_only: true, result: JSON.parse(result.stdout), command: { ok: result.ok, stderr: result.stderr } });
+    } catch {
+      return jsonResult({ local_only: true, command: result });
+    }
+  },
+);
+
+server.registerTool(
+  'run_self_learning_loop',
+  {
+    title: 'Run Self-Learning Loop',
+    description: 'Run the local Playwright, Puppeteer, and MCP self-learning evidence loop. Requires explicit confirm_synthetic_local=true.',
+    inputSchema: {
+      confirm_synthetic_local: z.boolean().default(false),
+      url: z.string().url().optional(),
+      max_iterations: z.number().int().min(1).max(3).default(1),
+      playwright_project: z.enum(['none', 'api', 'chromium', 'all']).default('none'),
+      include_observer: z.boolean().default(true),
+      include_puppeteer: z.boolean().default(true),
+      include_smoke: z.boolean().default(false),
+      include_v1: z.boolean().default(false),
+      headless: z.boolean().default(true),
+      channel: z.string().min(1).max(40).optional(),
+      dispatch_codex: z.boolean().default(false),
+      max_runners: z.number().int().min(1).max(3).default(1),
+      timeout_seconds: z.number().int().min(30).max(900).default(240),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  },
+  async ({
+    confirm_synthetic_local,
+    url,
+    max_iterations,
+    playwright_project,
+    include_observer,
+    include_puppeteer,
+    include_smoke,
+    include_v1,
+    headless,
+    channel,
+    dispatch_codex,
+    max_runners,
+    timeout_seconds,
+  }) => {
+    if (!confirm_synthetic_local) {
+      return textResult('Refusing to run. Call again with confirm_synthetic_local=true to run the local self-learning loop and write testing/runs evidence.');
+    }
+
+    const commandArgs = [
+      '--max-iterations', String(max_iterations),
+      '--playwright-project', playwright_project,
+      '--include-observer', String(include_observer),
+      '--include-puppeteer', String(include_puppeteer),
+      '--include-smoke', String(include_smoke),
+      '--include-v1', String(include_v1),
+      '--headless', String(headless),
+      '--dispatch-codex', String(dispatch_codex),
+      '--max-runners', String(max_runners),
+      '--timeout-seconds', String(timeout_seconds),
+    ];
+    if (url) commandArgs.push('--url', url);
+    if (channel) commandArgs.push('--channel', channel);
+
+    const result = await runNodeLocalCommand({
+      script: 'scripts/self_learning_loop.mjs',
+      args: commandArgs,
       timeoutSeconds: timeout_seconds,
     });
     try {

@@ -14,11 +14,17 @@ proposal-persistence logic as the corpus grows.
 
 from __future__ import annotations
 
+import json
+import os
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
+import httpx
 from hatchet_sdk import Context
 from stormlead_core import get_logger
+from stormlead_db import SkillProposalRow, get_session
 
 from agent_runtime.execution import (
     ModelPolicy,
@@ -41,9 +47,9 @@ Output up to 5 proposed changes as a JSON array. Each item:
 
 {
   "skill_name": "<which skill to modify>",
-  "mutation_type": "prompt" | "tool_choice" | "parameter",
-  "proposed_diff": "<human-readable description of the change>",
-  "expected_impact": "<which trace failure modes this addresses>",
+  "proposal_type": "prompt_update" | "new_skill" | "retire_skill",
+  "title": "<short operator-facing title>",
+  "rationale": "<which trace failure modes this addresses>",
   "confidence": <float 0.0..1.0>
 }
 
@@ -52,12 +58,134 @@ traces. The operator reviews proposals before any code change lands.
 """
 
 
+async def _fetch_weekly_traces() -> list[dict[str, Any]]:
+    host = os.getenv("LANGFUSE_HOST", "").rstrip("/")
+    secret_key = os.getenv("LANGFUSE_SECRET_KEY", "")
+    if not host or not secret_key:
+        return []
+
+    from_ts = (datetime.now(UTC) - timedelta(days=7)).isoformat()
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.get(
+                f"{host}/api/public/traces",
+                params={"fromTimestamp": from_ts, "limit": 100, "orderBy": "timestamp.desc"},
+                headers={"Authorization": f"Bearer {secret_key}"},
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except Exception as exc:
+        log.warning("hermes.langfuse_fetch_failed", error=str(exc))
+        return []
+
+    data = payload.get("data", []) if isinstance(payload, dict) else []
+    return data if isinstance(data, list) else []
+
+
+def _summarize_traces(traces: list[dict[str, Any]]) -> str:
+    failures = 0
+    for trace in traces:
+        status = str(trace.get("status") or trace.get("level") or "").lower()
+        if status in {"error", "failed", "failure"}:
+            failures += 1
+    return f"Traces analyzed: {len(traces)}\nFailure-like traces: {failures}"
+
+
+def _load_skill_registry(skills_dir: Path | None = None) -> list[dict[str, Any]]:
+    root = skills_dir or Path("skills")
+    registry: list[dict[str, Any]] = []
+    if not root.exists():
+        return registry
+
+    for path in sorted(root.glob("*.jsonl")):
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                item = json.loads(line)
+                if isinstance(item, dict):
+                    item.setdefault("source_file", str(path))
+                    registry.append(item)
+        except Exception as exc:
+            log.warning("hermes.skill_registry_load_failed", path=str(path), error=str(exc))
+    return registry
+
+
+def _coerce_proposal_type(value: Any) -> str | None:
+    proposal_type = str(value or "").strip()
+    if proposal_type in {"prompt_update", "new_skill", "retire_skill"}:
+        return proposal_type
+    if proposal_type in {"prompt", "tool_choice", "parameter"}:
+        return "prompt_update"
+    return None
+
+
+def _parse_proposals(proposals_text: str) -> list[dict[str, Any]]:
+    payload = json.loads(proposals_text)
+    if isinstance(payload, dict):
+        payload = payload.get("proposals", [])
+    if not isinstance(payload, list):
+        return []
+
+    proposals: list[dict[str, Any]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        proposal_type = _coerce_proposal_type(item.get("proposal_type") or item.get("mutation_type"))
+        if proposal_type is None:
+            continue
+        title = str(
+            item.get("title")
+            or item.get("proposed_diff")
+            or item.get("skill_name")
+            or "Hermes proposal"
+        )[:255]
+        proposals.append({**item, "proposal_type": proposal_type, "title": title})
+    return proposals
+
+
+async def _persist_proposals(proposals: str | list[dict[str, Any]], proposal_date: date) -> int:
+    if isinstance(proposals, str):
+        try:
+            parsed = _parse_proposals(proposals)
+        except Exception as exc:
+            log.warning("hermes.proposal_parse_failed", error=str(exc))
+            return 0
+    else:
+        parsed = proposals
+
+    rows = parsed[:5]
+    if not rows:
+        return 0
+
+    async with get_session() as session:
+        for item in rows:
+            session.add(
+                SkillProposalRow(
+                    proposal_date=proposal_date,
+                    proposal_type=str(item["proposal_type"]),
+                    skill_name=item.get("skill_name"),
+                    title=str(item.get("title") or "Hermes proposal")[:255],
+                    rationale=item.get("rationale") or item.get("expected_impact"),
+                    proposal_json=item,
+                    status="pending_review",
+                )
+            )
+    return len(rows)
+
+
 async def hermes_self_evolution(context: Context) -> dict[str, Any]:
-    """weekly cron. trace digest -> opus -> proposals (raw text in v1)."""
-    # TODO: pull last-week traces from langfuse api
-    # TODO: load current skill / prompt registry from disk
-    # TODO: persist proposals to skill_proposals table
-    digest = "TODO: populate from langfuse trace digest + skill registry"
+    """Weekly trace digest -> model proposals -> pending review rows."""
+    traces = await _fetch_weekly_traces()
+    trace_summary = _summarize_traces(traces)
+    skill_registry = _load_skill_registry()
+    digest = "\n\n".join(
+        [
+            trace_summary,
+            "Skill registry:",
+            json.dumps(skill_registry[:50], default=str),
+        ]
+    )
 
     workflow_input = context.workflow_input
     payload = workflow_input() if callable(workflow_input) else workflow_input
@@ -107,7 +235,8 @@ async def hermes_self_evolution(context: Context) -> dict[str, Any]:
         )
         raise
 
-    log.info("hermes.done", proposal_chars=len(proposals_text))
+    saved_count = await _persist_proposals(proposals_text, date.today())
+    log.info("hermes.done", proposal_chars=len(proposals_text), proposals_saved=saved_count)
     emit_task_event(
         status="success",
         event_type="agent.task.succeeded",
@@ -120,4 +249,4 @@ async def hermes_self_evolution(context: Context) -> dict[str, Any]:
         estimated_output_tokens=int(usage["estimated_output_tokens"]),
         estimated_cost_usd=float(usage["estimated_cost_usd"]),
     )
-    return {"proposals_raw": proposals_text}
+    return {"proposals_raw": proposals_text, "proposals_saved": saved_count}

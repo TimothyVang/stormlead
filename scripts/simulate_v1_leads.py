@@ -730,7 +730,10 @@ async def main_async() -> int:
 
     runner = await _start_buyer_listener()
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with httpx.AsyncClient(
+            timeout=20,
+            limits=httpx.Limits(max_keepalive_connections=0),
+        ) as client:
             manifest["service_health"] = await _service_health(client)
             for scenario_name, scenario_fn in SCENARIOS:
                 print(f"[simulate] {scenario_name} ... ", end="", flush=True)

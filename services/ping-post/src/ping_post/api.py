@@ -17,13 +17,14 @@ import asyncio
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, cast
 from uuid import UUID, uuid4
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from hatchet_sdk import Context, Hatchet
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import Integer, and_, func, select, text
@@ -52,7 +53,11 @@ from stormlead_db import (
     summarize_transition_payload,
 )
 
+from ping_post.attribution import get_campaign_roi, get_roi_by_zip
 from ping_post.auction import run_auction
+from ping_post.buyer_crm import check_exclusive_zip_conflict
+from ping_post.guardrails import evaluate_buyer_guardrails
+from ping_post.mailer import export_mailer_csv
 
 configure_logging()
 log = get_logger(__name__)
@@ -275,6 +280,12 @@ if _supports_legacy_hatchet_worker:
         async def auction(self, context: Context) -> dict[str, Any]:
             return await _auction_step(context)
 
+    @hatchet.workflow(name="GuardrailEvaluation", on_crons=["0 6 * * *"])
+    class GuardrailEvaluation:
+        @hatchet.step(timeout="300s", retries=1)
+        async def evaluate(self, context: Context) -> dict[str, Any]:
+            return {"actions": await evaluate_buyer_guardrails()}
+
 else:
 
     @hatchet.task(
@@ -286,6 +297,15 @@ else:
     async def ping_post_auction_task(task_input: Any, context: Context) -> dict[str, Any]:
         adapted = _ContextAdapter(_task_payload(task_input, context))
         return await _auction_step(cast(Context, adapted))
+
+    @hatchet.task(
+        name="GuardrailEvaluation",
+        on_crons=["0 6 * * *"],
+        execution_timeout="300s",
+        retries=1,
+    )
+    async def guardrail_evaluation_task(task_input: Any, context: Context) -> dict[str, Any]:
+        return {"actions": await evaluate_buyer_guardrails()}
 
 
 def _row_to_lead(row: LeadRow) -> Lead:
@@ -342,11 +362,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if _supports_legacy_hatchet_worker:
         worker = hatchet.worker("ping-post-worker", max_runs=10)
         worker.register_workflow(PingPostWorkflow())
+        worker.register_workflow(GuardrailEvaluation())
     else:
         worker = hatchet.worker(
             "ping-post-worker",
             slots=10,
-            workflows=[ping_post_auction_task],
+            workflows=[ping_post_auction_task, guardrail_evaluation_task],
         )
     async_start = getattr(worker, "async_start", None)
     if callable(async_start):
@@ -391,63 +412,99 @@ async def admin() -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>StormLead Admin</title>
   <style>
-    :root { color-scheme: dark; --bg: #020617; --panel: rgba(15, 23, 42, .88); --panel-2: rgba(17, 24, 39, .92); --border: #243449; --muted: #94a3b8; --text: #e5edf8; --accent: #38bdf8; --accent-2: #22c55e; --warn: #f59e0b; --danger: #fb7185; }
+    :root { color-scheme: dark; --bg: #030303; --glass: rgba(10, 10, 10, .7); --glass-strong: rgba(8, 8, 8, .82); --border: rgba(255, 255, 255, .1); --border-soft: rgba(255, 255, 255, .05); --muted: #a3a3a3; --text: #fff; --accent: #06b6d4; --accent-2: #10b981; --violet: #8b5cf6; --warn: #f59e0b; --danger: #fb7185; --ease: cubic-bezier(.23, 1, .32, 1); }
     * { box-sizing: border-box; }
-    body { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; min-height: 100vh; background: radial-gradient(circle at top left, rgba(14, 165, 233, .24), transparent 34rem), linear-gradient(145deg, #020617 0%, #0f172a 48%, #111827 100%); color: var(--text); }
-    h1, h2 { letter-spacing: -.03em; margin: 0; }
-    h1 { font-size: clamp(2rem, 5vw, 4.4rem); line-height: .95; max-width: 880px; }
-    h2 { font-size: 1.15rem; }
-    p { line-height: 1.55; }
-    .admin-shell { width: min(1480px, calc(100% - 2rem)); margin: 0 auto; padding: 1.25rem 0 3rem; }
-    .hero { border: 1px solid rgba(56, 189, 248, .22); border-radius: 28px; padding: clamp(1.25rem, 4vw, 2.5rem); background: linear-gradient(135deg, rgba(12, 74, 110, .9), rgba(15, 23, 42, .72)); box-shadow: 0 22px 70px rgba(2, 6, 23, .45); }
+    html { background: var(--bg); scroll-behavior: smooth; }
+    body { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; min-height: 100vh; overflow-x: hidden; background: radial-gradient(circle at top center, rgba(139, 92, 246, .4), transparent 34rem), radial-gradient(circle at left center, rgba(6, 182, 212, .08), transparent 42rem), #030303; color: var(--text); }
+    body::before { background-image: linear-gradient(rgba(255,255,255,.032) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.032) 1px, transparent 1px); background-size: 72px 72px; content: ""; inset: 0; mask-image: linear-gradient(to bottom, rgba(0,0,0,.72), transparent 78%); pointer-events: none; position: fixed; }
+    @keyframes float-orb { from { transform: translateY(0) scale(1); } to { transform: translateY(-20px) scale(1.05); } }
+    @keyframes shimmer { from { background-position: 200% center; } to { background-position: -200% center; } }
+    @keyframes spin { to { transform: rotate(1turn); } }
+    @keyframes marquee { to { transform: translateX(-50%); } }
+    @keyframes enter { to { opacity: 1; transform: translateY(0); } }
+    @keyframes pulse { 50% { opacity: .35; transform: scale(.72); } }
+    .orb { border-radius: 999px; filter: blur(90px); opacity: .78; pointer-events: none; position: fixed; z-index: 0; animation: float-orb 12s var(--ease) infinite alternate; }
+    .orb.violet { background: rgba(139, 92, 246, .4); height: 18rem; right: 7vw; top: 11vh; width: 18rem; }
+    .orb.cyan { animation-duration: 15s; background: rgba(6, 182, 212, .4); bottom: 13vh; height: 15rem; left: 5vw; width: 15rem; }
+    h1, h2 { font-family: "Instrument Serif", Georgia, serif; font-weight: 400; letter-spacing: -.045em; margin: 0; }
+    h1 { font-size: clamp(3.6rem, 8vw, 7.2rem); line-height: .88; max-width: 920px; }
+    h2 { font-size: clamp(1.7rem, 3vw, 2.45rem); line-height: .96; }
+    p { color: var(--muted); font-weight: 300; line-height: 1.65; }
+    .admin-shell { margin: 0 auto; padding: 7.5rem 1rem 4rem; position: relative; width: min(1480px, 100%); z-index: 1; }
+    .nav-pill { align-items: center; backdrop-filter: blur(16px); background: var(--glass); border: 1px solid var(--border); border-radius: 999px; display: grid; gap: .75rem; grid-template-columns: 1fr auto 1fr; left: 50%; max-width: 672px; padding: .55rem .65rem; position: fixed; top: 1.5rem; transform: translateX(-50%); width: 95%; z-index: 10; }
+    .brand { align-items: center; color: #fff; display: inline-flex; font-family: "Instrument Serif", Georgia, serif; font-size: 1.2rem; gap: .5rem; letter-spacing: -.02em; text-decoration: none; white-space: nowrap; }
+    .brand-dot { background: linear-gradient(135deg, var(--violet), var(--accent)); border-radius: 999px; box-shadow: 0 0 20px -6px var(--violet); height: .45rem; width: .45rem; }
+    .nav-links { display: flex; gap: .85rem; justify-content: center; }
+    .nav-links a { color: #a3a3a3; font-size: .72rem; font-weight: 600; letter-spacing: .18em; text-decoration: none; text-transform: uppercase; transition: color .7s var(--ease); }
+    .nav-links a:hover { color: #fff; }
+    .nav-cta { background: #fff; border-radius: 999px; color: #000; font-size: .78rem; font-weight: 700; justify-self: end; padding: .62rem .95rem; text-decoration: none; }
+    .hero { backdrop-filter: blur(16px); border: 1px solid var(--border); border-radius: 1.5rem; padding: clamp(1.6rem, 4vw, 3rem); background: rgba(8, 8, 8, .8); box-shadow: 0 0 20px -10px rgba(139,92,246,.4); overflow: hidden; position: relative; }
+    .hero::before { background: radial-gradient(circle, rgba(139,92,246,.28), transparent 48%); content: ""; filter: blur(44px); height: 18rem; position: absolute; right: -4rem; top: -6rem; width: 18rem; }
+    .hero::after { background: linear-gradient(90deg, rgba(139,92,246,.85), rgba(6,182,212,.75), transparent); bottom: 0; content: ""; height: 1px; left: 0; position: absolute; right: 0; }
     .hero-top, .section-header, .toolbar { align-items: center; display: flex; flex-wrap: wrap; gap: .75rem; justify-content: space-between; }
-    .eyebrow { color: #7dd3fc; font-size: .78rem; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; }
-    .subtitle { color: #cbd5e1; font-size: 1.05rem; max-width: 760px; }
+    .eyebrow { color: #737373; font-size: .62rem; font-weight: 600; letter-spacing: .2em; text-transform: uppercase; }
+    .subtitle { color: var(--muted); font-size: 1.05rem; max-width: 760px; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 1rem; margin: 1rem 0 1.5rem; }
     .two-column { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(320px, .9fr); gap: 1rem; }
     .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .85rem; }
-    .card, table, form, .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 18px; }
-    .card { min-height: 112px; overflow: hidden; padding: 1rem; position: relative; }
-    .card::after { background: linear-gradient(90deg, var(--accent), transparent); bottom: 0; content: ""; height: 3px; left: 0; position: absolute; right: 0; }
-    .metric { font-size: clamp(1.65rem, 4vw, 2.25rem); font-weight: 850; color: #e0f2fe; margin-top: .35rem; }
-    form, .panel { margin: 1rem 0; padding: 1rem; }
-    label { display: grid; gap: .4rem; color: #bfdbfe; font-size: .86rem; font-weight: 700; }
-    input, select, textarea { background: #030712; border: 1px solid #475569; border-radius: 11px; color: var(--text); min-height: 2.7rem; padding: .72rem .8rem; width: 100%; }
-    input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(56, 189, 248, .16); outline: none; }
+    .card, table, form, .panel { backdrop-filter: blur(16px); background: rgba(255, 255, 255, .02); border: 1px solid var(--border-soft); border-radius: 1.5rem; box-shadow: 0 0 20px -14px #8b5cf6; }
+    .card { min-height: 112px; opacity: 0; overflow: hidden; padding: 1.35rem; position: relative; transform: translateY(20px); animation: enter .9s var(--ease) forwards; transition: transform .9s var(--ease), border-color .9s var(--ease), background .9s var(--ease), box-shadow .9s var(--ease); }
+    .card::after { background: linear-gradient(90deg, var(--violet), var(--accent), transparent); bottom: 0; content: ""; height: 1px; left: 0; position: absolute; right: 0; }
+    .card:hover { background: rgba(255,255,255,.045); border-color: rgba(139,92,246,.4); box-shadow: 0 0 20px -10px rgba(139,92,246,.4); transform: translateY(-12px); }
+    .metric { color: #fff; font-size: clamp(1.65rem, 4vw, 2.25rem); font-weight: 600; letter-spacing: -.03em; margin-top: .35rem; }
+    form, .panel { margin: 1rem 0; padding: 1.2rem; }
+    label { display: grid; gap: .45rem; color: #d4d4d4; font-size: .72rem; font-weight: 600; letter-spacing: .13em; text-transform: uppercase; }
+    input, select, textarea { background: rgba(3,3,3,.88); border: 1px solid var(--border); border-radius: 1rem; color: var(--text); min-height: 2.9rem; padding: .76rem .86rem; transition: border-color .7s var(--ease), box-shadow .7s var(--ease); width: 100%; }
+    input:focus, select:focus, textarea:focus { border-color: rgba(6,182,212,.72); box-shadow: 0 0 0 4px rgba(6,182,212,.12); outline: none; }
     textarea { min-height: 4.75rem; resize: vertical; }
-    button { background: linear-gradient(135deg, #0284c7, #0369a1); border: 0; border-radius: 999px; color: white; cursor: pointer; font-weight: 800; min-height: 2.75rem; padding: .75rem 1.05rem; }
-    button.secondary { background: #334155; }
-    button.ghost { background: rgba(15, 23, 42, .65); border: 1px solid #475569; }
-    button:hover { filter: brightness(1.08); transform: translateY(-1px); }
+    button { background: #fff; border: 0; border-radius: 999px; color: #000; cursor: pointer; font-weight: 700; min-height: 2.9rem; padding: .8rem 1.2rem; transition: transform .7s var(--ease), filter .7s var(--ease); }
+    button.secondary { background: rgba(255,255,255,.06); border: 1px solid var(--border); color: #fff; }
+    button.ghost { background: rgba(10,10,10,.7); border: 1px solid var(--border); color: #fff; }
+    button:hover { filter: brightness(.95); transform: translateY(-2px); }
     button:disabled { cursor: wait; filter: grayscale(.4); opacity: .7; transform: none; }
     .actions { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1rem; }
-    .status { background: rgba(2, 6, 23, .62); border: 1px solid #334155; border-left: 5px solid var(--accent); border-radius: 14px; margin: 1rem 0; padding: .85rem 1rem; white-space: pre-wrap; }
+    .status { backdrop-filter: blur(16px); background: rgba(10,10,10,.7); border: 1px solid var(--border); border-left: 5px solid var(--accent); border-radius: 1.1rem; margin: 1rem 0; padding: .9rem 1rem; white-space: pre-wrap; }
     .status.ok { border-left-color: var(--accent-2); }
     .status.error { border-left-color: var(--danger); }
     .muted { color: var(--muted); }
     .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .84rem; }
-    .pill { align-items: center; background: rgba(15, 23, 42, .76); border: 1px solid #334155; border-radius: 999px; color: #dbeafe; display: inline-flex; font-size: .78rem; font-weight: 800; gap: .35rem; padding: .35rem .65rem; }
-    .pill.ok { border-color: rgba(34, 197, 94, .55); color: #bbf7d0; }
-    .pill.warn { border-color: rgba(245, 158, 11, .6); color: #fde68a; }
-    .pill.danger { border-color: rgba(251, 113, 133, .55); color: #fecdd3; }
+    .pill { align-items: center; background: rgba(10,10,10,.7); border: 1px solid var(--border); border-radius: 999px; color: #d4d4d4; display: inline-flex; font-size: .7rem; font-weight: 600; gap: .35rem; letter-spacing: .16em; padding: .4rem .75rem; text-transform: uppercase; }
+    .pill.ok { border-color: rgba(16,185,129,.45); color: #6ee7b7; }
+    .pill.warn { border-color: rgba(245,158,11,.45); color: #fde68a; }
+    .pill.danger { border-color: rgba(251,113,133,.45); color: #fecdd3; }
+    .shimmer { animation: shimmer 5s linear infinite; background: linear-gradient(90deg, #a78bfa 0%, #fff 40%, #fff 60%, #22d3ee 100%); background-clip: text; background-size: 200%; color: transparent; }
+    .ticker { border-bottom: 1px solid var(--border-soft); border-top: 1px solid var(--border-soft); background: rgba(0,0,0,.4); height: 60px; margin: 1rem calc(50% - 50vw); overflow: hidden; }
+    .ticker-track { align-items: center; animation: marquee 40s linear infinite; display: flex; gap: 2.5rem; height: 100%; min-width: max-content; width: max-content; }
+    .ticker-item { align-items: baseline; display: inline-flex; gap: .65rem; white-space: nowrap; }
+    .ticker-label { color: #737373; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .62rem; letter-spacing: .2em; text-transform: uppercase; }
+    .ticker-value { color: #fff; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 1rem; }
+    .accent-violet { color: #a78bfa; } .accent-cyan { color: #22d3ee; } .accent-emerald { color: #34d399; }
     .readiness-grid { display: grid; gap: .75rem; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); margin-top: .9rem; }
     .check-list { display: grid; gap: .45rem; margin-top: .9rem; }
     .check-row { align-items: center; display: flex; gap: .5rem; justify-content: space-between; }
     .timeline { display: grid; gap: .75rem; margin-top: 1rem; }
-    .timeline-event { background: #020617; border: 1px solid #334155; border-left: 4px solid var(--accent); border-radius: 14px; padding: .9rem; }
+    .timeline-event { background: rgba(8,8,8,.8); border: 1px solid var(--border-soft); border-left: 4px solid var(--accent); border-radius: 1.1rem; padding: .9rem; }
     .timeline-event.review { border-left-color: #facc15; }
     .timeline-event.attention { border-left-color: var(--danger); }
-    .payload { background: #0f172a; border-radius: 10px; color: #cbd5e1; overflow: auto; padding: .75rem; }
-    .table-wrap { border: 1px solid var(--border); border-radius: 18px; overflow-x: auto; }
+    .payload { background: rgba(3,3,3,.88); border: 1px solid var(--border-soft); border-radius: 1rem; color: #d4d4d4; overflow: auto; padding: .75rem; }
+    .table-wrap { border: 1px solid var(--border-soft); border-radius: 1.5rem; overflow-x: auto; }
     table { border: 0; border-collapse: collapse; min-width: 780px; width: 100%; }
-    th, td { padding: 0.78rem; border-bottom: 1px solid #334155; text-align: left; vertical-align: top; }
-    th { background: rgba(15, 23, 42, .96); color: #93c5fd; position: sticky; top: 0; }
+    th, td { padding: 0.78rem; border-bottom: 1px solid var(--border-soft); text-align: left; vertical-align: top; }
+    th { background: rgba(8,8,8,.82); color: #737373; font-size: .62rem; font-weight: 600; letter-spacing: .2em; position: sticky; text-transform: uppercase; top: 0; }
     tr[data-lead-id], tr[data-buyer-id] { cursor: pointer; }
-    tr[data-lead-id]:hover, tr[data-buyer-id]:hover { background: #1e293b; }
-    @media (max-width: 900px) { .two-column { grid-template-columns: 1fr; } .admin-shell { width: min(100% - 1rem, 1480px); } .hero { border-radius: 20px; } }
+    tr[data-lead-id]:hover, tr[data-buyer-id]:hover { background: rgba(139,92,246,.1); }
+    @media (max-width: 900px) { .nav-pill { grid-template-columns: 1fr auto; } .nav-links { display: none; } .two-column { grid-template-columns: 1fr; } .hero { border-radius: 20px; } }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: .001ms !important; } }
   </style>
 </head>
 <body>
+  <div class="orb violet"></div>
+  <div class="orb cyan"></div>
+  <nav class="nav-pill" aria-label="primary navigation">
+    <a class="brand" href="/admin"><span class="brand-dot"></span><span>StormLead</span></a>
+    <div class="nav-links"><a href="#kpis">Metrics</a><a href="#workflow-runs">Runs</a><a href="#buyers">Buyers</a></div>
+    <a class="nav-cta" href="#buyer-form">Create</a>
+  </nav>
   <main class="admin-shell">
     <section class="hero">
       <div class="hero-top">
@@ -458,8 +515,23 @@ async def admin() -> str:
           <button type="button" class="ghost" onclick="load()">Refresh Dashboard</button>
         </div>
       </div>
-      <h1>StormLead Admin</h1>
+      <h1>StormLead <span class="shimmer">Admin</span></h1>
       <p class="subtitle">Paid-pilot control surface for proving the local lead workflow, buyer wallet controls, returns, and audit timeline without contacting real homeowners or buyers.</p>
+    </section>
+
+    <section class="ticker" aria-label="local operating status">
+      <div class="ticker-track">
+        <div class="ticker-item"><span class="ticker-label">Mode</span><span class="ticker-value accent-violet">Synthetic Local</span></div>
+        <div class="ticker-item"><span class="ticker-label">LLM</span><span class="ticker-value accent-cyan">LiteLLM Routed</span></div>
+        <div class="ticker-item"><span class="ticker-label">Launch</span><span class="ticker-value accent-emerald">Locked Safe</span></div>
+        <div class="ticker-item"><span class="ticker-label">Evidence</span><span class="ticker-value">Audited</span></div>
+        <div class="ticker-item"><span class="ticker-label">Buyers</span><span class="ticker-value">Wallet Gated</span></div>
+        <div class="ticker-item"><span class="ticker-label">Mode</span><span class="ticker-value accent-violet">Synthetic Local</span></div>
+        <div class="ticker-item"><span class="ticker-label">LLM</span><span class="ticker-value accent-cyan">LiteLLM Routed</span></div>
+        <div class="ticker-item"><span class="ticker-label">Launch</span><span class="ticker-value accent-emerald">Locked Safe</span></div>
+        <div class="ticker-item"><span class="ticker-label">Evidence</span><span class="ticker-value">Audited</span></div>
+        <div class="ticker-item"><span class="ticker-label">Buyers</span><span class="ticker-value">Wallet Gated</span></div>
+      </div>
     </section>
 
     <section class="grid" id="kpis" aria-label="business kpis"></section>
@@ -849,6 +921,11 @@ async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon() -> Response:
+    return Response(content=b"", media_type="image/x-icon")
+
+
 @app.get("/readyz")
 async def readyz() -> dict[str, str]:
     # cheap connectivity check
@@ -898,6 +975,7 @@ async def create_buyer(payload: BuyerCreateRequest) -> dict[str, Any]:
         contact_email=payload.contact_email,
         contact_phone_e164=payload.contact_phone_e164,
         status=BuyerStatus.PENDING_VERIFICATION.value,
+        api_key=uuid4().hex,
         license_number=payload.license_number,
         license_state=payload.license_state,
         webhook_url=payload.webhook_url,
@@ -911,10 +989,13 @@ async def create_buyer(payload: BuyerCreateRequest) -> dict[str, Any]:
         sales_stage=payload.sales_stage.value,
         notes=payload.notes,
         next_follow_up_at=payload.next_follow_up_at,
+        follow_up_date=payload.next_follow_up_at,
         services=payload.services,
+        services_offered=payload.services,
         target_zips=payload.target_zips,
         exclusive_zips=payload.exclusive_zips,
         low_balance_threshold=payload.low_balance_threshold,
+        low_balance_threshold_cents=_decimal_to_cents(payload.low_balance_threshold),
         deposit_balance=payload.deposit_balance,
     )
     try:
@@ -986,6 +1067,36 @@ async def admin_kpis() -> dict[str, Any]:
         raise HTTPException(
             500, "admin kpis could not be loaded; retry after checking database health"
         ) from e
+
+
+@app.get("/v1/admin/attribution/campaign/{campaign_id}")
+async def admin_campaign_attribution(campaign_id: str) -> dict[str, Any] | None:
+    roi = await get_campaign_roi(campaign_id)
+    return asdict(roi) if roi is not None else None
+
+
+@app.get("/v1/admin/attribution/by-zip")
+async def admin_attribution_by_zip(state: str = Query(min_length=2, max_length=2)) -> list[dict[str, Any]]:
+    return await get_roi_by_zip(state)
+
+
+@app.get("/v1/admin/export/mailer-csv")
+async def admin_mailer_csv(
+    state: str | None = Query(default=None, min_length=2, max_length=2),
+    service: str | None = Query(default=None, min_length=1, max_length=64),
+    status: str = Query(default="unsold", min_length=1, max_length=32),
+) -> Response:
+    csv_body = await export_mailer_csv(state, service, status)
+    return Response(
+        content=csv_body,
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="stormlead-mailer.csv"'},
+    )
+
+
+@app.post("/v1/admin/guardrails/evaluate")
+async def admin_evaluate_guardrails() -> dict[str, Any]:
+    return {"actions": await evaluate_buyer_guardrails()}
 
 
 @app.get("/v1/admin/workflow-kpis")
@@ -1240,6 +1351,12 @@ async def update_buyer(buyer_id: UUID, payload: BuyerUpdateRequest) -> dict[str,
                 if isinstance(value, (BuyerStatus, BuyerSalesStage)):
                     value = value.value
                 setattr(buyer, key, value)
+                if key == "services":
+                    buyer.services_offered = value
+                elif key == "next_follow_up_at":
+                    buyer.follow_up_date = value
+                elif key == "low_balance_threshold":
+                    buyer.low_balance_threshold_cents = _decimal_to_cents(value)
             await s.flush()
             return _buyer_response(buyer)
     except HTTPException:
@@ -2049,18 +2166,7 @@ async def _assert_no_exclusive_zip_conflict(
 ) -> None:
     if not exclusive_zips:
         return
-    requested = set(exclusive_zips)
-    async with get_session() as s:
-        rows = (
-            await s.execute(select(BuyerRow.id, BuyerRow.company, BuyerRow.exclusive_zips))
-        ).all()
-    for buyer_id, company, existing_zips in rows:
-        if exclude_buyer_id is not None and buyer_id == exclude_buyer_id:
-            continue
-        conflict = requested.intersection(existing_zips or [])
-        if conflict:
-            zips = ", ".join(sorted(conflict))
-            raise HTTPException(409, f"exclusive zip conflict with {company}: {zips}")
+    await check_exclusive_zip_conflict(exclude_buyer_id, exclusive_zips)
 
 
 def _buyer_response(buyer: BuyerRow) -> dict[str, Any]:
@@ -2077,13 +2183,17 @@ def _buyer_response(buyer: BuyerRow) -> dict[str, Any]:
             else None,
             "sales_stage": buyer.sales_stage,
             "notes": buyer.notes,
+            "api_key_set": bool(buyer.api_key),
             "next_follow_up_at": buyer.next_follow_up_at.isoformat()
             if buyer.next_follow_up_at
             else None,
+            "follow_up_date": buyer.follow_up_date.isoformat() if buyer.follow_up_date else None,
             "services": buyer.services or [],
+            "services_offered": buyer.services_offered or [],
             "target_zips": buyer.target_zips or [],
             "exclusive_zips": buyer.exclusive_zips or [],
             "low_balance_threshold_cents": _decimal_to_cents(buyer.low_balance_threshold),
+            "crm_low_balance_threshold_cents": buyer.low_balance_threshold_cents,
             "filter_expression": buyer.filter_expression,
             "webhook_url": buyer.webhook_url,
         }

@@ -30,7 +30,7 @@ class SuppressedLeadError(ValueError):
         self.reason = reason
 
 
-async def upsert_lead(extracted: ExtractedConsent, *, ip: str) -> UUID:
+async def upsert_lead(extracted: ExtractedConsent, *, ip: str) -> tuple[UUID, bool]:
     page_html_hash = extracted.page_html_sha256 or ""
     new_id = uuid4()
     now = datetime.now(UTC)
@@ -102,6 +102,7 @@ async def upsert_lead(extracted: ExtractedConsent, *, ip: str) -> UUID:
                 consent_at=now,
                 page_url=extracted.page_url,
                 page_html_hash=page_html_hash,
+                trustedform_cert_url=extracted.trustedform_cert_url,
                 score=score.score,
                 score_reason=score.reason,
                 hold_for_review=score.hold,
@@ -130,9 +131,10 @@ async def upsert_lead(extracted: ExtractedConsent, *, ip: str) -> UUID:
                     "requested_service": extracted.requested_service,
                     "campaign_id": extracted.campaign_id,
                     "campaign_source": extracted.campaign_source,
+                    "trustedform_cert_url_present": bool(extracted.trustedform_cert_url),
                 },
             )
-            return result.id
+            return result.id, True
 
         existing = (
             await s.execute(
@@ -144,7 +146,7 @@ async def upsert_lead(extracted: ExtractedConsent, *, ip: str) -> UUID:
         ).first()
         if existing is None:
             raise RuntimeError("lead conflict but no existing row found")
-        return existing.id
+        return existing.id, False
 
 
 async def record_audit(

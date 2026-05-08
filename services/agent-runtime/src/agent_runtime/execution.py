@@ -19,7 +19,7 @@ log = get_logger(__name__)
 class ModelPolicy:
     primary_model: str
     fallback_model: str
-    model_tier: str
+    model_tier: Literal["premium", "standard", "economy"]
     token_cap: int
     cost_cap_usd: float
 
@@ -191,7 +191,7 @@ def make_envelope(
         correlation_id=correlation_id,
         timeout_seconds=task_policy.timeout_seconds,
         retry_count=task_policy.retry_count,
-        model_tier=model_policy.model_tier,  # type: ignore[arg-type]
+        model_tier=model_policy.model_tier,
         primary_model=model_policy.primary_model,
         fallback_model=model_policy.fallback_model,
         token_cap=model_policy.token_cap,

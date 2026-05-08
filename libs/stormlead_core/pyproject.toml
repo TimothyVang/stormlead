@@ -7,8 +7,6 @@ dependencies = [
     "pydantic>=2.9",
     "structlog>=24.4",
     "cel-python>=0.3",  # cel evaluator for buyer filters (imports as `celpy`)
-    "shapely>=2.0",
-    "pyproj>=3.7",
 ]
 
 [build-system]

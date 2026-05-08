@@ -39,7 +39,14 @@
     {
       "type": "image",
       "secrets": "default",
-      "tools": null,
+      "tools": [
+        "checkRepository",
+        "checkRepositoryTag",
+        "getRepositoryInfo",
+        "getRepositoryTag",
+        "listRepositoryTags",
+        "search"
+      ],
       "image": "mcp/dockerhub@sha256:6590cd61887254c906e72f5887023749b17be025cfb9156abde85f0388946b03",
       "catalogRef": "mcp/docker-mcp-catalog:latest",
       "snapshot": {

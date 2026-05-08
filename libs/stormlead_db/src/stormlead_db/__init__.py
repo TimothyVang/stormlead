@@ -2,12 +2,14 @@ from stormlead_db.engine import get_engine, get_session
 from stormlead_db.tables import (
     BillingEvent,
     BuyerRow,
+    CallEventRow,
     ConsentAudit,
     LeadRow,
     LeadStateTransition,
     PingAttempt,
     PostResult,
     ReturnRequest,
+    SkillProposalRow,
     StormRow,
     SuppressionEntry,
 )
@@ -28,6 +30,7 @@ from stormlead_db.transitions import (
 __all__ = [
     "BillingEvent",
     "BuyerRow",
+    "CallEventRow",
     "ConsentAudit",
     "LeadRow",
     "LeadRunSummary",
@@ -36,6 +39,7 @@ __all__ = [
     "PingAttempt",
     "PostResult",
     "ReturnRequest",
+    "SkillProposalRow",
     "StormRow",
     "SuppressionEntry",
     "TransitionWriteResult",

@@ -6,7 +6,16 @@
     {
       "type": "image",
       "secrets": "default",
-      "tools": null,
+      "tools": [
+        "explain_resource",
+        "kubectl_context",
+        "kubectl_describe",
+        "kubectl_get",
+        "kubectl_logs",
+        "kubectl_reconnect",
+        "list_api_resources",
+        "ping"
+      ],
       "image": "mcp/kubernetes@sha256:a3032a0f25bc665696467ff21ffa0c80736a48fecb6d83cc8eacd8a4e49f3c5f",
       "catalogRef": "mcp/docker-mcp-catalog:latest",
       "snapshot": {

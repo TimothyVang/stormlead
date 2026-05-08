@@ -16,6 +16,7 @@ response codes:
 
 from __future__ import annotations
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
 
@@ -33,6 +34,8 @@ from stormlead_core import (
 )
 from stormlead_db import get_session
 
+from form_receiver.call_tracking import CallTrackingEvent, ingest_call_event
+from form_receiver.compliance import verify_trustedform_cert
 from form_receiver.schemas import (
     ConsentExtractionError,
     FormbricksEnvelope,
@@ -59,6 +62,7 @@ log = get_logger(__name__)
 
 _hatchet: Hatchet | None = None
 MAX_WEBHOOK_BODY_BYTES = int(os.getenv("FORM_RECEIVER_MAX_WEBHOOK_BODY_BYTES", "262144"))
+_trustedform_tasks: set[asyncio.Task[dict[str, object] | None]] = set()
 
 
 @asynccontextmanager
@@ -198,7 +202,7 @@ async def formbricks_webhook(request: Request) -> dict[str, str]:
 
     # 4. persist + emit
     try:
-        lead_id = await upsert_lead(extracted, ip=ip)
+        lead_id, lead_created = await upsert_lead(extracted, ip=ip)
     except SuppressedLeadError as e:
         log.info(
             "webhook.suppressed",
@@ -211,6 +215,10 @@ async def formbricks_webhook(request: Request) -> dict[str, str]:
             "suppression_id": str(e.suppression_id),
             "reason": e.reason,
         }
+    if extracted.trustedform_cert_url:
+        task = asyncio.create_task(verify_trustedform_cert(extracted.trustedform_cert_url))
+        _trustedform_tasks.add(task)
+        task.add_done_callback(_trustedform_tasks.discard)
     was_new = await record_audit(
         webhook_id=webhook_id,
         lead_id=lead_id,
@@ -218,7 +226,7 @@ async def formbricks_webhook(request: Request) -> dict[str, str]:
         ip=ip,
         raw_payload=raw_body,
     )
-    if was_new:
+    if was_new and lead_created:
         try:
             if _hatchet is None:
                 raise RuntimeError("hatchet client not initialized")
@@ -233,5 +241,15 @@ async def formbricks_webhook(request: Request) -> dict[str, str]:
         emit_metric("funnel.captured", lead_id=str(lead_id), service="form-receiver")
         return {"status": "accepted", "lead_id": str(lead_id)}
 
+    if was_new:
+        log.info("webhook.duplicate_lead", webhook_id=webhook_id, lead_id=str(lead_id))
+        return {"status": "accepted-duplicate", "lead_id": str(lead_id)}
+
     log.info("webhook.duplicate", webhook_id=webhook_id, lead_id=str(lead_id))
     return {"status": "accepted-duplicate", "lead_id": str(lead_id)}
+
+
+@app.post("/webhooks/call-tracking")
+async def call_tracking_webhook(event: CallTrackingEvent) -> dict[str, object]:
+    async with get_session() as session:
+        return await ingest_call_event(event, session)

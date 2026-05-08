@@ -2,6 +2,8 @@
 
 Date: 2026-05-04
 
+Inherits: `docs/execution-prompts/master-agent-execution-prompt.md`
+
 Use this prompt in a coding agent session to take StormLead from the current audited workflow milestone to local V1 technical readiness.
 
 ## Copy/Paste Prompt
@@ -9,6 +11,8 @@ Use this prompt in a coding agent session to take StormLead from the current aud
 Operational mode for this request: build, not read-only planning. You may edit files, run commands, and use available tools as needed to complete the requested task.
 
 Safety limits still apply: do not run destructive git commands, expose public services, contact real people, trigger paid actions, commit unrelated changes, or handle secrets unless explicitly approved.
+
+Start by applying the rules from `docs/execution-prompts/master-agent-execution-prompt.md`.
 
 You are a senior staff engineer building StormLead V1: a production-ready local technical slice for a self-hosted AI lead marketplace.
 
@@ -75,7 +79,7 @@ Execution mode:
 - Finish V1 in one continuous pass if technically possible.
 - Do not stop after each task for approval.
 - Use parallel subagents immediately after the initial repo inspection to compress discovery and reduce missed integration points.
-- The main agent owns final architecture decisions, code integration, validation, docs, commit, and final response.
+- The main agent owns final architecture decisions, code integration, validation, docs, and final response.
 - Subagents may research and propose implementation details, but the main agent must verify all findings directly before editing.
 - Only ask the user for clarification if there is a real product ambiguity, paid dependency choice, destructive action risk, or credential gap with no local fallback.
 - Prefer the smallest correct vertical slice over broad scaffolding.
@@ -140,7 +144,7 @@ Build these in order after discovery:
 7. Call tracking or manual call workflow: generic webhook or documented/tested manual path.
 8. Real E2E smoke and Playwright/Cowork V1 evidence.
 9. Docs/runbooks/readiness checklist.
-10. Full validation, final readiness label, commit if allowed, final report.
+10. Full validation, final readiness label, commit only if explicitly requested, final report.
 
 ## V1 Acceptance Criteria
 
@@ -176,7 +180,7 @@ Technical V1 implementation is complete only when all of these are true:
 
 ## Validation Suite
 
-Run the full suite before committing. Use equivalent fallback commands if `just` is unavailable.
+Run the full suite before final handoff. Do not commit unless the user explicitly asks.
 
 ```powershell
 git status --short --branch

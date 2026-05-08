@@ -14,6 +14,8 @@ members = [
     "services/agent-runtime",
     "services/enrich-worker",
     "services/form-receiver",
+    "apps/landing",
+    "apps/buyer-portal",
 ]
 
 [tool.uv]

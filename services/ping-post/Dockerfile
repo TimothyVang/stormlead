@@ -10,14 +10,14 @@ COPY services/ping-post/pyproject.toml services/ping-post/
 
 # layer 2: install deps without sources
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-install-workspace --package ping-post
+    uv sync --no-dev --frozen --no-install-workspace --package ping-post
 
 # layer 3: copy sources and install workspace
 COPY libs/ libs/
 COPY services/ping-post/ services/ping-post/
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --package ping-post
+    uv sync --no-dev --frozen --package ping-post
 
 ENV PATH="/app/.venv/bin:$PATH"
 EXPOSE 8000

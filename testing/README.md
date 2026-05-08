@@ -47,6 +47,20 @@ Use `npm run cowork:admin:record` to run the live demo in non-persistent capture
 
 Use `npm run evidence:clean` to preview generated evidence cleanup. Use `npm run evidence:clean:apply` to remove ignored generated evidence while preserving the tracked `.gitkeep` placeholders.
 
+## Self-Learning Local Loop
+
+Use `npm run learn:loop` when you want an agent-friendly THINK -> ACT -> OBSERVE -> DECIDE loop that combines local MCP state, Playwright-backed Chrome observation, and Puppeteer/Lighthouse flow evidence.
+
+Useful variants:
+
+- `npm run learn:loop` - local service checks, MCP Chrome observer, Puppeteer/Lighthouse flow, and runner prompt generation.
+- `npm run learn:loop:api` - also runs the Playwright `api` project.
+- `npm run learn:loop:full` - runs the Chromium Playwright project plus local smoke and V1 simulation checks.
+
+Each run writes `testing/runs/<run-id>-self-learning-loop/` with `self-learning-summary.json`, `self-learning-loop.md`, per-iteration markdown, browser logs, screenshots, optional Lighthouse reports, and `runner-prompts/` files. The loop generates prompts for investigation/fix/regression runners, but it does not dispatch Codex runners unless `--dispatch-codex true` is explicitly passed.
+
+The MCP equivalent is `run_self_learning_loop(confirm_synthetic_local=true)`. Like the rest of StormLead local ops, it refuses non-loopback targets and remains synthetic/local by default.
+
 ## Playwright Reference Rules
 
 StormLead uses Playwright as real browser evidence, not as a production mock layer. The local config is `playwright.config.ts`:

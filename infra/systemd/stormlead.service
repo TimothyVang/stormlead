@@ -1,0 +1,17 @@
+[Unit]
+Description=StormLead production Docker Compose stack
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/stormlead
+EnvironmentFile=/opt/stormlead/.env.prod
+RemainAfterExit=yes
+ExecStart=/usr/bin/docker compose --env-file /opt/stormlead/.env.prod -f infra/compose/prod/docker-compose.yml up -d --remove-orphans
+ExecStop=/usr/bin/docker compose --env-file /opt/stormlead/.env.prod -f infra/compose/prod/docker-compose.yml down
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

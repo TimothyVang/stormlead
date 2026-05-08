@@ -1,5 +1,6 @@
 # stormlead dev stack for wsl2
-# use: just up
+# use: just up for the lean local stack, just up-pipeline for synthetic
+# workflow tests, or just up-full when you need every optional service.
 #
 # CRITICAL pinning notes:
 # - litellm: pinned to a known-good tag AFTER the march 2026 supply-chain incident.
@@ -57,6 +58,7 @@ services:
 
   redis:
     image: redis:7-alpine
+    profiles: ["observability", "full"]
     restart: unless-stopped
     command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
     ports:
@@ -155,6 +157,7 @@ services:
   # combined api + frontend (v0.50 ships them as one image)
   hatchet-dashboard:
     image: ghcr.io/hatchet-dev/hatchet/hatchet-dashboard:v0.85.3
+    profiles: ["ui", "full"]
     command: sh ./entrypoint.sh --config /hatchet/config
     ports:
       - "127.0.0.1:8080:80"
@@ -202,6 +205,7 @@ services:
 
   litellm:
     image: ghcr.io/berriai/litellm:main-v1.83.7-stable
+    profiles: ["agents", "pipeline", "full"]
     restart: unless-stopped
     environment:
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-master-change-me}
@@ -228,6 +232,7 @@ services:
 
   clickhouse:
     image: clickhouse/clickhouse-server:24.3-alpine
+    profiles: ["observability", "full"]
     restart: unless-stopped
     environment:
       CLICKHOUSE_DB: langfuse
@@ -241,6 +246,7 @@ services:
 
   langfuse-worker:
     image: langfuse/langfuse-worker:3
+    profiles: ["observability", "full"]
     restart: unless-stopped
     depends_on:
       postgres:
@@ -268,6 +274,7 @@ services:
 
   langfuse-web:
     image: langfuse/langfuse:3
+    profiles: ["observability", "full"]
     restart: unless-stopped
     depends_on:
       langfuse-worker:
@@ -321,6 +328,7 @@ services:
     # Set POSTGRES_MCP_IMAGE to a pinned non-latest tag before paid launch.
     # crystaldba/postgres-mcp-pro: read+write, parameterized, maintained.
     image: crystaldba/postgres-mcp:latest
+    profiles: ["agents", "full"]
     restart: unless-stopped
     depends_on:
       postgres:
@@ -336,8 +344,33 @@ services:
   # =========================================================================
   # services (python)
   # =========================================================================
-  # NOTE: landing, buyer-portal, and voice-bridge are intentionally absent until
-  # their source exists. Caddy fails closed for those routes.
+  # NOTE: voice-bridge is intentionally absent until its source exists.
+
+  landing:
+    build:
+      context: ./../../..
+      dockerfile: apps/landing/Dockerfile
+    restart: unless-stopped
+    environment:
+      FORMBRICKS_ENV_ID: ${FORMBRICKS_ENV_ID:-local-env}
+      FORMBRICKS_SURVEY_ID: ${FORMBRICKS_SURVEY_ID:-local-survey}
+      FORMBRICKS_SCRIPT_SRC: ${FORMBRICKS_SCRIPT_SRC:-/static/formbricks-placeholder.js}
+      FORMBRICKS_WEBHOOK_SECRET: ${FORMBRICKS_WEBHOOK_SECRET}
+      FORM_RECEIVER_URL: http://form-receiver:8000
+      STORMLEAD_LOCAL_DEMO_ENABLED: "true"
+    ports:
+      - "127.0.0.1:8005:8000"
+
+  buyer-portal:
+    build:
+      context: ./../../..
+      dockerfile: apps/buyer-portal/Dockerfile
+    restart: unless-stopped
+    environment:
+      PING_POST_BASE_URL: http://ping-post:8000
+      STORMLEAD_LOCAL_DEMO_ENABLED: "true"
+    ports:
+      - "127.0.0.1:8004:8000"
 
   ping-post:
     build:
@@ -375,6 +408,7 @@ services:
     build:
       context: ./../../..
       dockerfile: services/storm-watcher/Dockerfile
+    profiles: ["watchers", "full"]
     restart: unless-stopped
     depends_on:
       postgres:
@@ -424,6 +458,7 @@ services:
     build:
       context: ./../../..
       dockerfile: services/enrich-worker/Dockerfile
+    profiles: ["pipeline", "full"]
     restart: unless-stopped
     depends_on:
       postgres:
@@ -447,6 +482,7 @@ services:
     build:
       context: ./../../..
       dockerfile: services/agent-runtime/Dockerfile
+    profiles: ["agents", "pipeline", "full"]
     restart: unless-stopped
     depends_on:
       postgres:
@@ -463,8 +499,8 @@ services:
       HATCHET_CLIENT_HOST_PORT: ${HATCHET_CLIENT_HOST_PORT}
       HATCHET_CLIENT_TLS_STRATEGY: none
       # all model traffic routes through LiteLLM
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      LITELLM_PROXY_URL: ${LITELLM_PROXY_URL}
+      LITELLM_API_KEY: ${LITELLM_API_KEY:-sk-master-change-me}
+      LITELLM_PROXY_URL: ${LITELLM_PROXY_URL:-http://litellm:4000}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
       LANGFUSE_HOST: ${LANGFUSE_HOST}

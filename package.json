@@ -3,9 +3,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "validate:compose": "docker compose --env-file .env.example -f infra/compose/dev/docker-compose.yml config --quiet",
-    "validate:codex": "uv run python -c \"import pathlib, tomllib; tomllib.loads(pathlib.Path('.codex/config.toml').read_text()); print('codex config valid TOML')\" && codex --version && npm run mcp:stormlead:check",
+    "validate:compose": "docker compose --env-file .env.example -f infra/compose/dev/docker-compose.yml config --quiet && docker compose --env-file .env.example -f infra/compose/dev/docker-compose.yml --profile full config --quiet",
+    "validate:codex": "uv run python -c \"import json, pathlib, tomllib; root=pathlib.Path('.'); tomllib.loads((root/'.codex/config.toml').read_text()); opencode=json.loads((root/'opencode.json').read_text()); docker=json.loads((root/'.docker/mcp-profile-docker.json').read_text()); kube=json.loads((root/'.docker/mcp-profile-kubernetes.json').read_text()); assert set(opencode['mcp']) == {'stormlead', 'docker', 'kubernetes'}; assert docker['id'] == 'stormlead_docker'; assert kube['id'] == 'stormlead_kubernetes'; forbidden_docker={'createRepository', 'updateRepositoryInfo'}; forbidden_kube={'cleanup', 'exec_in_pod', 'install_helm_chart', 'kubectl_apply', 'kubectl_create', 'kubectl_delete', 'kubectl_generic', 'kubectl_patch', 'kubectl_rollout', 'kubectl_scale', 'node_management', 'uninstall_helm_chart', 'upgrade_helm_chart'}; docker_tools=set(docker['servers'][1]['tools']); kube_tools=set(kube['servers'][0]['tools']); assert not forbidden_docker & docker_tools; assert not forbidden_kube & kube_tools; print('agent MCP config valid')\" && codex --version && npm run mcp:stormlead:check",
     "codex": "codex --cd . --sandbox workspace-write --ask-for-approval on-request",
+    "codex:app": "codex app .",
     "codex:readonly": "codex --cd . --sandbox read-only --ask-for-approval on-request",
     "codex:exec": "codex exec --cd . --sandbox workspace-write -c approval_policy=never",
     "codex:login": "codex login",
@@ -28,6 +29,9 @@
     "show:playwright-report": "playwright show-report testing/playwright-report",
     "observe:chrome": "node scripts/chrome_observe.mjs",
     "test:chrome-observer": "node scripts/test_chrome_observer.mjs",
+    "learn:loop": "node scripts/self_learning_loop.mjs",
+    "learn:loop:api": "node scripts/self_learning_loop.mjs --playwright-project api",
+    "learn:loop:full": "node scripts/self_learning_loop.mjs --playwright-project chromium --include-smoke true --include-v1 true",
     "cowork:admin": "node scripts/live_admin_cowork.mjs",
     "cowork:admin:record": "cross-env STORMLEAD_KEEP_BROWSER_OPEN=0 node scripts/live_admin_cowork.mjs",
     "demo:admin": "npm run cowork:admin",
@@ -40,6 +44,8 @@
     "@openai/codex": "^0.128.0",
     "@playwright/test": "1.59.1",
     "cross-env": "7.0.3",
+    "lighthouse": "^13.2.0",
+    "puppeteer-core": "^24.43.0",
     "zod": "^4.4.3"
   }
 }

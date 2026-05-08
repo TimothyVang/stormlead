@@ -7,6 +7,7 @@ dependencies = [
     "stormlead-core",
     "stormlead-db",
     "fastapi>=0.115",
+    "httpx>=0.27",
     "uvicorn[standard]>=0.32",
     "hatchet-sdk>=0.50",
     "phonenumbers>=8.13",

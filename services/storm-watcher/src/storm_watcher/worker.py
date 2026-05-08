@@ -24,6 +24,7 @@ from stormlead_db import StormRow, get_session
 
 from storm_watcher.fema import fetch_recent_declarations, normalize_declaration
 from storm_watcher.nws import fetch_active_alerts, normalize_alert
+from storm_watcher.tropycal_poller import fetch_active_tropical_systems, normalize_tropical_storm
 
 configure_logging()
 log = get_logger(__name__)
@@ -98,6 +99,8 @@ async def _poll_fema() -> dict[str, Any]:
     new_count = 0
     for d in declarations:
         storm = normalize_declaration(d)
+        if storm is None:
+            continue
         try:
             if await _upsert_storm(storm):
                 new_count += 1
@@ -107,6 +110,40 @@ async def _poll_fema() -> dict[str, Any]:
 
     log.info("fema.poll_done", total=len(declarations), new=new_count)
     return {"total": len(declarations), "new": new_count}
+
+
+def _is_hurricane_season(now: datetime | None = None) -> bool:
+    current = now or datetime.now(UTC)
+    return 6 <= current.month <= 11
+
+
+async def _poll_nhc_tropycal() -> dict[str, Any]:
+    if not _is_hurricane_season():
+        return {"skipped": True, "reason": "outside_hurricane_season"}
+
+    try:
+        systems = await fetch_active_tropical_systems()
+    except Exception as e:
+        ERROR_SINK.report("storm-watcher", "nhc_tropycal_fetch", e)
+        log.error("nhc_tropycal.fetch_failed", error=str(e))
+        return {"error": str(e), "found": 0}
+
+    new_count = 0
+    for system in systems:
+        storm = normalize_tropical_storm(system)
+        if storm is None:
+            continue
+        try:
+            if await _upsert_storm(storm):
+                new_count += 1
+        except Exception as e:
+            ERROR_SINK.report(
+                "storm-watcher", "nhc_tropycal_upsert", e, external_id=storm.external_id
+            )
+            log.error("nhc_tropycal.upsert_failed", external_id=storm.external_id, error=str(e))
+
+    log.info("nhc_tropycal.poll_done", total=len(systems), new=new_count)
+    return {"total": len(systems), "new": new_count}
 
 
 if _supports_legacy_hatchet_worker:
@@ -122,6 +159,12 @@ if _supports_legacy_hatchet_worker:
         @hatchet.step(timeout="120s", retries=2)
         async def poll(self, context: Context) -> dict:
             return await _poll_fema()
+
+    @hatchet.workflow(name="NHCTropycalPoller", on_crons=["*/15 * * * *"])
+    class NHCTropycalPoller:
+        @hatchet.step(timeout="180s", retries=2)
+        async def poll(self, context: Context) -> dict:
+            return await _poll_nhc_tropycal()
 
 else:
 
@@ -143,17 +186,27 @@ else:
     async def fema_poller_task(task_input: Any, context: Context) -> dict[str, Any]:
         return await _poll_fema()
 
+    @hatchet.task(
+        name="NHCTropycalPoller",
+        on_crons=["*/15 * * * *"],
+        execution_timeout="180s",
+        retries=2,
+    )
+    async def nhc_tropycal_poller_task(task_input: Any, context: Context) -> dict[str, Any]:
+        return await _poll_nhc_tropycal()
+
 
 def main() -> None:
     if _supports_legacy_hatchet_worker:
         worker = hatchet.worker("storm-watcher", max_runs=5)
         worker.register_workflow(NwsCapPoller())
         worker.register_workflow(FemaPoller())
+        worker.register_workflow(NHCTropycalPoller())
     else:
         worker = hatchet.worker(
             "storm-watcher",
             slots=5,
-            workflows=[nws_cap_poller_task, fema_poller_task],
+            workflows=[nws_cap_poller_task, fema_poller_task, nhc_tropycal_poller_task],
         )
     async_start = getattr(worker, "async_start", None)
     if callable(async_start):

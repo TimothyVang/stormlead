@@ -46,18 +46,43 @@ test('cowork creates, funds, and reviews real paid-pilot admin dashboard data', 
 
   await cowork.click('#buyer-update-form', 'Activate and move the UI-created buyer to funded.');
   await page.locator('#buyer-update-form input[name="target_zips"]').fill(targetZip);
+  const updateResponsePromise = page.waitForResponse(
+    (response) =>
+      response.url().includes(`/v1/buyers/${buyerId}`) &&
+      response.request().method() === 'PATCH' &&
+      response.status() === 200,
+  );
   await page.getByRole('button', { name: 'Update Real Buyer' }).click();
-  await expect(page.getByRole('row').filter({ hasText: company })).toContainText('active');
-  await expect(page.getByRole('row').filter({ hasText: company })).toContainText('funded');
+  const updateResponse = await updateResponsePromise;
+  const updatePayload = await updateResponse.json();
+  expect(updatePayload.status).toBe('active');
+  expect(updatePayload.sales_stage).toBe('funded');
+  await expect(page.locator('#workflow-status')).toContainText(`Updated real buyer ${company}: active/funded.`, {
+    timeout: 60_000,
+  });
+  const buyerRow = page.locator(`tr[data-buyer-id="${buyerId}"]`);
+  await expect(buyerRow).toContainText('active', { timeout: 60_000 });
+  await expect(buyerRow).toContainText('funded', { timeout: 60_000 });
   await cowork.update('Activated and funded real buyer through UI', 'activate', 'The update form called the real PATCH buyer endpoint and refreshed the roster.');
   cowork.observe('The same UI-created buyer was activated and marked funded through the admin update form.');
 
   await cowork.click('#deposit-form', 'Add prepaid cash through the browser deposit form.');
   await page.locator('#deposit-form input[name="amount_cents"]').fill('77700');
   await page.locator('#deposit-form input[name="external_reference"]').fill(`playwright-cowork-real-ui-${suffix}`);
+  const depositResponsePromise = page.waitForResponse(
+    (response) =>
+      response.url().includes(`/v1/buyers/${buyerId}/deposits`) &&
+      response.request().method() === 'POST' &&
+      response.status() === 200,
+  );
   await page.getByRole('button', { name: 'Add Real Deposit' }).click();
-  const buyerRow = page.getByRole('row').filter({ hasText: company });
-  await expect(buyerRow).toContainText('$777.00');
+  const depositResponse = await depositResponsePromise;
+  const depositPayload = await depositResponse.json();
+  expect(depositPayload.deposit_balance_cents).toBe(77700);
+  await expect(page.locator('#workflow-status')).toContainText('Deposit recorded. New wallet: $777.00.', {
+    timeout: 60_000,
+  });
+  await expect(buyerRow).toContainText('$777.00', { timeout: 60_000 });
   await cowork.update('Added real prepaid deposit through UI', 'deposit', 'The deposit form called the real wallet endpoint and the table now shows $777.00.');
   cowork.observe('The buyer wallet was funded through the real deposit endpoint from the browser UI.');
 

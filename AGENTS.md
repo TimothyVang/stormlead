@@ -14,10 +14,10 @@ Use this file as the repo-local operating guide for coding agents.
 
 - Start with existing code, scripts, tests, and docs before adding new tools.
 - Prefer official vendor documentation and repo-local scripts over community tool packs.
-- Use Playwright for browser proof and screenshots; do not replace browser proof with mocked API setup.
+- Use Playwright for required browser proof and screenshots; Codex App in-app browser is optional for local unauthenticated page preview and visual comments, not a replacement for Playwright evidence.
 - Use Docker Compose for local service orchestration. Treat Docker/Kubernetes MCP access as inspect-first and local/dev by default.
 - OpenCode reads `opencode.json`; Codex reads `.codex/config.toml` after the project is trusted. Both use the same Docker MCP profile exports in `.docker/`.
-- Codex CLI is available through repo npm scripts: `npm run codex`, `npm run codex:readonly`, and `npm run codex:exec -- "<prompt>"`.
+- Codex CLI/App is available through repo npm scripts: `npm run codex`, `npm run codex:app`, `npm run codex:readonly`, and `npm run codex:exec -- "<prompt>"`.
 - StormLead Local Ops MCP lives in `tools/mcp/` and exposes local read tools plus explicitly confirmed synthetic smoke/simulation tools.
 - Ask before destructive or production-like Docker/Kubernetes actions, including deleting volumes, deleting clusters, applying manifests, or changing remote contexts.
 - Keep credentials in local secret stores or `.env` files that are ignored. Never commit tokens, auth headers, cookies, kubeconfigs, cloud credentials, or payment keys.
@@ -31,4 +31,6 @@ Use this file as the repo-local operating guide for coding agents.
 - V1 simulation: `uv run python scripts/simulate_v1_leads.py`.
 - Browser proof: `npm run test:playwright -- --project=chromium --reporter=line`.
 - Codex config check: `npm run validate:codex`.
+- StormLead MCP syntax check: `npm run mcp:stormlead:check`.
 - StormLead MCP smoke: `npm run mcp:stormlead:smoke`.
+- Markdown/config sanity: `git diff --check`.

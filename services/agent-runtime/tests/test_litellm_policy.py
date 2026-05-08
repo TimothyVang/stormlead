@@ -21,6 +21,15 @@ def test_litellm_headers_use_virtual_key(monkeypatch: pytest.MonkeyPatch) -> Non
     assert litellm_headers()["Authorization"] == "Bearer sk-test"
 
 
+def test_litellm_headers_do_not_use_upstream_provider_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-provider-key")
+
+    assert "Authorization" not in litellm_headers()
+
+
 def test_completion_payload_is_openai_compatible() -> None:
     payload = _completion_payload(
         model="agent-default",

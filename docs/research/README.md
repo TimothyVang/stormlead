@@ -9,8 +9,7 @@ Research artifacts that informed the scaffold's choices. Older audit and forkabl
 - **`2026-05-stack-improvements.md`** - verification of time-sensitive claims and technical gaps found after the older research.
 - **`2026-05-architectural-fit.md`** - architecture fit review. Current V1 keeps Postgres, Hatchet, FastAPI, and a US-region deployment target while deferring NATS, SeaweedFS, and OpenBao.
 - **`2026-05-agent-auth-patterns.md`** - historical agent auth research. Runtime services now use LiteLLM only.
-- **`2026-05-04-visual-agentic-workflow-execution-prompt.md`** - dated execution prompt for the admin workflow milestone.
-- **`2026-05-04-v1-execution-prompt.md`** - dated execution prompt for the V1 technical-readiness milestone.
+- **`../execution-prompts/README.md`** - index of the master agent prompt and dated execution prompts for build, tooling/safety, workflow-visibility, and V1 technical-readiness milestones.
 - **`visual-agentic-workflow-runbook.md`** - admin workflow timeline, review actions, KPI semantics, and Cowork evidence manifests.
 - **`v1-paid-pilot-runbook.md`** - local technical V1 controls, scoped readiness, and evidence commands.
 

@@ -1,18 +1,71 @@
 # stormlead caddyfile
-# CRITICAL: { order coraza_waf first } at the top, otherwise waf runs after handlers and is useless.
+# CRITICAL: coraza_waf must run before reverse_proxy handlers.
 
 {
-    # global options
-    order coraza_waf first
-    auto_https off  # dev only; prod gets letsencrypt automatically
+    order crowdsec first
+    order coraza_waf after crowdsec
+    auto_https off
 
-    # crowdsec bouncer would go here in prod
-    # order crowdsec first
+    crowdsec {
+        api_url {$CROWDSEC_API_URL:http://crowdsec:8080}
+        api_key {env.CROWDSEC_BOUNCER_KEY}
+        ticker_interval 15s
+    }
 }
 
-# ---- public-facing implemented routes only ----
+# ---- public ingress ----
 :80 {
-    @form_receiver path /api/lead/* /webhooks/formbricks /privacy /terms /v1/privacy/opt-out
+    @formbricks_webhook path /webhooks/formbricks
+    @form_receiver path /healthz /readyz /api/lead/* /webhooks/call-tracking /privacy /terms /v1/privacy/opt-out
+    @ping_post_health path /ping-post/healthz
+    @external_admin {
+        path /admin /v1/admin/*
+        not remote_ip 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.1/32 ::1
+    }
+    @internal {
+        path /admin /v1/admin/*
+        remote_ip 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.1/32 ::1
+    }
+    @buyer_portal path /buyer-portal /buyer-portal/* /login
+    @landing_static path /static/*
+
+    handle @external_admin {
+        respond "admin route requires an internal network" 403
+    }
+
+    handle @internal {
+        coraza_waf {
+            load_owasp_crs
+            directives `
+                Include /etc/caddy/coraza.conf
+                Include /etc/caddy/owasp_crs/@crs-setup.conf.example
+                Include /etc/caddy/owasp_crs/rules/*.conf
+                SecRuleEngine On
+            `
+        }
+        reverse_proxy ping-post:8000
+    }
+
+    handle @formbricks_webhook {
+        rate_limit {
+            zone formbricks_webhooks {
+                key {remote_host}
+                events 100
+                window 1m
+            }
+        }
+        coraza_waf {
+            load_owasp_crs
+            directives `
+                Include /etc/caddy/coraza.conf
+                Include /etc/caddy/owasp_crs/@crs-setup.conf.example
+                Include /etc/caddy/owasp_crs/rules/*.conf
+                SecRuleEngine On
+            `
+        }
+        reverse_proxy form-receiver:8000
+    }
+
     handle @form_receiver {
         coraza_waf {
             load_owasp_crs
@@ -26,8 +79,21 @@
         reverse_proxy form-receiver:8000
     }
 
+    handle @ping_post_health {
+        uri strip_prefix /ping-post
+        reverse_proxy ping-post:8000
+    }
+
+    handle @buyer_portal {
+        reverse_proxy buyer-portal:8000
+    }
+
+    handle @landing_static {
+        reverse_proxy landing:8000
+    }
+
     handle {
-        respond "StormLead public landing/voice routes are not implemented in V1 local readiness" 404
+        reverse_proxy landing:8000
     }
 
     log {
@@ -36,23 +102,21 @@
         level INFO
     }
 
-    # security headers
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains"
         X-Content-Type-Options "nosniff"
         X-Frame-Options "DENY"
         Referrer-Policy "strict-origin-when-cross-origin"
-        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
+        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'"
         Permissions-Policy "geolocation=(), camera=(), microphone=()"
     }
 }
 
-# ---- internal admin (in prod, behind netbird tailnet only) ----
-# in dev, just expose on a different host
+# ---- internal admin, expose only on a private interface/tailnet ----
 :81 {
     handle /hatchet/* {
         uri strip_prefix /hatchet
-        reverse_proxy hatchet-frontend:80
+        reverse_proxy hatchet-dashboard:80
     }
 
     handle /langfuse/* {

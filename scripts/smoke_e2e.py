@@ -1,7 +1,7 @@
 """end-to-end smoke test for the validation-readiness phase.
 
-assumes the full dev stack is up + migrated + seeded:
-  just up            (postgres + redis + hatchet + litellm + python services)
+assumes the pipeline dev stack is up + migrated + seeded:
+  just up-pipeline   (postgres + hatchet + litellm + workflow services)
   just migrate       (0001_initial + 0002_consent_audits applied)
   just seed          (1 storm + 2 buyers + 1 lead with fixed UUIDs;
                       buyers point at host.docker.internal:9999/buyer-{a,b})
@@ -72,10 +72,10 @@ def _candidate_secrets() -> list[str]:
 
 SYNTHETIC_PHONE = os.environ.get(
     "SMOKE_SYNTHETIC_PHONE",
-    f"+15125550{100 + (int(time.time()) % 100):03d}",
+    f"+1512555{1000 + (time.time_ns() % 9000):04d}",
 )
 
-WEBHOOK_LISTENER_TIMEOUT_S = 10
+WEBHOOK_LISTENER_TIMEOUT_S = int(os.environ.get("SMOKE_WEBHOOK_LISTENER_TIMEOUT_S", "10"))
 
 
 received: dict[str, list[dict[str, Any]]] = {"buyer-a": [], "buyer-b": []}
@@ -114,11 +114,12 @@ def _sign(secret: str, webhook_id: str, ts: str, body: bytes) -> str:
 
 
 def _synthetic_envelope() -> dict[str, Any]:
+    unique_id = time.time_ns()
     return {
         "event": "responseFinished",
-        "webhookId": "smoke-test-webhook",
+        "webhookId": f"smoke-test-webhook-{unique_id}",
         "data": {
-            "id": f"resp_{int(time.time())}",
+            "id": f"resp_{unique_id}",
             "surveyId": "survey_smoke",
             "data": {
                 "name": "Smoke Test Homeowner",

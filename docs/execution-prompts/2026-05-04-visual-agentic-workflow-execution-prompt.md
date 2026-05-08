@@ -2,11 +2,15 @@
 
 Date: 2026-05-04
 
+Inherits: `docs/execution-prompts/master-agent-execution-prompt.md`
+
 Use this prompt in a coding agent session to build StormLead's visual agentic workflow visibility milestone to completion.
 
 This prompt is intentionally strict. Its purpose is to prevent partial delivery by forcing parallel discovery, vertical-slice implementation, real validation, and a measurable definition of done.
 
 ## Copy/Paste Prompt
+
+Start by applying the rules from `docs/execution-prompts/master-agent-execution-prompt.md`.
 
 You are a senior staff engineer building the next StormLead milestone: **visual agentic workflow visibility for lead generation + lead sales**.
 
@@ -69,12 +73,12 @@ Execution mode:
 - Finish this milestone in one continuous pass if technically possible.
 - Do not stop after each task for approval.
 - Use parallel subagents immediately after the initial repo inspection to compress discovery and reduce missed integration points.
-- The main agent owns final architecture decisions, code integration, validation, docs, commit, and final response.
+- The main agent owns final architecture decisions, code integration, validation, docs, and final response.
 - Subagents may research and propose implementation details, but the main agent must verify all findings against the codebase before editing.
 - If a subagent reports uncertainty, inspect the relevant files directly before deciding.
 - Only ask the user for clarification if there is a real product ambiguity or destructive action risk.
 - Keep the implementation minimal: prefer existing `lead_state_transitions`, existing FastAPI admin UI, existing Playwright/Cowork harness, and existing metrics/logging before adding new tables, services, or dependencies.
-- A milestone is not done when the UI looks good; it is done only when the UI is backed by real database state, validated by tests, documented, and committed.
+- A milestone is not done when the UI looks good; it is done only when the UI is backed by real database state, validated by tests, and documented.
 
 One-pass operating rule:
 
@@ -93,7 +97,7 @@ No-premature-stop contract:
 - If a validation command fails, fix the failure and rerun it. Do not summarize the failure as a caveat unless it is an external/local tool blocker with no available fallback.
 - If tests pass but docs are missing, keep working.
 - If docs are done but Playwright/admin verification is missing, keep working.
-- If implementation is done but no commit exists, keep working until the commit is created.
+- If implementation, docs, or required verification are incomplete, keep working until they are complete.
 
 Hard completion gate algorithm:
 
@@ -103,7 +107,7 @@ while true:
   run or verify all focused tests for completed slices
   run the full validation suite
   calculate the 100-point completion score
-  if score == 100 and validation passed and docs are updated and commit exists:
+  if score == 100 and validation passed and docs are updated:
       produce final response
       stop
   if there is a true external blocker:
@@ -128,7 +132,7 @@ Start by inspecting:
 
 1. `git status --short --branch`
 2. `git diff`
-3. `docs/research/2026-05-04-build-execution-prompt.md`
+3. `docs/execution-prompts/2026-05-04-build-execution-prompt.md`
 4. `docs/research/current-milestone-validation.md`
 5. existing admin UI in `services/ping-post/src/ping_post/api.py`
 6. existing Playwright/Cowork files under `tests/playwright`
@@ -907,11 +911,7 @@ Run all required commands:
 - Playwright/Cowork validation if frontend/admin UI changed:
   - `npm run test:playwright -- --project=chromium --reporter=line`
   - `npm run cowork:admin:record`
-- If `just` is installed:
-  - `just test`
-  - `just smoke`
-- If `just` is not installed:
-  - document exact blocker and fallback commands run.
+- Markdown/config sanity if docs or config changed: `git diff --check`
 
 Validation discipline:
 
@@ -919,7 +919,7 @@ Validation discipline:
 - If Playwright is touched, final proof must include both Playwright command output and the location of generated ignored evidence artifacts.
 - If admin UI is touched, final proof must include at least one browser-level or HTTP-level check that the timeline/dashboard route loads.
 - If DB helpers/migrations are touched, final proof must include unit tests and migration/config validation.
-- If `uv run mypy services libs` fails, do not commit until it is fixed unless the failure is outside the changed milestone and documented with exact evidence. Prefer fixing it.
+- If `uv run mypy services libs` fails, do not finalize until it is fixed unless the failure is outside the changed milestone and documented with exact evidence. Prefer fixing it.
 
 Minimum focused test matrix:
 
@@ -981,7 +981,7 @@ Pytest | pass/fail | command output
 Mypy | pass/fail | command output
 Compose config | pass/fail | command output
 Playwright/Cowork | pass/fail | command output or documented not touched
-Commit | pass/fail | commit hash
+Commit, if requested | pass/fail | commit hash or not requested
 Completion score | pass/fail | 100/100 required
 ```
 
@@ -1013,10 +1013,10 @@ Global definition of done:
 - [ ] Compose config validates.
 - [ ] Playwright/Cowork checks pass if touched.
 - [ ] Docs are updated.
-- [ ] Commit is created only after all feasible validation passes.
+- [ ] No commit is created unless explicitly requested; if requested, it is created only after all feasible validation passes.
 - [ ] Do not push unless explicitly asked.
 
-Final self-review before commit:
+Final self-review before handoff or requested commit:
 
 - [ ] Search for `TODO`, `mock`, `fake`, and direct provider SDK imports in changed files; remove or explicitly justify test-only usage.
 - [ ] Check `git diff --stat` and ensure the scope matches this milestone.
@@ -1040,18 +1040,18 @@ This does not need to create fake data. If no local lead exists, document how to
 
 Commit:
 
-Only after the full definition of done passes, create one accurate commit, for example:
+Do not create a commit unless the user explicitly asks. If a commit is requested, create one accurate commit only after the full definition of done passes, for example:
 
 `feat(ops): add visual lead workflow timeline`
 
-Do not create partial commits. If one validation command cannot run because of a local tool blocker, document the exact blocker and run the closest equivalent command before committing.
+Do not create partial commits. If one validation command cannot run because of a local tool blocker, document the exact blocker and run the closest equivalent command before any requested commit.
 
 Final response format:
 
 1. What changed
 2. Proof/validation output
 3. Remaining caveats, if any
-4. Commit hash
+4. Commit hash if a commit was requested and created
 5. Push status
 6. Completion score out of 100
 7. Completion evidence table

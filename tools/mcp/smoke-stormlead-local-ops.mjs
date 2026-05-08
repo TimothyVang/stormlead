@@ -22,12 +22,14 @@ const expectedTools = [
   'observe_chrome_page',
   'run_chrome_observer_functional_test',
   'run_local_smoke',
+  'run_self_learning_loop',
   'run_v1_simulation',
 ].sort();
 const commandTools = new Set([
   'observe_chrome_page',
   'run_chrome_observer_functional_test',
   'run_local_smoke',
+  'run_self_learning_loop',
   'run_v1_simulation',
 ]);
 
@@ -79,6 +81,8 @@ try {
   assert.match(textContent(observeRefusal), /Refusing to run/, 'observe_chrome_page should require synthetic confirmation');
   const observerFunctionalRefusal = await client.callTool({ name: 'run_chrome_observer_functional_test', arguments: { confirm_synthetic_local: false } });
   assert.match(textContent(observerFunctionalRefusal), /Refusing to run/, 'run_chrome_observer_functional_test should require synthetic confirmation');
+  const selfLearningRefusal = await client.callTool({ name: 'run_self_learning_loop', arguments: { confirm_synthetic_local: false } });
+  assert.match(textContent(selfLearningRefusal), /Refusing to run/, 'run_self_learning_loop should require synthetic confirmation');
   const traversal = await client.callTool({ name: 'get_evidence_manifest', arguments: { run_id: '../outside' } });
   assert.equal(traversal.isError, true, 'get_evidence_manifest should reject path traversal');
   assert.match(textContent(traversal), /run_id|testing\/runs|path/i, 'path traversal rejection should explain the invalid run_id');
