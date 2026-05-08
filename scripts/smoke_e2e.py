@@ -7,15 +7,15 @@ assumes the pipeline dev stack is up + migrated + seeded:
                       buyers point at host.docker.internal:9999/buyer-{a,b})
 
 steps:
-  1. start two in-process aiohttp listeners on localhost:9999/buyer-{a,b}
-     to catch the auction's POST-to-winner webhooks.
+  1. start two in-process aiohttp listeners on :9999/buyer-{a,b}
+     to catch the auction's POST-to-winner webhooks from Docker containers.
   2. build a synthetic formbricks `responseFinished` envelope.
   3. sign it with FORMBRICKS_WEBHOOK_SECRET via the standard-webhooks algo.
   4. POST to http://localhost:8002/webhooks/formbricks; expect 200.
      form-receiver's 200 response carries the persisted lead_id, so no
      host-side postgres connection is needed (and avoids the
      remapped-host-port DSN dance).
-  5. wait up to 10s for at least one buyer listener to receive a webhook.
+  5. wait up to 30s for at least one buyer listener to receive a webhook.
   6. print structured result + exit 0; on any failure exit 1.
 
 run: uv run python scripts/smoke_e2e.py
@@ -44,7 +44,7 @@ CALL_TRACKING_URL = os.environ.get(
 )
 PING_POST_URL = os.environ.get("PING_POST_URL", "http://localhost:8003")
 LISTENER_PORT = 9999
-LISTENER_HOST = os.environ.get("SMOKE_LISTENER_HOST", "127.0.0.1")
+LISTENER_HOST = os.environ.get("SMOKE_LISTENER_HOST", "0.0.0.0")  # noqa: S104 - Docker callback listener
 
 
 def _env_file_value(file_name: str, key: str) -> str | None:

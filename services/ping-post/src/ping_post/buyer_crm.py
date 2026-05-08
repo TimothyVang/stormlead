@@ -4,6 +4,7 @@ from uuid import UUID
 
 from fastapi import HTTPException
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import array
 from stormlead_db import BuyerRow, get_session
 
 
@@ -17,7 +18,7 @@ async def check_exclusive_zip_conflict(
     async with get_session() as session:
         stmt = select(BuyerRow.id, BuyerRow.company, BuyerRow.exclusive_zips).where(
             BuyerRow.status == "active",
-            BuyerRow.exclusive_zips.op("?|")(zips),
+            BuyerRow.exclusive_zips.op("?|")(array(zips)),
         )
         if buyer_id is not None:
             stmt = stmt.where(BuyerRow.id != buyer_id)
