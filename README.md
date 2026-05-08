@@ -26,6 +26,10 @@ libs/
   stormlead_core/           shared pydantic models, cel evaluator wrapper
   stormlead_db/             sqlalchemy + alembic migrations
 
+apps/
+  landing/                  local/demo landing page + synthetic lead submit gate
+  buyer-portal/             buyer wallet, delivery report, and return review UI
+
 infra/
   compose/dev/              docker-compose for wsl2 (12 services post-cuts)
   compose/prod/             (placeholder) docker-compose for hetzner
@@ -38,11 +42,11 @@ docs/
   research/                 stack audit + integration risk register (informed the choices)
 
 skills/                     (placeholder) hermes-style agent skills
-scripts/                    (placeholder) one-shot ops
+scripts/                    smoke, simulation, replay, browser evidence, and ops checks
 .github/workflows/          (placeholder) ci/cd
 ```
 
-unimplemented yet (will return as they ship): `apps/landing`, `apps/buyer-portal`, `services/voice-bridge`.
+unimplemented yet (will return as they ship): `services/voice-bridge`.
 
 ## visual map
 

@@ -239,6 +239,7 @@ services:
         condition: service_started
     environment:
       PING_POST_BASE_URL: http://ping-post:8000
+      STORMLEAD_SECURE_COOKIES: ${STORMLEAD_SECURE_COOKIES:-true}
 
   ping-post:
     image: ghcr.io/stormlead/ping-post:2026.05.0
@@ -255,6 +256,9 @@ services:
       HATCHET_CLIENT_HOST_PORT: ${HATCHET_CLIENT_HOST_PORT}
       HATCHET_CLIENT_TLS_STRATEGY: none
       STORMLEAD_COMMERCIAL_LAUNCH_APPROVED: ${STORMLEAD_COMMERCIAL_LAUNCH_APPROVED:-false}
+      STORMLEAD_REQUIRE_OPERATOR_TOKEN: ${STORMLEAD_REQUIRE_OPERATOR_TOKEN:-true}
+      STORMLEAD_OPERATOR_TOKEN: ${STORMLEAD_OPERATOR_TOKEN:?set operator token in secrets manager}
+      STORMLEAD_REQUIRE_BUYER_API_KEY: ${STORMLEAD_REQUIRE_BUYER_API_KEY:-true}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
 
   storm-watcher:

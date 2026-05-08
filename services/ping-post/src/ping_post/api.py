@@ -14,17 +14,19 @@ hatchet workflow:
 from __future__ import annotations
 
 import asyncio
+import hmac
+import ipaddress
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse, Response
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from hatchet_sdk import Context, Hatchet
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import Integer, and_, func, select, text
@@ -228,7 +230,7 @@ class LeadReviewRequest(BaseModel):
         return action
 
 
-hatchet = Hatchet(debug=False)
+hatchet = Hatchet()
 _supports_legacy_hatchet_worker = hasattr(hatchet, "step")
 
 
@@ -277,13 +279,13 @@ if _supports_legacy_hatchet_worker:
     class PingPostWorkflow:
         """Hatchet SDK v0.x workflow wrapper."""
 
-        @hatchet.step(timeout="30s", retries=3)
+        @hatchet.step(timeout=timedelta(seconds=30), retries=3)
         async def auction(self, context: Context) -> dict[str, Any]:
             return await _auction_step(context)
 
     @hatchet.workflow(name="GuardrailEvaluation", on_crons=["0 6 * * *"])
     class GuardrailEvaluation:
-        @hatchet.step(timeout="300s", retries=1)
+        @hatchet.step(timeout=timedelta(seconds=300), retries=1)
         async def evaluate(self, context: Context) -> dict[str, Any]:
             return {"actions": await evaluate_buyer_guardrails()}
 
@@ -292,7 +294,7 @@ else:
     @hatchet.task(
         name="ping-post-auction",
         on_events=["lead.qualified"],
-        execution_timeout="30s",
+        execution_timeout=timedelta(seconds=30),
         retries=3,
     )
     async def ping_post_auction_task(task_input: Any, context: Context) -> dict[str, Any]:
@@ -302,7 +304,7 @@ else:
     @hatchet.task(
         name="GuardrailEvaluation",
         on_crons=["0 6 * * *"],
-        execution_timeout="300s",
+        execution_timeout=timedelta(seconds=300),
         retries=1,
     )
     async def guardrail_evaluation_task(task_input: Any, context: Context) -> dict[str, Any]:
@@ -401,6 +403,85 @@ def _start_hatchet_worker_sync(worker: Any) -> None:
 
 
 app = FastAPI(title="stormlead ping-post", lifespan=lifespan)
+
+
+def _truthy_env(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _request_ip(request: Request) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    host = request.client.host if request.client else ""
+    try:
+        return ipaddress.ip_address(host)
+    except ValueError:
+        return None
+
+
+def _is_local_dev_request(request: Request) -> bool:
+    ip = _request_ip(request)
+    if ip is None:
+        return False
+    if ip.is_loopback:
+        return True
+    return _truthy_env("STORMLEAD_LOCAL_AUTH_BYPASS") and (ip.is_private or ip.is_link_local)
+
+
+def _authorization_bearer_token(request: Request) -> str | None:
+    auth = request.headers.get("authorization", "")
+    scheme, _, token = auth.partition(" ")
+    if scheme.lower() == "bearer" and token.strip():
+        return token.strip()
+    return None
+
+
+def _operator_token(request: Request) -> str | None:
+    header_token = request.headers.get("x-stormlead-operator-token", "").strip()
+    return header_token or _authorization_bearer_token(request)
+
+
+def _operator_path_requires_gate(path: str, method: str) -> bool:
+    if path.startswith("/v1/admin/"):
+        return True
+    if path == "/v1/auction":
+        return True
+    if path == "/v1/buyers":
+        return True
+    if path.startswith("/v1/return-requests/") and path.endswith("/review"):
+        return True
+    if path.startswith("/v1/buyers/") and method in {"PATCH", "DELETE"}:
+        return True
+    return path.startswith("/v1/buyers/") and path.endswith("/deposits")
+
+
+def _operator_authorized(request: Request) -> bool:
+    if not _truthy_env("STORMLEAD_REQUIRE_OPERATOR_TOKEN") and _is_local_dev_request(request):
+        return True
+    expected = os.getenv("STORMLEAD_OPERATOR_TOKEN", "").strip()
+    supplied = _operator_token(request)
+    return bool(expected and supplied and hmac.compare_digest(expected, supplied))
+
+
+@app.middleware("http")
+async def operator_surface_gate(request: Request, call_next: Any) -> Response:
+    if _operator_path_requires_gate(request.url.path, request.method) and not _operator_authorized(request):
+        return JSONResponse(
+            {"detail": "operator token required for admin or funding operations"},
+            status_code=401,
+        )
+    return await call_next(request)
+
+
+def _buyer_api_key_required(request: Request) -> bool:
+    return _truthy_env("STORMLEAD_REQUIRE_BUYER_API_KEY") or not _is_local_dev_request(request)
+
+
+def _require_buyer_api_key(request: Request, buyer: BuyerRow) -> None:
+    if not _buyer_api_key_required(request):
+        return
+    supplied = _authorization_bearer_token(request)
+    if buyer.api_key and supplied and hmac.compare_digest(str(buyer.api_key), supplied):
+        return
+    raise HTTPException(401, "valid buyer API key required")
 
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -678,10 +759,24 @@ async def admin() -> str:
     const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, ch => htmlEscapeMap[ch]);
     const list = value => value.split(',').map(v => v.trim()).filter(Boolean);
     const formJson = form => Object.fromEntries(new FormData(form).entries());
+    const operatorHeaders = () => {
+      const token = window.localStorage.getItem('stormlead_operator_token') || '';
+      return token ? { Authorization: `Bearer ${token}` } : {};
+    };
     const api = async (path, options = {}) => {
-      const res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...options });
+      const res = await fetch(path, {
+        ...options,
+        headers: { 'Content-Type': 'application/json', ...operatorHeaders(), ...(options.headers || {}) },
+      });
       const text = await res.text();
       const data = text ? JSON.parse(text) : {};
+      if (res.status === 401) {
+        const token = window.prompt('Operator token required for protected admin operations.');
+        if (token) {
+          window.localStorage.setItem('stormlead_operator_token', token);
+          return api(path, options);
+        }
+      }
       if (!res.ok) throw new Error(`${res.status}: ${JSON.stringify(data)}`);
       return data;
     };
@@ -716,6 +811,7 @@ async def admin() -> str:
         <div class="readiness-grid">
           <div class="card"><div>Funded Buyers</div><div class="metric">${escapeHtml(metrics.funded_buyers ?? 0)}</div><div class="muted">Need 3 for technical local readiness</div></div>
           <div class="card"><div>Wallet Coverage</div><div class="metric">${money(metrics.active_wallet_total_cents || 0)}</div><div class="muted">Against ${money((data.scope || {}).campaign_budget_cents || 0)} test budget</div></div>
+          <div class="card"><div>Runway Buyers</div><div class="metric">${escapeHtml(metrics.runway_ready_buyers ?? 0)}</div><div class="muted">Need 3 above ${escapeHtml(metrics.required_runway_days ?? 0)} days</div></div>
           <div class="card"><div>Routed Posts</div><div class="metric">${escapeHtml(metrics.delivered_posts ?? 0)}</div><div class="muted">Synthetic ping/post evidence</div></div>
           <div class="card"><div>Approved Returns</div><div class="metric">${escapeHtml(metrics.approved_return_requests ?? 0)}</div><div class="muted">Credit review evidence</div></div>
         </div>
@@ -1339,12 +1435,13 @@ async def review_lead(lead_id: UUID, payload: LeadReviewRequest) -> dict[str, An
 
 
 @app.get("/v1/buyers/{buyer_id}")
-async def get_buyer(buyer_id: UUID) -> dict[str, Any]:
+async def get_buyer(buyer_id: UUID, request: Request) -> dict[str, Any]:
     try:
         async with get_session() as s:
             buyer = await s.get(BuyerRow, buyer_id)
             if buyer is None:
                 raise HTTPException(404, "buyer not found; verify the buyer id and try again")
+            _require_buyer_api_key(request, buyer)
             return _buyer_response(buyer)
     except HTTPException:
         raise
@@ -1387,12 +1484,13 @@ async def update_buyer(buyer_id: UUID, payload: BuyerUpdateRequest) -> dict[str,
 
 
 @app.get("/v1/buyers/{buyer_id}/wallet")
-async def get_wallet(buyer_id: UUID) -> dict[str, Any]:
+async def get_wallet(buyer_id: UUID, request: Request) -> dict[str, Any]:
     try:
         async with get_session() as s:
             buyer = await s.get(BuyerRow, buyer_id)
             if buyer is None:
                 raise HTTPException(404, "buyer not found; verify the buyer id and try again")
+            _require_buyer_api_key(request, buyer)
             return _buyer_wallet_response(buyer)
     except HTTPException:
         raise
@@ -1404,7 +1502,7 @@ async def get_wallet(buyer_id: UUID) -> dict[str, Any]:
 
 
 @app.post("/v1/buyers/{buyer_id}/deposits")
-async def add_deposit(buyer_id: UUID, payload: DepositRequest) -> dict[str, Any]:
+async def add_deposit(buyer_id: UUID, payload: DepositRequest, request: Request) -> dict[str, Any]:
     try:
         async with get_session() as s:
             buyer = await s.get(BuyerRow, buyer_id)
@@ -1433,7 +1531,7 @@ async def add_deposit(buyer_id: UUID, payload: DepositRequest) -> dict[str, Any]
 
 
 @app.post("/v1/leads/{lead_id}/return")
-async def return_lead(lead_id: UUID, payload: ReturnLeadRequest) -> dict[str, Any]:
+async def return_lead(lead_id: UUID, payload: ReturnLeadRequest, request: Request) -> dict[str, Any]:
     try:
         async with get_session() as s:
             result = (
@@ -1451,6 +1549,10 @@ async def return_lead(lead_id: UUID, payload: ReturnLeadRequest) -> dict[str, An
                 raise HTTPException(
                     404, "delivered lead sale not found; verify the lead id and try again"
                 )
+            buyer = await s.get(BuyerRow, result.buyer_id)
+            if buyer is None:
+                raise HTTPException(404, "buyer for delivered lead sale was not found")
+            _require_buyer_api_key(request, buyer)
             if result.returned:
                 raise HTTPException(
                     409, "lead was already returned; check the existing return record"
@@ -1616,7 +1718,7 @@ async def review_return_request(
 
 
 @app.get("/v1/buyers/{buyer_id}/daily-report")
-async def buyer_daily_report(buyer_id: UUID) -> dict[str, Any]:
+async def buyer_daily_report(buyer_id: UUID, request: Request) -> dict[str, Any]:
     now = datetime.now(UTC)
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     try:
@@ -1624,6 +1726,7 @@ async def buyer_daily_report(buyer_id: UUID) -> dict[str, Any]:
             buyer = await s.get(BuyerRow, buyer_id)
             if buyer is None:
                 raise HTTPException(404, "buyer not found; verify the buyer id and try again")
+            _require_buyer_api_key(request, buyer)
             delivered = await s.scalar(
                 select(func.count(PostResult.id)).where(
                     PostResult.buyer_id == buyer_id,
@@ -1879,6 +1982,14 @@ async def launch_readiness(
                     and_(*buyer_scope)
                 )
             )
+            runway_multiplier = Decimal(str(KPI_THRESHOLDS.pause_wallet_runway_days)) / Decimal(30)
+            runway_ready_buyers = await s.scalar(
+                select(func.count(BuyerRow.id)).where(
+                    and_(*configured_scope),
+                    BuyerRow.monthly_budget > 0,
+                    BuyerRow.deposit_balance >= BuyerRow.monthly_budget * runway_multiplier,
+                )
+            )
             lead_ids_query = select(LeadRow.id)
             if lead_scope:
                 lead_ids_query = lead_ids_query.where(and_(*lead_scope))
@@ -1926,6 +2037,7 @@ async def launch_readiness(
             "buyers_have_services_zips_caps_and_prices": int(configured_buyers or 0) >= 3,
             "wallet_balance_covers_campaign_budget": int(total_wallet_cents or 0)
             >= campaign_budget_cents,
+            "buyer_wallet_runway_covers_pause_threshold": int(runway_ready_buyers or 0) >= 3,
             "ping_post_routed_test_lead": int(delivered or 0) > 0,
             "return_review_credit_flow_tested": int(returned or 0) > 0
             and int(approved_return_requests or 0) > 0,
@@ -1963,6 +2075,8 @@ async def launch_readiness(
             "metrics": {
                 "funded_buyers": int(funded_buyers or 0),
                 "configured_buyers": int(configured_buyers or 0),
+                "runway_ready_buyers": int(runway_ready_buyers or 0),
+                "required_runway_days": KPI_THRESHOLDS.pause_wallet_runway_days,
                 "active_wallet_total_cents": int(total_wallet_cents or 0),
                 "delivered_posts": int(delivered or 0),
                 "returned_posts": int(returned or 0),
@@ -1975,6 +2089,7 @@ async def launch_readiness(
                 "market_state scopes lead evidence; market_zip additionally scopes buyer zip coverage",
                 "campaign_budget_cents defaults to a conservative $1,000 local validation threshold",
                 "call tracking readiness uses local synthetic call webhook events matched to scoped leads",
+                "buyer wallet runway must clear the configured pause threshold before technical readiness",
             ],
         }
     except Exception as e:

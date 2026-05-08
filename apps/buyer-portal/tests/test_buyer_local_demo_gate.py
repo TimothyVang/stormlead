@@ -55,3 +55,23 @@ def test_local_demo_disabled_hides_deposit_form_and_route(monkeypatch):
         headers={"cookie": "buyer_id=buyer-test; buyer_api_key=local-test"},
     )
     assert post.status_code == 404
+
+
+def test_login_rejects_invalid_buyer_api_key(monkeypatch):
+    module = _load_buyer_portal(monkeypatch, enabled=False)
+
+    async def fake_ping_post(path: str, api_key: str | None, **kwargs):
+        assert path == "/v1/buyers/buyer-test/wallet"
+        assert api_key == "bad-key"
+        return {"error": "unauthorized", "status_code": 401}
+
+    monkeypatch.setattr(module, "_ping_post", fake_ping_post)
+    client = TestClient(module.app)
+
+    response = client.post(
+        "/login",
+        data={"buyer_id": "buyer-test", "buyer_api_key": "bad-key"},
+    )
+    assert response.status_code == 401
+    assert "Buyer ID or API key was rejected" in response.text
+    assert "set-cookie" not in response.headers

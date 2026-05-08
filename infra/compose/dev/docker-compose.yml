@@ -390,13 +390,14 @@ services:
       HATCHET_CLIENT_HOST_PORT: ${HATCHET_CLIENT_HOST_PORT}
       HATCHET_CLIENT_TLS_STRATEGY: none
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      STORMLEAD_LOCAL_AUTH_BYPASS: ${STORMLEAD_LOCAL_AUTH_BYPASS:-true}
     ports:
       # host port remapped from 8001 to avoid collisions with other local
       # docker projects. smoke_e2e.py + manual curl tests use 8003.
       - "127.0.0.1:8003:8000"
     volumes:
       - hatchet_runtime:/hatchet/runtime:ro
-    command: sh -c ". /hatchet/runtime/client.env; exec uvicorn ping_post.api:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*'"
+    command: sh -c ". /hatchet/runtime/client.env; exec uvicorn ping_post.api:app --host 0.0.0.0 --port 8000"
     # so the auction's POST-to-buyer can reach a host-bound listener
     # (smoke_e2e.py runs in-process aiohttp on the host's :9999); seed
     # buyers point at host.docker.internal. linux/wsl2 needs the

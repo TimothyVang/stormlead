@@ -38,6 +38,7 @@ test.describe('KPI and Readiness Checks', () => {
     expect(checks).toHaveProperty('synthetic_call_tracking_ingested');
     expect(checks).toHaveProperty('ping_post_routed_test_lead');
     expect(checks).toHaveProperty('call_tracking_ingested');
+    expect(checks).toHaveProperty('buyer_wallet_runway_covers_pause_threshold');
   });
 
   test('workflow KPIs → transition counts are numbers', async ({ apiClient }) => {

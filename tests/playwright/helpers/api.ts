@@ -4,6 +4,17 @@ export const FORM_RECEIVER = process.env.FORM_RECEIVER_URL ?? 'http://127.0.0.1:
 export const PING_POST     = process.env.PING_POST_URL     ?? 'http://127.0.0.1:8003';
 export const LANDING       = process.env.LANDING_URL       ?? 'http://127.0.0.1:8005';
 export const BUYER_PORTAL  = process.env.BUYER_PORTAL_URL  ?? 'http://127.0.0.1:8004';
+const OPERATOR_TOKEN = process.env.STORMLEAD_OPERATOR_TOKEN;
+
+type RequestOptions = { data?: unknown; headers?: Record<string, string> };
+
+function withOperatorHeaders(options: RequestOptions = {}): RequestOptions {
+  if (!OPERATOR_TOKEN) return options;
+  return {
+    ...options,
+    headers: { ...(options.headers ?? {}), Authorization: `Bearer ${OPERATOR_TOKEN}` },
+  };
+}
 
 export function runSeed(): number {
   return Date.now() % 10_000_000;
@@ -39,21 +50,21 @@ export class StormLeadApiClient {
     deposit_balance?: number;
     daily_cap?: number;
   }) {
-    const res = await this.req.post(`${PING_POST}/v1/buyers`, { data });
+    const res = await this.req.post(`${PING_POST}/v1/buyers`, withOperatorHeaders({ data }));
     return { status: res.status(), body: await res.json() };
   }
 
   // PATCH /v1/buyers/{buyer_id} — partial update; pass {status: "active"} to activate
   async updateBuyer(buyerId: string, data: Record<string, unknown>) {
-    const res = await this.req.patch(`${PING_POST}/v1/buyers/${buyerId}`, { data });
+    const res = await this.req.patch(`${PING_POST}/v1/buyers/${buyerId}`, withOperatorHeaders({ data }));
     return { status: res.status(), body: await res.json() };
   }
 
   // POST /v1/buyers/{buyer_id}/deposits — amount_cents is integer cents
   async addDeposit(buyerId: string, amountCents: number, externalReference?: string) {
-    const res = await this.req.post(`${PING_POST}/v1/buyers/${buyerId}/deposits`, {
+    const res = await this.req.post(`${PING_POST}/v1/buyers/${buyerId}/deposits`, withOperatorHeaders({
       data: { amount_cents: amountCents, external_reference: externalReference ?? null },
-    });
+    }));
     return { status: res.status(), body: await res.json() };
   }
 
@@ -63,7 +74,7 @@ export class StormLeadApiClient {
   }
 
   async listBuyers() {
-    const res = await this.req.get(`${PING_POST}/v1/buyers`);
+    const res = await this.req.get(`${PING_POST}/v1/buyers`, withOperatorHeaders());
     return { status: res.status(), body: await res.json() };
   }
 
@@ -79,15 +90,15 @@ export class StormLeadApiClient {
 
   // GET /v1/admin/leads/{lead_id}/timeline — also contains current_state and lead summary
   async getTimeline(leadId: string) {
-    const res = await this.req.get(`${PING_POST}/v1/admin/leads/${leadId}/timeline`);
+    const res = await this.req.get(`${PING_POST}/v1/admin/leads/${leadId}/timeline`, withOperatorHeaders());
     return { status: res.status(), body: await res.json() };
   }
 
   // POST /v1/admin/leads/{lead_id}/review — action: "hold" | "approve" | "review"
   async reviewLead(leadId: string, action: 'hold' | 'approve' | 'review', notes?: string) {
-    const res = await this.req.post(`${PING_POST}/v1/admin/leads/${leadId}/review`, {
+    const res = await this.req.post(`${PING_POST}/v1/admin/leads/${leadId}/review`, withOperatorHeaders({
       data: { action, notes: notes ?? null, operator: 'playwright-test' },
-    });
+    }));
     return { status: res.status(), body: await res.json() };
   }
 
@@ -101,27 +112,27 @@ export class StormLeadApiClient {
 
   // POST /v1/return-requests/{id}/review — action: "approve" | "reject" | "hold"
   async reviewReturnRequest(returnRequestId: string, action: 'approve' | 'reject' | 'hold', notes?: string) {
-    const res = await this.req.post(`${PING_POST}/v1/return-requests/${returnRequestId}/review`, {
+    const res = await this.req.post(`${PING_POST}/v1/return-requests/${returnRequestId}/review`, withOperatorHeaders({
       data: { action, notes: notes ?? null, operator: 'playwright-test' },
-    });
+    }));
     return { status: res.status(), body: await res.json() };
   }
 
   // GET /v1/admin/kpis — returns { prepaid_cash_cents, active_buyers, sold_leads, returned_leads, lead_revenue_cents }
   async getKPIs() {
-    const res = await this.req.get(`${PING_POST}/v1/admin/kpis`);
+    const res = await this.req.get(`${PING_POST}/v1/admin/kpis`, withOperatorHeaders());
     return { status: res.status(), body: await res.json() };
   }
 
   // GET /v1/admin/launch-readiness — returns { readiness_label, local_simulation_ready, checks, metrics, ... }
   async getLaunchReadiness() {
-    const res = await this.req.get(`${PING_POST}/v1/admin/launch-readiness`);
+    const res = await this.req.get(`${PING_POST}/v1/admin/launch-readiness`, withOperatorHeaders());
     return { status: res.status(), body: await res.json() };
   }
 
   // GET /v1/admin/workflow-kpis
   async getWorkflowKPIs() {
-    const res = await this.req.get(`${PING_POST}/v1/admin/workflow-kpis`);
+    const res = await this.req.get(`${PING_POST}/v1/admin/workflow-kpis`, withOperatorHeaders());
     return { status: res.status(), body: await res.json() };
   }
 

@@ -24,6 +24,15 @@ def _local_demo_enabled() -> bool:
     }
 
 
+def _secure_cookies() -> bool:
+    return os.getenv("STORMLEAD_SECURE_COOKIES", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
@@ -88,10 +97,22 @@ async def login_page(request: Request):
 
 
 @app.post("/login")
-async def login(buyer_id: str = Form(...), buyer_api_key: str = Form(...)) -> RedirectResponse:
+async def login(request: Request, buyer_id: str = Form(...), buyer_api_key: str = Form(...)):
+    wallet = await _ping_post(f"/v1/buyers/{buyer_id}/wallet", buyer_api_key)
+    if isinstance(wallet, dict) and wallet.get("error"):
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {
+                "active_page": "login",
+                "error": "Buyer ID or API key was rejected by StormLead.",
+            },
+            status_code=401,
+        )
     response = RedirectResponse("/buyer-portal/wallet", status_code=303)
-    response.set_cookie("buyer_id", buyer_id, httponly=True, samesite="lax")
-    response.set_cookie("buyer_api_key", buyer_api_key, httponly=True, samesite="lax")
+    secure = _secure_cookies()
+    response.set_cookie("buyer_id", buyer_id, httponly=True, samesite="lax", secure=secure)
+    response.set_cookie("buyer_api_key", buyer_api_key, httponly=True, samesite="lax", secure=secure)
     return response
 
 

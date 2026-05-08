@@ -247,6 +247,27 @@ function analyzeKnownGaps() {
       'Readiness code references call-tracking proof.',
       'Readiness does not appear to include call-tracking proof.',
     ),
+    sourceCheck(
+      'Readiness includes buyer wallet runway proof',
+      'services/ping-post/src/ping_post/api.py',
+      (content) => content.includes('buyer_wallet_runway_covers_pause_threshold'),
+      'Readiness requires scoped buyers to clear the wallet runway threshold.',
+      'Readiness does not appear to require buyer wallet runway coverage.',
+    ),
+    sourceCheck(
+      'Operator API surfaces have an app-level gate',
+      'services/ping-post/src/ping_post/api.py',
+      (content) => content.includes('operator_surface_gate') && content.includes('STORMLEAD_OPERATOR_TOKEN'),
+      'Admin and funding APIs have an app-level operator-token gate.',
+      'Admin and funding APIs do not appear to have an app-level operator-token gate.',
+    ),
+    sourceCheck(
+      'Buyer portal validates API keys before setting cookies',
+      'apps/buyer-portal/main.py',
+      (content) => content.includes('Buyer ID or API key was rejected') && content.includes('/wallet'),
+      'Buyer portal login validates buyer credentials before issuing cookies.',
+      'Buyer portal login does not appear to validate buyer credentials before issuing cookies.',
+    ),
   ];
 }
 
