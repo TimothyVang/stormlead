@@ -77,6 +77,8 @@ jobs:
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
       - name: Start local synthetic stack
+        env:
+          STORMLEAD_LOCAL_AUTH_BYPASS: "true"
         run: >-
           docker compose --env-file .env.example -f infra/compose/dev/docker-compose.yml
           --profile pipeline up -d --build postgres rabbitmq hatchet-engine litellm
