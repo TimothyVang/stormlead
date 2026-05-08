@@ -157,42 +157,43 @@ flowchart LR
   DockerMcp --> Docker
 ```
 
-## quickstart (wsl2)
+## quickstart (windows local)
 
-```bash
-# 1. install uv + just (one time)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-cargo install just
+Prerequisites: Docker Desktop running, Node.js/npm, Python 3.12+, and `uv` on PATH.
 
-# 2. clone, env, up
-cp .env.example .env
-just up           # lean stack: local APIs + required workflow infra
-just up-pipeline  # add workflow workers + LiteLLM before smoke/simulation
-just migrate      # runs alembic migrations
-just seed        # local dev seed data
-just smoke       # local ingest -> auction -> delivery -> return-review smoke
-
-# 3. dev loop
-just logs ping-post
-just test
-just smoke      # e2e workflow: ingest -> auction -> buyer delivery
+```powershell
+npm run setup:local
+npm run verify:local
 ```
 
-If `just` is not installed, use the npm aliases for repo validation:
+`setup:local` installs Node and Python dependencies, creates `.env` from `.env.example` if needed, starts the local Docker Compose pipeline stack, runs database initialization/migrations, seeds synthetic demo data, and runs the local readiness doctor.
+
+After setup:
+
+```text
+Admin:        http://127.0.0.1:8003/admin
+Landing:      http://127.0.0.1:8005
+Buyer Portal: http://127.0.0.1:8004
+```
+
+Useful local commands:
+
+```powershell
+npm run start:local      # start the local pipeline stack again
+npm run verify:local     # readiness doctor + synthetic smoke
+npm run simulate:v1      # broader synthetic V1 scenario simulation
+npm run doctor           # readiness status and next safe command
+npm run reset:demo       # re-seed fixed local demo buyers/leads
+```
+
+## quickstart (wsl2 / just optional)
 
 ```bash
-npm run validate:compose
-npm run validate:codex
-npm run codex:version
-npm run codex
-npm run codex:review
-npm run mcp:stormlead:smoke
-npm run learn:loop
-npm run lint:python
-npm run typecheck:python
-npm run test:python
-npm run smoke
-npm run simulate:v1
+cp .env.example .env
+just up-pipeline
+just migrate
+just seed
+just smoke
 ```
 
 ## production (hetzner)

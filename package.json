@@ -3,6 +3,11 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "setup:local": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap.ps1",
+    "start:local": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap.ps1 -SkipInstall -SkipMigrate -SkipVerify",
+    "verify:local": "node scripts/check_build_status.mjs --fail-on-blocked && npm run smoke",
+    "doctor": "node scripts/check_build_status.mjs --fail-on-blocked",
+    "reset:demo": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap.ps1 -SeedOnly",
     "validate:compose": "docker compose --env-file .env.example -f infra/compose/dev/docker-compose.yml config --quiet && docker compose --env-file .env.example -f infra/compose/dev/docker-compose.yml --profile full config --quiet",
     "validate:codex": "uv run python -c \"import json, pathlib, tomllib; root=pathlib.Path('.'); tomllib.loads((root/'.codex/config.toml').read_text()); opencode=json.loads((root/'opencode.json').read_text()); docker=json.loads((root/'.docker/mcp-profile-docker.json').read_text()); kube=json.loads((root/'.docker/mcp-profile-kubernetes.json').read_text()); assert set(opencode['mcp']) == {'stormlead', 'docker', 'kubernetes'}; assert docker['id'] == 'stormlead_docker'; assert kube['id'] == 'stormlead_kubernetes'; forbidden_docker={'createRepository', 'updateRepositoryInfo'}; forbidden_kube={'cleanup', 'exec_in_pod', 'install_helm_chart', 'kubectl_apply', 'kubectl_create', 'kubectl_delete', 'kubectl_generic', 'kubectl_patch', 'kubectl_rollout', 'kubectl_scale', 'node_management', 'uninstall_helm_chart', 'upgrade_helm_chart'}; docker_tools=set(docker['servers'][1]['tools']); kube_tools=set(kube['servers'][0]['tools']); assert not forbidden_docker & docker_tools; assert not forbidden_kube & kube_tools; print('agent MCP config valid')\" && codex --version && npm run mcp:stormlead:check",
     "codex": "codex --cd . --sandbox workspace-write --ask-for-approval on-request",

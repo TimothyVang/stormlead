@@ -277,8 +277,13 @@ function computeStatus({ compose, mcpSyntax, services, playwright, knownGaps }) 
   if (!compose.ok) blockers.push('Docker Compose config validation failed.');
   if (!mcpSyntax.ok) blockers.push('StormLead MCP syntax check failed.');
   const downServices = services.filter((service) => !service.ok);
-  if (downServices.length) {
-    blockers.push(`Local services unreachable: ${downServices.map((service) => service.name).join(', ')}.`);
+  const blockedServices = downServices.filter((service) => service.name !== 'litellm readiness');
+  const warningServices = downServices.filter((service) => service.name === 'litellm readiness');
+  if (blockedServices.length) {
+    blockers.push(`Local services unreachable: ${blockedServices.map((service) => service.name).join(', ')}.`);
+  }
+  if (warningServices.length) {
+    warnings.push(`Optional local services unreachable: ${warningServices.map((service) => service.name).join(', ')}.`);
   }
   if (!playwright.ok) warnings.push(playwright.finding);
   for (const gap of knownGaps.filter((item) => !item.ok)) warnings.push(gap.detail);
