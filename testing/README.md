@@ -61,6 +61,24 @@ Each run writes `testing/runs/<run-id>-self-learning-loop/` with `self-learning-
 
 The MCP equivalent is `run_self_learning_loop(confirm_synthetic_local=true)`. Like the rest of StormLead local ops, it refuses non-loopback targets and remains synthetic/local by default.
 
+## UI-TARS / Agent TARS Exploration
+
+Use `npm run tars:brief` to prepare a local-only exploration package for a UI-TARS Desktop or Agent TARS fork. Use `npm run tars:run -- --run-id <run-id>` when a TARS fork is not attached and you still need the local StormLead runner bridge to consume `runner-prompt.md`, save screenshots, and append structured findings.
+
+Useful variants:
+
+- `npm run tars:brief` - prepare all default browser surfaces.
+- `npm run tars:brief -- --targets admin,buyer-portal` - prepare a narrower target set.
+- `npm run tars:run -- --run-id <run-id>` - run the local TARS bridge against an existing prepared package.
+- `prepare_tars_exploration(confirm_synthetic_local=true)` - MCP equivalent.
+- `run_tars_exploration(confirm_synthetic_local=true, run_id="<run-id>")` - MCP equivalent for the local runner bridge.
+
+Each run writes `testing/runs/<run-id>-tars-exploration/` with `tars-brief.md`, `runner-prompt.md`, `targets.json`, `reviews/tars-review-template.md`, `logs/findings.jsonl`, screenshots directory, and `evidence.json`. TARS or local-runner findings should be triaged into one of four outcomes: code edit, test addition, backlog item, or explicit blocker.
+
+The generator refuses to overwrite an existing TARS run folder unless a caller explicitly uses the CLI force option. Prefer a new run ID so local review notes and findings are not lost.
+
+TARS evidence complements Playwright and Chrome observer proof. It is best for human-like visual/UX exploration and should not replace `npm run test:playwright -- --project=chromium --reporter=line`, `npm run observe:chrome`, or the MCP self-learning loop when those checks are required.
+
 ## Playwright Reference Rules
 
 StormLead uses Playwright as real browser evidence, not as a production mock layer. The local config is `playwright.config.ts`:

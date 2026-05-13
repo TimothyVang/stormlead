@@ -1,4 +1,4 @@
-import { test, expect } from './fixtures';
+import { test, expect, buyerWebhookUrl } from './fixtures';
 
 // Minimal valid buyer payload matching BuyerCreateRequest in ping-post/api.py
 function buyerPayload(seed: number, tag: string) {
@@ -7,7 +7,7 @@ function buyerPayload(seed: number, tag: string) {
     company: `Playwright ${tag} Co ${seed}`,
     contact_email: `buyer-${tag}-${seed}@example-stormlead-test.com`,
     contact_phone_e164: `+1512${String(500 + (seed % 400)).padStart(3, '0')}${String(1000 + (seed % 9000)).padStart(4, '0')}`,
-    webhook_url: 'http://localhost:9999/webhook-sink',
+    webhook_url: buyerWebhookUrl('/webhook-sink'),
     webhook_secret: `playwright-secret-${seed}-padded!!`,
     bid_per_lead_t1_t2: 45.0,
     bid_per_lead_t3: 25.0,

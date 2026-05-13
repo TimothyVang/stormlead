@@ -6,6 +6,54 @@ import { paidPilotAdminReviewWorkflow } from './workflows/paid-pilot-admin-revie
 
 const baseURL = process.env.STORMLEAD_ADMIN_URL ?? 'http://127.0.0.1:8003';
 
+test('admin timeline rejects invalid lead IDs without browser errors', async ({ page }) => {
+  const pageErrors: string[] = [];
+  const consoleErrors: string[] = [];
+  const invalidTimelineResponses: number[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  page.on('console', (message) => {
+    if (message.type() === 'error') consoleErrors.push(message.text());
+  });
+  page.on('response', (response) => {
+    if (response.url().includes('/v1/admin/leads/not-a-uuid/timeline')) {
+      invalidTimelineResponses.push(response.status());
+    }
+  });
+
+  await page.goto(`${baseURL}/admin`);
+  await page.waitForLoadState('networkidle');
+  await page.locator('#timeline-lead-id').fill('not-a-uuid');
+  await page.getByRole('button', { name: 'Load Timeline' }).click();
+
+  await expect(page.locator('#timeline-summary')).toContainText('valid UUID');
+  await expect(page.locator('#timeline-summary')).toHaveAttribute('role', 'alert');
+  await expect(page.locator('#timeline-lead-id')).toHaveAttribute('aria-invalid', 'true');
+  await expect(page.locator('#workflow-status')).toContainText('valid UUID');
+  await expect(page.locator('#timeline')).toBeEmpty();
+  expect(pageErrors).toEqual([]);
+  expect(consoleErrors).toEqual([]);
+  expect(invalidTimelineResponses).toEqual([]);
+});
+
+test('admin renders paid-pilot autopilot KPIs and exception queue', async ({ page }) => {
+  const pageErrors: string[] = [];
+  const consoleErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  page.on('console', (message) => {
+    if (message.type() === 'error') consoleErrors.push(message.text());
+  });
+
+  await page.goto(`${baseURL}/admin`);
+  await page.waitForLoadState('networkidle');
+
+  await expect(page.getByRole('heading', { name: '99% Autopilot' })).toBeVisible();
+  await expect(page.getByRole('table', { name: 'autopilot exception queue' })).toBeVisible();
+  await expect(page.locator('#autopilot-label')).toContainText('STP');
+  await expect(page.locator('#autopilot-kpis')).toContainText('Straight-through rate');
+  expect(pageErrors).toEqual([]);
+  expect(consoleErrors).toEqual([]);
+});
+
 test('cowork creates, funds, and reviews real paid-pilot admin dashboard data', async ({ page }, testInfo) => {
   const cowork = new CoworkRun(page, testInfo, paidPilotAdminReviewWorkflow);
   const suffix = Date.now().toString().slice(-6);

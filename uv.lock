@@ -22,6 +22,7 @@ members = [
     "stormlead-core",
     "stormlead-db",
     "stormlead-landing",
+    "voice-bridge",
 ]
 
 [[package]]
@@ -2005,6 +2006,8 @@ source = { virtual = "apps/landing" }
 dependencies = [
     { name = "fastapi" },
     { name = "jinja2" },
+    { name = "python-multipart" },
+    { name = "stormlead-core" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -2012,6 +2015,8 @@ dependencies = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "jinja2", specifier = ">=3.1" },
+    { name = "python-multipart", specifier = ">=0.0.20" },
+    { name = "stormlead-core", editable = "libs/stormlead_core" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
 
@@ -2130,6 +2135,21 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/15/c0/0be24758891ef825f2065cd5db8741aaddabe3e248ee6acc5e8a80f04005/uvloop-0.22.1-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:0530a5fbad9c9e4ee3f2b33b148c6a64d47bbad8000ea63704fa8260f4cf728e", size = 4366890, upload-time = "2025-10-16T22:16:40.547Z" },
     { url = "https://files.pythonhosted.org/packages/d2/53/8369e5219a5855869bcee5f4d317f6da0e2c669aecf0ef7d371e3d084449/uvloop-0.22.1-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:bc5ef13bbc10b5335792360623cc378d52d7e62c2de64660616478c32cd0598e", size = 4119472, upload-time = "2025-10-16T22:16:41.694Z" },
     { url = "https://files.pythonhosted.org/packages/f8/ba/d69adbe699b768f6b29a5eec7b47dd610bd17a69de51b251126a801369ea/uvloop-0.22.1-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:1f38ec5e3f18c8a10ded09742f7fb8de0108796eb673f30ce7762ce1b8550cad", size = 4239051, upload-time = "2025-10-16T22:16:43.224Z" },
+]
+
+[[package]]
+name = "voice-bridge"
+version = "0.1.0"
+source = { editable = "services/voice-bridge" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
 
 [[package]]

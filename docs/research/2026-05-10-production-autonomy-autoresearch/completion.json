@@ -1,0 +1,55 @@
+{
+  "status": "complete_with_caveats",
+  "passed": true,
+  "validator_prompt": "Review the research output as a senior researcher. Approve only if important claims are cited, fetched sources support the claims, provider/source coverage is sufficient, source appraisals and triangulation are adequate, contradictions/null evidence were actively considered, community data is labeled correctly, and remaining uncertainty is documented.",
+  "architect_review": {
+    "verdict": "APPROVE",
+    "blocking_issues": [],
+    "non_blocking_caveats": [
+      "Meta remains partial: official SDK repo support is present, but developers.facebook.com Marketing API/Lead Ads/Webhooks/Conversions docs still require manual verification.",
+      "Microsoft offline/conversion feedback docs remain an explicit pre-implementation gap.",
+      "Compliance is correctly labeled as non-legal advice and counsel-gated."
+    ],
+    "reviewed_at": "2026-05-10T15:55:00Z"
+  },
+  "output_artifact_path": "C:\\Users\\newbi\\Desktop\\hadi projects\\stormlead\\.omx\\specs\\autoresearch-how-to-get-stormlead-from-local-synthetic-lead-ingestion-to-prod\\validated-roadmap.md",
+  "source_coverage": {
+    "selected_sources": 129,
+    "fetched_sources": 128,
+    "evidence_entries": 128,
+    "citation_validations": 128,
+    "citation_failures": 0,
+    "unsupported_claims": 0,
+    "official_sources_added": 21,
+    "source_buckets": ["official", "official_repository", "self_hosted", "payments", "compliance", "observability", "community", "academic"]
+  },
+  "senior_research_review": {
+    "status": "approved_with_caveats",
+    "passed": true,
+    "decision_memo": "C:\\Users\\newbi\\Desktop\\hadi projects\\stormlead\\.omx\\specs\\autoresearch-how-to-get-stormlead-from-local-synthetic-lead-ingestion-to-prod\\decision-memo.md",
+    "senior_review": "C:\\Users\\newbi\\Desktop\\hadi projects\\stormlead\\.omx\\specs\\autoresearch-how-to-get-stormlead-from-local-synthetic-lead-ingestion-to-prod\\senior-review.jsonl"
+  },
+  "automatic_validation": {
+    "status": "passed_with_caveats",
+    "passed": true,
+    "citation_passes": 128,
+    "citation_failures": 0,
+    "unsupported_claims": 0,
+    "notes": "Original noisy runner corpus was supplemented with fetched official-source records. One unfetched runner candidate is excluded from the validated roadmap."
+  },
+  "data_collection": {
+    "provider_gaps": [
+      "brave skipped: BRAVE_API_KEY unavailable",
+      "tavily skipped: TAVILY_API_KEY unavailable",
+      "serpapi skipped: SERPAPI_KEY unavailable",
+      "exa skipped: EXA_API_KEY unavailable",
+      "bing skipped: BING_SEARCH_API_KEY unavailable",
+      "semantic_scholar skipped: SEMANTIC_SCHOLAR_API_KEY unavailable",
+      "github skipped: GITHUB_TOKEN unavailable",
+      "developers.facebook.com docs returned 400/404 in webfetch; official SDK repositories fetched as partial fallback"
+    ],
+    "raw_sources_retained": true,
+    "dedupe_performed": true
+  },
+  "open_high_priority_gaps": 3
+}

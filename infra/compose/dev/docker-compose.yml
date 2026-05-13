@@ -344,7 +344,9 @@ services:
   # =========================================================================
   # services (python)
   # =========================================================================
-  # NOTE: voice-bridge is intentionally absent until its source exists.
+  # voice-bridge is local-preview only. It does not connect to phone carriers
+  # or place calls; enable it with --profile voice when validating follow-up
+  # contracts without live provider credentials.
 
   landing:
     build:
@@ -391,6 +393,8 @@ services:
       HATCHET_CLIENT_TLS_STRATEGY: none
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       STORMLEAD_LOCAL_AUTH_BYPASS: ${STORMLEAD_LOCAL_AUTH_BYPASS:-true}
+      STORMLEAD_COMMERCIAL_LAUNCH_APPROVED: ${STORMLEAD_COMMERCIAL_LAUNCH_APPROVED:-false}
+      STORMLEAD_APPROVED_BUYER_WEBHOOK_HOSTS: ${STORMLEAD_APPROVED_BUYER_WEBHOOK_HOSTS:-}
     ports:
       # host port remapped from 8001 to avoid collisions with other local
       # docker projects. smoke_e2e.py + manual curl tests use 8003.
@@ -448,12 +452,31 @@ services:
       HATCHET_CLIENT_TLS_STRATEGY: none
       FORMBRICKS_WEBHOOK_SECRET: ${FORMBRICKS_WEBHOOK_SECRET}
       FORM_RECEIVER_MAX_WEBHOOK_BODY_BYTES: ${FORM_RECEIVER_MAX_WEBHOOK_BODY_BYTES:-262144}
+      FORM_RECEIVER_REQUIRE_LOCATION_PHOTO_VERIFICATION: ${FORM_RECEIVER_REQUIRE_LOCATION_PHOTO_VERIFICATION:-true}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:
       - "127.0.0.1:8002:8000"
     volumes:
       - hatchet_runtime:/hatchet/runtime:ro
     command: sh -c ". /hatchet/runtime/client.env; exec uvicorn form_receiver.api:app --host 0.0.0.0 --port 8000"
+
+  voice-bridge:
+    build:
+      context: ./../../..
+      dockerfile: services/voice-bridge/Dockerfile
+    profiles: ["voice", "full"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8006:8000"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/readyz', timeout=3)\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
 
   enrich-worker:
     build:
@@ -506,6 +529,9 @@ services:
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
       LANGFUSE_HOST: ${LANGFUSE_HOST}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      STORMLEAD_COMMERCIAL_LAUNCH_APPROVED: ${STORMLEAD_COMMERCIAL_LAUNCH_APPROVED:-false}
+      NURTURE_WEBHOOK_URL: ${NURTURE_WEBHOOK_URL:-}
+      STORMLEAD_APPROVED_NURTURE_WEBHOOK_HOSTS: ${STORMLEAD_APPROVED_NURTURE_WEBHOOK_HOSTS:-}
     volumes:
       - hatchet_runtime:/hatchet/runtime:ro
     command: sh -c ". /hatchet/runtime/client.env; exec python -m agent_runtime.worker"

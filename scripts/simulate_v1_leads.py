@@ -15,6 +15,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import time
@@ -22,6 +23,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
 import httpx
@@ -38,21 +40,82 @@ from stormlead_db import (
     get_session,
 )
 
-FORM_RECEIVER_URL = os.environ.get(
-    "FORM_RECEIVER_URL", "http://localhost:8002/webhooks/formbricks"
+
+def _is_loopback_hostname(hostname: str | None) -> bool:
+    if not hostname:
+        return False
+    normalized = hostname.strip("[]").lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _assert_loopback_http_url(label: str, value: str) -> str:
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not _is_loopback_hostname(parsed.hostname):
+        raise ValueError(f"{label} must be loopback HTTP(S), got {value}")
+    return value.rstrip("/")
+
+
+def _allow_non_local_database_url() -> bool:
+    return os.environ.get("SIM_ALLOW_NON_LOCAL_DATABASE_URL", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
+def _assert_local_database_url(label: str, value: str) -> str:
+    value = _normalize_loopback_database_url(value)
+    if _allow_non_local_database_url():
+        return value
+    parsed = urlparse(value)
+    if parsed.scheme.startswith("sqlite") or _is_loopback_hostname(parsed.hostname):
+        return value
+    raise ValueError(
+        f"{label} must use a local/loopback database host unless "
+        "SIM_ALLOW_NON_LOCAL_DATABASE_URL=true is set"
+    )
+
+
+def _normalize_loopback_database_url(value: str) -> str:
+    parsed = urlparse(value)
+    if parsed.hostname and parsed.hostname.lower() == "localhost":
+        host_start = parsed.netloc.rfind(parsed.hostname)
+        netloc = (
+            f"{parsed.netloc[:host_start]}127.0.0.1"
+            f"{parsed.netloc[host_start + len(parsed.hostname) :]}"
+        )
+        return parsed._replace(netloc=netloc).geturl()
+    return value
+
+
+FORM_RECEIVER_URL = _assert_loopback_http_url(
+    "FORM_RECEIVER_URL",
+    os.environ.get("FORM_RECEIVER_URL", "http://localhost:8002/webhooks/formbricks"),
 )
-FORM_RECEIVER_BASE_URL = os.environ.get("FORM_RECEIVER_BASE_URL", "http://localhost:8002")
+FORM_RECEIVER_BASE_URL = _assert_loopback_http_url(
+    "FORM_RECEIVER_BASE_URL",
+    os.environ.get("FORM_RECEIVER_BASE_URL", "http://localhost:8002"),
+)
 CALL_TRACKING_URL = os.environ.get(
     "CALL_TRACKING_URL", f"{FORM_RECEIVER_BASE_URL}/webhooks/call-tracking"
 )
-PING_POST_URL = os.environ.get("PING_POST_URL", "http://localhost:8003")
+CALL_TRACKING_URL = _assert_loopback_http_url("CALL_TRACKING_URL", CALL_TRACKING_URL)
+PING_POST_URL = _assert_loopback_http_url(
+    "PING_POST_URL", os.environ.get("PING_POST_URL", "http://localhost:8003")
+)
 LISTENER_HOST = os.environ.get("SIM_LISTENER_HOST", "0.0.0.0")  # noqa: S104 - Docker callback listener
 LISTENER_PORT = int(os.environ.get("SIM_LISTENER_PORT", "9999"))
 WORKFLOW_TIMEOUT_S = int(os.environ.get("SIM_WORKFLOW_TIMEOUT_S", "45"))
 
-DEFAULT_WEBHOOK_SECRET = "whsec_" + base64.b64encode(
-    b"smoke-test-secret-32-bytes-padded"
-).decode()
+DEFAULT_WEBHOOK_SECRET = "whsec_" + base64.b64encode(b"smoke-test-secret-32-bytes-padded").decode()
+PHONE_MID_COUNT = 700
+PHONE_SUFFIX_COUNT = 9000
+PHONE_SPACE = PHONE_MID_COUNT * PHONE_SUFFIX_COUNT
 
 BUYER_HITS: list[dict[str, Any]] = []
 
@@ -68,13 +131,15 @@ def _env_file_value(file_name: str, key: str) -> str | None:
 
 
 def _configure_database_url() -> None:
-    if os.environ.get("DATABASE_URL"):
+    existing_url = os.environ.get("DATABASE_URL")
+    if existing_url:
+        os.environ["DATABASE_URL"] = _assert_local_database_url("DATABASE_URL", existing_url)
         return
     host_url = _env_file_value(".env", "DATABASE_URL_HOST") or _env_file_value(
         ".env.example", "DATABASE_URL_HOST"
     )
     if host_url:
-        os.environ["DATABASE_URL"] = host_url
+        os.environ["DATABASE_URL"] = _assert_local_database_url("DATABASE_URL_HOST", host_url)
 
 
 def _candidate_secrets() -> list[str]:
@@ -133,8 +198,9 @@ async def _start_buyer_listener() -> web.AppRunner:
 
 
 def _phone(run_seed: int, offset: int) -> str:
-    prefix = 600 + ((run_seed + offset) % 300)
-    line = 1000 + offset
+    phone_index = (run_seed + offset * 7919) % PHONE_SPACE
+    prefix = 200 + phone_index // PHONE_SUFFIX_COUNT
+    line = 1000 + (phone_index % PHONE_SUFFIX_COUNT)
     return f"+1512{prefix:03d}{line:04d}"
 
 
@@ -174,10 +240,23 @@ def _envelope(
                 "page_html_sha256": page_hash or _page_hash(run_id, scenario, phone),
                 "dwell_ms": 9000,
                 "requested_service": "tree_removal",
+                "damage_type": "fallen_tree",
+                "urgency": "same_day",
+                "damage_description": "Synthetic fallen tree across the driveway with no reported power lines or injuries.",
+                "power_line_involved": "false",
+                "injury_reported": "false",
+                "active_danger": "false",
                 "campaign_id": campaign_id,
                 "campaign_source": campaign_source,
                 "first_touch_source": campaign_source,
                 "last_touch_source": campaign_source,
+                "gps_latitude": "30.4515",
+                "gps_longitude": "-91.1871",
+                "gps_accuracy_meters": "22",
+                "gps_captured_at": datetime.now(UTC).isoformat(),
+                "location_source": "browser_gps",
+                "location_confirmed_at": datetime.now(UTC).isoformat(),
+                "damage_photo_keys": '["wide.jpg", "close.jpg"]',
             },
             "ttc": {"name": 1500, "phone": 2200, "consent_text": 4500},
             "meta": {
@@ -297,6 +376,34 @@ async def _wait_for_transition(
                 return row
         await asyncio.sleep(0.5)
     raise TimeoutError(f"lead {lead_id} did not reach {event_type} within {timeout_s}s")
+
+
+async def _wait_for_any_transition(
+    lead_id: str, event_types: set[str], *, timeout_s: int = WORKFLOW_TIMEOUT_S
+) -> LeadStateTransition:
+    deadline = time.monotonic() + timeout_s
+    parsed_id = UUID(lead_id)
+    while time.monotonic() < deadline:
+        async with get_session() as s:
+            row = (
+                (
+                    await s.execute(
+                        select(LeadStateTransition)
+                        .where(
+                            LeadStateTransition.lead_id == parsed_id,
+                            LeadStateTransition.event_type.in_(sorted(event_types)),
+                        )
+                        .order_by(LeadStateTransition.created_at.desc())
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if row is not None:
+                return row
+        await asyncio.sleep(0.5)
+    expected = ", ".join(sorted(event_types))
+    raise TimeoutError(f"lead {lead_id} did not reach one of {expected} within {timeout_s}s")
 
 
 async def _wait_for_post(lead_id: str, *, timeout_s: int = WORKFLOW_TIMEOUT_S) -> PostResult:
@@ -598,8 +705,10 @@ async def _scenario_duplicate_capture(
         raise RuntimeError(f"duplicate_capture: responses {first.status_code}/{second.status_code}")
     first_payload = _json(first)
     second_payload = _json(second)
-    if first_payload.get("lead_id") != second_payload.get("lead_id"):
-        raise RuntimeError(f"duplicate_capture: lead ids differed {first_payload}/{second_payload}")
+    if not first_payload.get("lead_id"):
+        raise RuntimeError(f"duplicate_capture: first response missing lead_id {first_payload}")
+    if second_payload.get("lead_id"):
+        raise RuntimeError(f"duplicate_capture: duplicate response leaked lead_id {second_payload}")
     if second_payload.get("status") != "accepted-duplicate":
         raise RuntimeError(f"duplicate_capture: second response was {second_payload}")
     lead_id = str(first_payload["lead_id"])
@@ -662,13 +771,14 @@ async def _scenario_nurtured_unsold(
         campaign_id="v1-simulation-nurtured-unsold",
     )
     lead_id = str(payload["lead_id"])
-    transition = await _wait_for_transition(lead_id, "lead.nurtured")
+    transition = await _wait_for_any_transition(lead_id, {"lead.nurtured", "lead.nurture_failed"})
     if transition.payload_json.get("external_contact_made") is not False:
         raise RuntimeError(f"nurtured_unsold: contact flag missing {transition.payload_json}")
     return {
         "scenario": "nurtured_unsold",
         "status": "passed",
         "webhook_response": payload,
+        "nurture_event": transition.event_type,
         "nurture_payload": transition.payload_json,
         "evidence": await _lead_evidence(lead_id),
     }
@@ -688,13 +798,14 @@ async def _scenario_nurtured_rejected(
         campaign_id="v1-simulation-reject-nurtured",
     )
     lead_id = str(payload["lead_id"])
-    transition = await _wait_for_transition(lead_id, "lead.nurtured")
+    transition = await _wait_for_any_transition(lead_id, {"lead.nurtured", "lead.nurture_failed"})
     if transition.payload_json.get("external_contact_made") is not False:
         raise RuntimeError(f"nurtured_rejected: contact flag missing {transition.payload_json}")
     return {
         "scenario": "nurtured_rejected",
         "status": "passed",
         "webhook_response": payload,
+        "nurture_event": transition.event_type,
         "nurture_payload": transition.payload_json,
         "evidence": await _lead_evidence(lead_id),
     }
@@ -736,7 +847,7 @@ async def main_async() -> int:
 
     started_at = datetime.now(UTC)
     run_id = args.run_id or f"{started_at.strftime('%Y%m%dT%H%M%SZ')}-{uuid4().hex[:8]}"
-    run_seed = int(time.time()) % 100_000
+    run_seed = uuid4().int % PHONE_SPACE
     output_dir = Path(args.output_dir) / run_id
     output_dir.mkdir(parents=True, exist_ok=True)
     evidence_path = output_dir / "v1-simulation-evidence.json"

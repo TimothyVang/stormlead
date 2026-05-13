@@ -17,6 +17,8 @@ import hmac
 import json
 import os
 import time
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -24,7 +26,7 @@ from uuid import UUID, uuid4
 
 import httpx
 from hatchet_sdk import Hatchet
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from stormlead_core import (
     Buyer,
     BuyerSalesStage,
@@ -34,11 +36,13 @@ from stormlead_core import (
     LeadStatus,
     PingPostResult,
     PipelineState,
+    ProviderArea,
     bind_correlation_id,
     emit_event,
     emit_metric,
     evaluate_filter,
     get_logger,
+    provider_decision,
 )
 from stormlead_db import (
     BillingEvent,
@@ -50,8 +54,18 @@ from stormlead_db import (
     record_transition,
 )
 
+from ping_post.buyer_activation import (
+    buyer_activation_readiness,
+    buyer_coverage_zips,
+    buyer_exclusive_zips,
+)
+
 log = get_logger(__name__)
 _hatchet_client: Hatchet | None = None
+
+
+class ExclusiveZipOwnerNotReadyError(RuntimeError):
+    """Raised when an active exclusive ZIP owner exists but cannot receive this lead."""
 
 
 def _hatchet() -> Hatchet:
@@ -68,6 +82,44 @@ BID_WINDOW_S = 5.0
 MAX_PARALLEL_PINGS = 50
 POST_MAX_ATTEMPTS = 3
 POST_RETRY_BASE_DELAY_S = 0.25
+HIGH_RISK_SAFETY_FLAGS = frozenset(
+    {"power_line", "injury", "active_danger", "roof_impact", "structure_impact"}
+)
+RESTRICTED_RESALE_SOURCES = frozenset(
+    {"google_lsa", "local_services_ads", "google_local_services_ads"}
+)
+PING_SAFE_SAFETY_FLAGS = HIGH_RISK_SAFETY_FLAGS | frozenset({"emergency"})
+PING_SAFE_DAMAGE_TYPES = frozenset(
+    {
+        "fallen_tree",
+        "roof_impact",
+        "tree_on_structure",
+        "structure_impact",
+        "broken_branch",
+        "branch_removal",
+        "stump",
+    }
+)
+PING_SAFE_URGENCIES = frozenset({"emergency", "same_day", "next_day", "flexible"})
+PING_SAFE_RISK_LEVELS = frozenset({"low", "medium", "high"})
+PING_SAFE_JOB_SIZES = frozenset({"small", "medium", "large", "emergency"})
+
+
+def _buyer_delivery_allowed(webhook_url: str) -> bool:
+    return provider_decision(
+        ProviderArea.BUYER_DELIVERY,
+        action="buyer webhook delivery",
+        target_url=webhook_url,
+    ).allowed
+
+
+def validate_buyer_webhook_url(value: str | None) -> str | None:
+    if value is None or _buyer_delivery_allowed(value):
+        return value
+    raise ValueError(
+        "buyer webhook_url must stay local before commercial launch approval "
+        "or use an approved HTTPS buyer host after approval"
+    )
 
 
 @dataclass
@@ -88,9 +140,34 @@ def _routing_thresholds() -> tuple[float, float]:
     )
 
 
+def _valid_bid_cents(value: int | None) -> bool:
+    return value is not None and value > 0
+
+
+def _configured_min_bid_cents(buyer: Buyer, damage_tier: DamageTier | None) -> int:
+    price = (
+        buyer.bid_per_lead_t3
+        if damage_tier == DamageTier.TIER_3_ON_STRUCTURE
+        else buyer.bid_per_lead_t1_t2
+    )
+    return int(price * Decimal(100))
+
+
+def _valid_bid_for_buyer(
+    buyer: Buyer, bid_cents: int | None, damage_tier: DamageTier | None
+) -> bool:
+    if bid_cents is None or bid_cents <= 0:
+        return False
+    return bid_cents >= _configured_min_bid_cents(buyer, damage_tier)
+
+
 def _lead_can_enter_auction(lead: Lead) -> tuple[bool, str]:
     if lead.blocked_for_fraud:
         return False, "blocked_for_fraud"
+    if _lead_requires_safety_review(lead):
+        return False, "safety_review_required"
+    if not _lead_source_allows_resale(lead):
+        return False, "restricted_source_no_resale"
     if lead.hold_for_review:
         return False, "held_for_review"
     lead_class = lead.lead_class.value if lead.lead_class else None
@@ -105,19 +182,74 @@ def _lead_can_enter_auction(lead: Lead) -> tuple[bool, str]:
     return True, "route_b"
 
 
+def _lead_requires_safety_review(lead: Lead) -> bool:
+    if lead.damage_tier == DamageTier.TIER_4_LIFE_SAFETY:
+        return True
+    normalized_flags = {flag.strip().lower() for flag in lead.safety_flags if flag.strip()}
+    return bool(normalized_flags & HIGH_RISK_SAFETY_FLAGS)
+
+
+def _lead_source_allows_resale(lead: Lead) -> bool:
+    source = getattr(lead.source, "value", lead.source)
+    markers = {str(source or "").lower(), str(lead.campaign_source or "").lower()}
+    return not bool(markers & RESTRICTED_RESALE_SOURCES)
+
+
+def _safe_label(value: str | None, allowed: frozenset[str], fallback: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized not in allowed:
+        return fallback
+    return normalized.replace("_", " ")
+
+
+def _safe_ping_safety_flags(values: list[str]) -> list[str]:
+    return sorted(
+        {flag.strip().lower() for flag in values if flag.strip().lower() in PING_SAFE_SAFETY_FLAGS}
+    )
+
+
+def _ping_damage_summary(lead: Lead) -> str:
+    damage_type = _safe_label(lead.damage_type, PING_SAFE_DAMAGE_TYPES, "tree damage")
+    urgency = _safe_label(lead.urgency, PING_SAFE_URGENCIES, "not specified")
+    risk = _safe_label(lead.visible_risk_level, PING_SAFE_RISK_LEVELS, "unknown")
+    job_size = _safe_label(lead.estimated_job_size, PING_SAFE_JOB_SIZES, "unknown")
+    return (
+        f"{damage_type.capitalize()} reported; urgency {urgency}; "
+        f"visible risk {risk}; estimated job {job_size}."
+    )
+
+
+def _ping_buyer_notes(lead: Lead, safety_flags: list[str]) -> str:
+    risk = str(lead.visible_risk_level or "").strip().lower()
+    job_size = str(lead.estimated_job_size or "").strip().lower()
+    if risk == "high" or bool(set(safety_flags) & HIGH_RISK_SAFETY_FLAGS):
+        return "Pre-sale ping only; route through operator review before dispatch."
+    if job_size in {"large", "emergency"}:
+        return "Pre-sale ping only; confirm access, crew size, and equipment after purchase."
+    return "Pre-sale ping only; confirm scope and access after purchase."
+
+
 def _ping_payload(lead: Lead) -> dict:
     """sanitized payload that goes to all pinged buyers.
 
     strict rule: no PII. buyers can see geography, tier, qualification score,
-    damage description summary (NOT raw text — sanitized by qualify agent),
+    controlled damage summary (NOT raw homeowner or model-generated text),
     storm context. they get full PII only after winning.
     """
+    safety_flags = _safe_ping_safety_flags(lead.safety_flags)
     return {
         "lead_id": str(lead.id),
         "state": lead.state,
         "city": lead.city,
         "zip": lead.zip,
         "damage_tier": lead.damage_tier.value if lead.damage_tier else None,
+        "damage_type": lead.damage_type,
+        "urgency": lead.urgency,
+        "damage_summary": _ping_damage_summary(lead),
+        "visible_risk_level": lead.visible_risk_level,
+        "estimated_job_size": lead.estimated_job_size,
+        "buyer_notes": _ping_buyer_notes(lead, safety_flags),
+        "safety_flags": safety_flags,
         "qualification_score": lead.qualification_score or 0.0,
         "property_avm_band": _avm_band(lead.property_avm),
         "owner_occupied": lead.owner_occupied,
@@ -165,6 +297,22 @@ def _delivery_idempotency_key(lead_id: UUID, buyer_id: UUID, bid_cents: int) -> 
     return hashlib.sha256(raw).hexdigest()
 
 
+def _auction_lock_key(lead_id: UUID) -> int:
+    digest = hashlib.sha256(lead_id.bytes).digest()
+    return int.from_bytes(digest[:8], "big", signed=True)
+
+
+@asynccontextmanager
+async def _lead_auction_lock(lead_id: UUID) -> AsyncIterator[None]:
+    lock_key = _auction_lock_key(lead_id)
+    async with get_session() as s:
+        await s.execute(text("SELECT pg_advisory_lock(:lock_key)"), {"lock_key": lock_key})
+        try:
+            yield
+        finally:
+            await s.execute(text("SELECT pg_advisory_unlock(:lock_key)"), {"lock_key": lock_key})
+
+
 def _should_retry_post(status_code: int | None, error: Exception | None) -> bool:
     if error is not None:
         return isinstance(error, (httpx.TimeoutException, httpx.NetworkError))
@@ -180,6 +328,16 @@ async def _ping_one(
 ) -> PingResponse:
     bind_correlation_id(payload.get("lead_id"))
     started = time.perf_counter()
+    if not _buyer_delivery_allowed(buyer.webhook_url):
+        return PingResponse(
+            buyer_id=buyer.id,
+            accepted=False,
+            bid_cents=None,
+            response_ms=0,
+            status_code=None,
+            body=None,
+            error="commercial_launch_not_approved",
+        )
     body = json.dumps(payload).encode()
     ts = str(int(time.time()))
     headers = {
@@ -203,10 +361,13 @@ async def _ping_one(
         except Exception:
             data = {}
         accepted = bool(data.get("accept"))
-        bid_cents = int(data["bid_cents"]) if accepted and "bid_cents" in data else None
+        try:
+            bid_cents = int(data["bid_cents"]) if accepted and "bid_cents" in data else None
+        except (TypeError, ValueError):
+            bid_cents = None
         return PingResponse(
             buyer_id=buyer.id,
-            accepted=accepted and bid_cents is not None,
+            accepted=accepted and _valid_bid_cents(bid_cents),
             bid_cents=bid_cents,
             response_ms=dur_ms,
             status_code=r.status_code,
@@ -239,20 +400,14 @@ async def _select_eligible_buyers(lead: Lead) -> list[Buyer]:
     """pull buyers from db, filter by status + cel expression."""
     async with get_session() as s:
         rows = (
-            (
-                await s.execute(
-                    select(BuyerRow).where(
-                        BuyerRow.status == "active",
-                        BuyerRow.deposit_balance > Decimal("0"),
-                    )
-                )
-            )
-            .scalars()
-            .all()
+            (await s.execute(select(BuyerRow).where(BuyerRow.status == "active"))).scalars().all()
         )
 
     eligible = []
+    active_exclusive_owner_exists = any(lead.zip in buyer_exclusive_zips(r) for r in rows)
     for r in rows:
+        if not buyer_activation_readiness(r)["autopilot_ready"]:
+            continue
         buyer = Buyer(
             id=r.id,
             name=r.name,
@@ -287,11 +442,26 @@ async def _select_eligible_buyers(lead: Lead) -> list[Buyer]:
         if (
             verdict.matches
             and _buyer_matches_paid_pilot_rules(buyer, lead)
+            and _buyer_delivery_allowed(buyer.webhook_url)
             and await _buyer_within_caps(buyer)
         ):
             eligible.append(buyer)
+    eligible = _apply_exclusive_zip_routing(
+        lead, eligible, active_exclusive_owner_exists=active_exclusive_owner_exists
+    )
+    if active_exclusive_owner_exists and not eligible:
+        raise ExclusiveZipOwnerNotReadyError("exclusive_buyer_not_ready")
     log.info("buyers.eligible", lead_id=str(lead.id), count=len(eligible))
     return eligible
+
+
+def _apply_exclusive_zip_routing(
+    lead: Lead, buyers: list[Buyer], *, active_exclusive_owner_exists: bool
+) -> list[Buyer]:
+    if not active_exclusive_owner_exists:
+        return buyers
+    lead_zip = str(lead.zip or "").strip().lower()
+    return [buyer for buyer in buyers if lead_zip in buyer_exclusive_zips(buyer)]
 
 
 def _buyer_matches_paid_pilot_rules(buyer: Buyer, lead: Lead) -> bool:
@@ -299,7 +469,8 @@ def _buyer_matches_paid_pilot_rules(buyer: Buyer, lead: Lead) -> bool:
     lead_class = lead.lead_class.value if lead.lead_class else None
     if lead_class in {"c", "d"}:
         return False
-    if buyer.target_zips and lead.zip not in buyer.target_zips:
+    coverage_zips = set(buyer_coverage_zips(buyer))
+    if coverage_zips and lead.zip not in coverage_zips:
         return False
     if lead.requested_service and buyer.services and lead.requested_service not in buyer.services:
         return False
@@ -351,18 +522,48 @@ async def _persist_unauctionable_lead(lead: Lead, reason: str) -> None:
             _push_lead_event("lead.rejected", lead.id, {"reason": row.rejection_reason})
             return
 
-        if reason in {"class_requires_review", "score_below_hold_threshold", "held_for_review"}:
+        if reason in {
+            "class_requires_review",
+            "score_below_hold_threshold",
+            "held_for_review",
+            "safety_review_required",
+            "exclusive_buyer_not_ready",
+        }:
             row.hold_for_review = True
+            event_type = (
+                "lead.safety_escalated"
+                if reason == "safety_review_required"
+                else "lead.held_for_review"
+            )
             await record_transition(
                 s,
                 lead_id=lead.id,
                 from_state=None,
                 to_state=PipelineState.QUALIFIED,
-                event_type="lead.held_for_review",
+                event_type=event_type,
                 task_name="ping_post.run_auction",
                 status="pending_review",
-                payload={"reason": reason, "lead_class": lead_class},
+                payload={
+                    "reason": reason,
+                    "lead_class": lead_class,
+                    "safety_flags": lead.safety_flags,
+                },
             )
+            return
+
+        if reason == "restricted_source_no_resale":
+            row.status = LeadStatus.REJECTED.value
+            row.rejection_reason = reason
+            await record_transition(
+                s,
+                lead_id=lead.id,
+                from_state=None,
+                to_state=PipelineState.REJECTED,
+                event_type="lead.rejected",
+                task_name="ping_post.run_auction",
+                payload={"reason": reason, "campaign_source": lead.campaign_source},
+            )
+            _push_lead_event("lead.rejected", lead.id, {"reason": reason})
 
 
 async def _sold_delivery_for_lead(lead_id: UUID) -> PostResult | None:
@@ -417,6 +618,69 @@ async def _record_pings(
             )
 
 
+async def _collect_bid_window_responses(
+    *,
+    lead_id: UUID,
+    buyers: list[Buyer],
+    ping_buyer: Callable[[Buyer], Awaitable[PingResponse]],
+    bid_window_s: float = BID_WINDOW_S,
+) -> list[PingResponse]:
+    tasks = {asyncio.ensure_future(ping_buyer(buyer)): buyer for buyer in buyers}
+    done, pending = await asyncio.wait(
+        tasks.keys(), timeout=bid_window_s, return_when=asyncio.ALL_COMPLETED
+    )
+
+    responses: list[PingResponse] = []
+    for task in done:
+        buyer = tasks[task]
+        try:
+            responses.append(task.result())
+        except Exception as exc:
+            responses.append(
+                PingResponse(
+                    buyer_id=buyer.id,
+                    accepted=False,
+                    bid_cents=None,
+                    response_ms=int(bid_window_s * 1000),
+                    status_code=None,
+                    body=None,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            )
+
+    if pending:
+        log.warning(
+            "ping.partial_bid_window",
+            lead_id=str(lead_id),
+            completed_count=len(done),
+            pending_count=len(pending),
+        )
+        for task in pending:
+            task.cancel()
+        cancelled_results = await asyncio.gather(*pending, return_exceptions=True)
+        for task, result in zip(pending, cancelled_results, strict=True):
+            if isinstance(result, PingResponse):
+                responses.append(result)
+                continue
+            buyer = tasks[task]
+            error = (
+                "timeout" if isinstance(result, asyncio.CancelledError) else type(result).__name__
+            )
+            responses.append(
+                PingResponse(
+                    buyer_id=buyer.id,
+                    accepted=False,
+                    bid_cents=None,
+                    response_ms=int(bid_window_s * 1000),
+                    status_code=None,
+                    body=None,
+                    error=error,
+                )
+            )
+
+    return responses
+
+
 async def _record_pipeline_transition(
     lead_id: UUID,
     from_state: PipelineState,
@@ -452,7 +716,7 @@ def _pick_winner(
         r
         for r in responses
         if r.accepted
-        and r.bid_cents
+        and _valid_bid_for_buyer(buyers_by_id[r.buyer_id], r.bid_cents, damage_tier)
         and _buyer_can_afford_bid(buyers_by_id[r.buyer_id], r.bid_cents)
     ]
     if not accepting:
@@ -463,7 +727,9 @@ def _pick_winner(
     return winner, buyers_by_id[winner.buyer_id]
 
 
-def _buyer_can_afford_bid(buyer: Buyer, bid_cents: int) -> bool:
+def _buyer_can_afford_bid(buyer: Buyer, bid_cents: int | None) -> bool:
+    if bid_cents is None or bid_cents <= 0:
+        return False
     return buyer.deposit_balance >= Decimal(bid_cents) / Decimal(100)
 
 
@@ -476,6 +742,8 @@ async def _reserve_buyer_wallet(
     lead_id: UUID,
     bid_cents: int,
 ) -> bool:
+    if bid_cents <= 0:
+        return False
     debit = _debit_amount(bid_cents)
     async with get_session() as s:
         result = await s.execute(
@@ -545,6 +813,8 @@ async def _post_to_winner(
     delivery_idempotency_key: str,
 ) -> tuple[bool, int | None, str | None]:
     """deliver full lead with PII to winning buyer. signed."""
+    if not _buyer_delivery_allowed(buyer.webhook_url):
+        return (False, None, "commercial_launch_not_approved")
     body = json.dumps(
         {
             "lead_id": str(lead.id),
@@ -558,6 +828,13 @@ async def _post_to_winner(
                 "zip": lead.zip,
             },
             "damage_tier": lead.damage_tier.value if lead.damage_tier else None,
+            "damage_type": lead.damage_type,
+            "urgency": lead.urgency,
+            "damage_summary": lead.damage_summary,
+            "visible_risk_level": lead.visible_risk_level,
+            "estimated_job_size": lead.estimated_job_size,
+            "buyer_notes": lead.buyer_notes,
+            "safety_flags": sorted(set(lead.safety_flags)),
             "damage_description": lead.damage_description,
             "photo_urls": [],  # presigned in production
             "consent": {
@@ -650,6 +927,11 @@ async def _post_to_winner(
 
 
 async def run_auction(lead: Lead) -> PingPostResult:
+    async with _lead_auction_lock(lead.id):
+        return await _run_auction_locked(lead)
+
+
+async def _run_auction_locked(lead: Lead) -> PingPostResult:
     """run a full ping-post cycle for one lead. returns the result."""
     bind_correlation_id(str(lead.id))
     started = time.perf_counter()
@@ -686,7 +968,22 @@ async def run_auction(lead: Lead) -> PingPostResult:
             damage_tier=lead.damage_tier,
         )
 
-    buyers = await _select_eligible_buyers(lead)
+    try:
+        buyers = await _select_eligible_buyers(lead)
+    except ExclusiveZipOwnerNotReadyError as exc:
+        reason = str(exc)
+        await _persist_unauctionable_lead(lead, reason)
+        log.info("lead.not_eligible_for_auction", lead_id=str(lead.id), reason=reason)
+        return PingPostResult(
+            event_id=uuid4(),
+            occurred_at=datetime.now(UTC),
+            lead_id=lead.id,
+            pinged_buyer_ids=[],
+            winning_buyer_id=None,
+            winning_bid_cents=None,
+            duration_ms=int((time.perf_counter() - started) * 1000),
+            damage_tier=lead.damage_tier,
+        )
     await _record_pipeline_transition(
         lead.id,
         PipelineState.QUALIFIED,
@@ -736,15 +1033,10 @@ async def run_auction(lead: Lead) -> PingPostResult:
             async with sem:
                 return await _ping_one(client, b, payload)
 
-        # bid window: cancel anything still pending after BID_WINDOW_S
-        try:
-            responses = await asyncio.wait_for(
-                asyncio.gather(*(bounded(b) for b in buyers), return_exceptions=False),
-                timeout=BID_WINDOW_S,
-            )
-        except TimeoutError:
-            log.warning("ping.bid_window_timeout", lead_id=str(lead.id))
-            responses = []
+        # bid window: keep completed bids, cancel only buyers still pending after BID_WINDOW_S.
+        responses = await _collect_bid_window_responses(
+            lead_id=lead.id, buyers=buyers, ping_buyer=bounded
+        )
 
         await _record_pings(lead.id, payload, responses)
 

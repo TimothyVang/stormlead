@@ -1,7 +1,11 @@
-import { test, expect } from './fixtures';
-import { FORM_RECEIVER, StormLeadApiClient } from './helpers/api';
+import { test, expect, buyerWebhookUrl } from './fixtures';
+import { FORM_RECEIVER, PING_POST, StormLeadApiClient } from './helpers/api';
 import { buildSignedHeaders, buildEnvelope } from './helpers/webhook';
-import { waitForLeadStatus } from './helpers/wait';
+import { waitForLeadStatus, waitForTimelineEvent } from './helpers/wait';
+
+function uniqueTxZip(offset: number): string {
+  return `7${String(1000 + ((Date.now() + offset) % 9000)).padStart(4, '0')}`;
+}
 
 async function submitAndSellLead(
   request: Parameters<typeof waitForLeadStatus>[0],
@@ -17,7 +21,7 @@ async function submitAndSellLead(
     company: `Playwright Return ${tag} Co`,
     contact_email: `buyer-return-${tag}-${Date.now()}@example-stormlead-test.com`,
     contact_phone_e164: `+1512${Date.now().toString().slice(-7)}`,
-    webhook_url: `http://host.docker.internal:9999/buyer-return-${tag}`,
+    webhook_url: buyerWebhookUrl(`/buyer-return-${tag}`),
     webhook_secret: `playwright-return-${tag}-secret`,
     bid_per_lead_t1_t2: 50.0,
     bid_per_lead_t3: 200.0,
@@ -42,13 +46,16 @@ async function submitAndSellLead(
   const res = await request.post(`${FORM_RECEIVER}/webhooks/formbricks`, { headers, data: bodyStr });
   const json = await res.json();
   if (!json.lead_id) throw new Error(`Expected lead_id in response: ${JSON.stringify(json)}`);
-  await waitForLeadStatus(request, json.lead_id, 'sold', { timeoutMs: 45_000 });
+  await waitForTimelineEvent(request, json.lead_id, 'lead.qualified', { timeoutMs: 90_000 });
+  const auction = await request.post(`${PING_POST}/v1/auction`, { data: { lead_id: json.lead_id } });
+  expect(auction.status()).toBe(200);
+  await waitForLeadStatus(request, json.lead_id, 'sold', { timeoutMs: 60_000 });
   return json.lead_id;
 }
 
 test.describe('Return Workflow', () => {
   test('buyer can request return on a sold lead', async ({ request, apiClient, phone, email, webhookSecret }) => {
-    const leadId = await submitAndSellLead(request, apiClient, phone(70), email('return_req'), webhookSecret, '78771', 'request');
+    const leadId = await submitAndSellLead(request, apiClient, phone(70), email('return_req'), webhookSecret, uniqueTxZip(71), 'request');
     const { status, body } = await apiClient.requestReturn(leadId, 'job_already_completed');
     expect([200, 201]).toContain(status);
     // Response field is return_request_id, not return_id
@@ -56,21 +63,23 @@ test.describe('Return Workflow', () => {
   });
 
   test('admin can hold a lead for review', async ({ request, apiClient, phone, email, webhookSecret }) => {
-    const leadId = await submitAndSellLead(request, apiClient, phone(71), email('return_hold'), webhookSecret, '78772', 'hold');
+    const leadId = await submitAndSellLead(request, apiClient, phone(71), email('return_hold'), webhookSecret, uniqueTxZip(72), 'hold');
     const { status } = await apiClient.reviewLead(leadId, 'hold', 'Playwright hold test');
     expect([200, 204]).toContain(status);
   });
 
   test('admin approves return request → return_request transitions to approved', async ({ request, apiClient, phone, email, webhookSecret }) => {
-    const leadId = await submitAndSellLead(request, apiClient, phone(72), email('return_approve'), webhookSecret, '78773', 'approve');
+    const leadId = await submitAndSellLead(request, apiClient, phone(72), email('return_approve'), webhookSecret, uniqueTxZip(73), 'approve');
     const { body: returnBody } = await apiClient.requestReturn(leadId, 'wrong_number');
     const returnRequestId: string = returnBody.return_request_id;
     const { status, body } = await apiClient.reviewReturnRequest(returnRequestId, 'approve');
     expect([200, 204]).toContain(status);
+    expect(body.status).toBe('approved');
+    expect(body.credited_cents).toBeGreaterThan(0);
   });
 
   test('double-approve guard → second approve returns 409', async ({ request, apiClient, phone, email, webhookSecret }) => {
-    const leadId = await submitAndSellLead(request, apiClient, phone(73), email('return_double'), webhookSecret, '78774', 'double');
+    const leadId = await submitAndSellLead(request, apiClient, phone(73), email('return_double'), webhookSecret, uniqueTxZip(74), 'double');
     const { body: returnBody } = await apiClient.requestReturn(leadId, 'duplicate');
     const returnRequestId: string = returnBody.return_request_id;
     await apiClient.reviewReturnRequest(returnRequestId, 'approve');

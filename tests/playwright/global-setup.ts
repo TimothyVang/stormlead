@@ -3,6 +3,17 @@ import { FORM_RECEIVER, PING_POST, LANDING, BUYER_PORTAL } from './helpers/api';
 
 const HEALTH_ATTEMPTS = 5;
 const HEALTH_RETRY_DELAY_MS = 1_500;
+const LOCAL_TEST_HOSTS = new Set(['127.0.0.1', 'localhost']);
+
+function assertLoopbackUrl(label: string, rawUrl: string): void {
+  const url = new URL(rawUrl);
+  if (url.protocol !== 'http:') {
+    throw new Error(`[global-setup] ${label} must use local HTTP, got ${rawUrl}`);
+  }
+  if (!LOCAL_TEST_HOSTS.has(url.hostname) && !url.hostname.endsWith('.localhost')) {
+    throw new Error(`[global-setup] ${label} must stay on loopback/local host, got ${rawUrl}`);
+  }
+}
 
 async function ping(baseUrl: string, label: string, required: boolean): Promise<void> {
   let lastError = 'not attempted';
@@ -32,8 +43,12 @@ async function ping(baseUrl: string, label: string, required: boolean): Promise<
 }
 
 export default async function globalSetup() {
+  assertLoopbackUrl('FORM_RECEIVER', FORM_RECEIVER);
+  assertLoopbackUrl('PING_POST', PING_POST);
+  assertLoopbackUrl('LANDING', LANDING);
+  assertLoopbackUrl('BUYER_PORTAL', BUYER_PORTAL);
   await ping(FORM_RECEIVER, 'form-receiver (8002)', true);
   await ping(PING_POST, 'ping-post (8003)', true);
-  await ping(LANDING, 'landing', false);
-  await ping(BUYER_PORTAL, 'buyer-portal (8004)', false);
+  await ping(LANDING, 'landing', true);
+  await ping(BUYER_PORTAL, 'buyer-portal (8004)', true);
 }

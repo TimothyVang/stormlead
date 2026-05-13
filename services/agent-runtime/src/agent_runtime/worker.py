@@ -25,6 +25,7 @@ log = get_logger(__name__)
 
 hatchet = Hatchet(debug=False)
 _supports_legacy_hatchet_worker = hasattr(hatchet, "step")
+_legacy_hatchet = cast(Any, hatchet)
 
 
 class _ContextAdapter:
@@ -47,21 +48,21 @@ def _payload(task_input: Any, context: Context) -> dict[str, Any]:
 
 if _supports_legacy_hatchet_worker:
 
-    @hatchet.workflow(name="qualify-lead", on_events=["lead.enriched"])
+    @_legacy_hatchet.workflow(name="qualify-lead", on_events=["lead.enriched"])
     class QualifyLead:
-        @hatchet.step(timeout="120s", retries=2)
+        @_legacy_hatchet.step(timeout="120s", retries=2)
         async def step(self, context: Context) -> dict:
             return await qualify_lead(context)
 
-    @hatchet.workflow(name="nurture-lead", on_events=["lead.unsold", "lead.rejected"])
+    @_legacy_hatchet.workflow(name="nurture-lead", on_events=["lead.unsold", "lead.rejected"])
     class NurtureLead:
-        @hatchet.step(timeout="60s", retries=2)
+        @_legacy_hatchet.step(timeout="60s", retries=2)
         async def step(self, context: Context) -> dict:
             return await nurture_lead(context)
 
-    @hatchet.workflow(name="hermes-self-evolution", on_crons=["0 9 * * 1"])
+    @_legacy_hatchet.workflow(name="hermes-self-evolution", on_crons=["0 9 * * 1"])
     class HermesSelfEvolution:
-        @hatchet.step(timeout="600s", retries=1)
+        @_legacy_hatchet.step(timeout="600s", retries=1)
         async def step(self, context: Context) -> dict:
             return await hermes_self_evolution(context)
 
@@ -100,7 +101,7 @@ else:
 
 def main() -> None:
     if _supports_legacy_hatchet_worker:
-        worker = hatchet.worker("agent-runtime", max_runs=4)
+        worker = _legacy_hatchet.worker("agent-runtime", max_runs=4)
         worker.register_workflow(QualifyLead())
         worker.register_workflow(NurtureLead())
         worker.register_workflow(HermesSelfEvolution())

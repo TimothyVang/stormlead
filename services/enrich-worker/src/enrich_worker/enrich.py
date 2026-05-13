@@ -9,7 +9,17 @@ from uuid import UUID, uuid4
 import httpx
 from geoalchemy2 import WKTElement
 from hatchet_sdk import Context, Hatchet
-from stormlead_core import LeadStatus, PipelineState, bind_correlation_id, emit_event, emit_metric
+from stormlead_core import (
+    InvalidObjectKeyError,
+    LeadStatus,
+    PipelineState,
+    ProviderArea,
+    bind_correlation_id,
+    emit_event,
+    emit_metric,
+    local_object_storage_from_env,
+    provider_decision,
+)
 from stormlead_db import LeadRow, get_session, record_transition
 
 from enrich_worker.geocode import geocode_address
@@ -51,8 +61,22 @@ def infer_requested_service(*, description: str | None, page_text: str) -> str |
 async def fetch_enrichment_evidence(
     page_url: str, damage_description: str | None
 ) -> EnrichmentEvidence:
+    decision = provider_decision(
+        ProviderArea.PAGE_ENRICHMENT,
+        action="page enrichment fetch",
+        target_url=page_url,
+    )
+    if not decision.allowed:
+        return EnrichmentEvidence(
+            page_url=page_url,
+            fetched=False,
+            status_code=None,
+            title=None,
+            requested_service=infer_requested_service(description=damage_description, page_text=""),
+            error="page_url is not locally safe or approved",
+        )
     try:
-        async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=5.0, follow_redirects=False) as client:
             response = await client.get(page_url)
         text = response.text[:20_000]
         return EnrichmentEvidence(
@@ -76,20 +100,20 @@ async def fetch_enrichment_evidence(
         )
 
 
-async def fetch_from_s3(s3_key: str) -> bytes | None:
-    """Best-effort photo byte fetcher; tests can patch this for private S3."""
-    if s3_key.startswith(("http://", "https://")):
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.get(s3_key)
-                response.raise_for_status()
-                return response.content
-        except Exception:
-            return None
-    path = Path(s3_key)
-    if path.is_file():
-        return path.read_bytes()
-    return None
+def _photo_object_storage() -> Any:
+    return local_object_storage_from_env(
+        Path("testing/runs/local-demo-uploads"),
+        env_names=("STORMLEAD_OBJECT_STORAGE_LOCAL_ROOT", "STORMLEAD_LOCAL_UPLOAD_DIR"),
+        allowed_prefixes=("local-demo/",),
+    )
+
+
+async def fetch_from_s3(object_key: str) -> bytes | None:
+    """Best-effort photo byte fetcher for local proof and future object storage keys."""
+    try:
+        return _photo_object_storage().get_bytes(object_key)
+    except InvalidObjectKeyError:
+        return None
 
 
 async def _classify_lead_photos(photo_s3_keys: list[str]) -> list[dict[str, Any]]:

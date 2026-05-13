@@ -40,6 +40,7 @@ class LeadStatus(StrEnum):
     SOLD = "sold"
     UNSOLD = "unsold"
     NURTURED = "nurtured"
+    NURTURE_FAILED = "nurture_failed"
     DIALING = "dialing"
     CONTACTED = "contacted"
     DEAD = "dead"
@@ -135,8 +136,15 @@ class Lead(BaseModel):
     # context
     storm_id: UUID | None = None
     damage_description: str | None = None
+    damage_type: str | None = None
+    urgency: str | None = None
+    damage_summary: str | None = None
+    visible_risk_level: str | None = None
+    estimated_job_size: str | None = None
+    buyer_notes: str | None = None
     damage_tier: DamageTier | None = None
     photo_s3_keys: list[str] = Field(default_factory=list)
+    safety_flags: list[str] = Field(default_factory=list)
 
     # tcpa-required audit trail
     consent_text: str  # exact disclosure shown

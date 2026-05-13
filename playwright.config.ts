@@ -1,11 +1,21 @@
 import { defineConfig, devices } from '@playwright/test';
 
 const visibleSlowMoMs = Number(process.env.STORMLEAD_PLAYWRIGHT_SLOW_MO_MS ?? 150);
+const LOCAL_TEST_HOSTS = new Set(['127.0.0.1', 'localhost']);
+
+function localHttpUrl(label: string, rawUrl: string): string {
+  const url = new URL(rawUrl);
+  if (url.protocol !== 'http:' || (!LOCAL_TEST_HOSTS.has(url.hostname) && !url.hostname.endsWith('.localhost'))) {
+    throw new Error(`${label} must stay on local HTTP, got ${rawUrl}`);
+  }
+  return rawUrl;
+}
 
 export default defineConfig({
   testDir: './tests/playwright',
   outputDir: './testing/playwright-artifacts',
   timeout: 120_000,
+  workers: 1,
   globalSetup: './tests/playwright/global-setup.ts',
   reporter: [
     ['line'],
@@ -13,7 +23,7 @@ export default defineConfig({
     ['json', { outputFile: './testing/logs/playwright-results.json' }],
   ],
   use: {
-    baseURL: process.env.STORMLEAD_ADMIN_URL ?? 'http://127.0.0.1:8003',
+    baseURL: localHttpUrl('STORMLEAD_ADMIN_URL', process.env.STORMLEAD_ADMIN_URL ?? 'http://127.0.0.1:8003'),
   },
   projects: [
     {
@@ -24,6 +34,7 @@ export default defineConfig({
         '**/buyer-lifecycle.spec.ts',
         '**/return-workflow.spec.ts',
         '**/kpi-readiness.spec.ts',
+        '**/paid-pilot-autopilot.spec.ts',
       ],
       use: {
         headless: true,
@@ -38,6 +49,8 @@ export default defineConfig({
         '**/admin.spec.ts',
         '**/buyer-wallet-ui.spec.ts',
         '**/landing-local-submit.spec.ts',
+        '**/human-lead-sale.spec.ts',
+        '**/human-persona-workflows.spec.ts',
         '**/role-experience.spec.ts',
         '**/operator-review.spec.ts',
       ],

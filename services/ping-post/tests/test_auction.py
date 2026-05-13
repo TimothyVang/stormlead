@@ -5,16 +5,22 @@ for integration: see scripts/smoke_e2e.py.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from uuid import uuid4
 
+import pytest
 from ping_post.api import _recommended_refill_cents
 from ping_post.auction import (
     PingResponse,
+    _apply_exclusive_zip_routing,
     _avm_band,
     _buyer_can_afford_bid,
+    _buyer_delivery_allowed,
     _buyer_matches_paid_pilot_rules,
+    _collect_bid_window_responses,
     _debit_amount,
     _delivery_idempotency_key,
     _lead_can_enter_auction,
@@ -23,7 +29,17 @@ from ping_post.auction import (
     _should_retry_post,
     _sign_webhook,
 )
-from stormlead_core import Buyer, BuyerStatus, DamageTier, Lead, LeadClass, LeadSource, LeadStatus
+from ping_post.buyer_activation import buyer_activation_readiness
+from stormlead_core import (
+    Buyer,
+    BuyerSalesStage,
+    BuyerStatus,
+    DamageTier,
+    Lead,
+    LeadClass,
+    LeadSource,
+    LeadStatus,
+)
 from stormlead_core.filters import evaluate_filter
 
 
@@ -33,6 +49,7 @@ def _lead(
     avm=400_000,
     lead_class=LeadClass.A,
     requested_service="tree_removal",
+    safety_flags: list[str] | None = None,
 ) -> Lead:
     now = datetime.now(UTC)
     return Lead(
@@ -47,7 +64,14 @@ def _lead(
         state=state,
         zip="33101",
         damage_description="tree on garage",
+        damage_type="roof_impact",
+        urgency="same_day",
+        damage_summary="Tree impact reported near a garage.",
+        visible_risk_level="medium",
+        estimated_job_size="large",
+        buyer_notes="Verify structure involvement and safe equipment access.",
         damage_tier=tier,
+        safety_flags=safety_flags or [],
         lead_class=lead_class,
         requested_service=requested_service,
         consent_text="I agree...",
@@ -78,6 +102,29 @@ def _buyer(filter_expr="lead.state == 'FL'") -> Buyer:
     )
 
 
+def _activation_buyer(**overrides: object) -> SimpleNamespace:
+    data: dict[str, object] = {
+        "status": BuyerStatus.ACTIVE.value,
+        "sales_stage": BuyerSalesStage.FUNDED.value,
+        "notes": "terms accepted",
+        "services": ["tree_removal"],
+        "target_zips": ["33101"],
+        "exclusive_zips": [],
+        "deposit_balance": Decimal("500.00"),
+        "low_balance_threshold": Decimal("100.00"),
+        "daily_cap": 25,
+        "monthly_budget": Decimal("5000.00"),
+        "bid_per_lead_t1_t2": Decimal("65.00"),
+        "bid_per_lead_t3": Decimal("180.00"),
+        "bid_per_call": Decimal("100.00"),
+        "webhook_url": "http://localhost:9999/webhook",
+        "webhook_secret": "test-secret-32chars-minimum-ok",
+        "api_key": "buyer-api-key",
+    }
+    data.update(overrides)
+    return SimpleNamespace(**data)
+
+
 def test_avm_band_buckets() -> None:
     assert _avm_band(None) == "unknown"
     assert _avm_band(Decimal(100_000)) == "lt_150k"
@@ -92,8 +139,37 @@ def test_ping_payload_strips_pii() -> None:
     assert "+15125550100" not in str(p)
     assert p["state"] == "FL"
     assert p["damage_tier"] == "tier_3_on_structure"
+    assert p["damage_type"] == "roof_impact"
+    assert p["urgency"] == "same_day"
+    assert (
+        p["damage_summary"]
+        == "Roof impact reported; urgency same day; visible risk medium; estimated job large."
+    )
+    assert p["visible_risk_level"] == "medium"
+    assert p["estimated_job_size"] == "large"
+    assert (
+        p["buyer_notes"]
+        == "Pre-sale ping only; confirm access, crew size, and equipment after purchase."
+    )
     # avm is banded, not exact
     assert "400000" not in str(p)
+
+
+def test_ping_payload_uses_controlled_text_instead_of_structured_review_pii() -> None:
+    lead = _lead()
+    lead.damage_summary = "Homeowner John Doe needs removal near 100 Main St."
+    lead.buyer_notes = "Email john@example.com or call 512-555-0100 before dispatch."
+
+    payload = _ping_payload(lead)
+    combined = f"{payload['damage_summary']} {payload['buyer_notes']}"
+
+    assert "John" not in combined
+    assert "Doe" not in combined
+    assert "512-555-0100" not in combined
+    assert "john@example.com" not in combined
+    assert "100 Main" not in combined
+    assert "Roof impact reported" in combined
+    assert "Pre-sale ping only" in combined
 
 
 def test_sign_webhook_is_deterministic() -> None:
@@ -155,7 +231,7 @@ def test_pick_winner_takes_highest_bid() -> None:
         PingResponse(
             b1,
             accepted=True,
-            bid_cents=8000,
+            bid_cents=18_000,
             response_ms=120,
             status_code=200,
             body=None,
@@ -164,7 +240,7 @@ def test_pick_winner_takes_highest_bid() -> None:
         PingResponse(
             b2,
             accepted=True,
-            bid_cents=12000,
+            bid_cents=22_000,
             response_ms=200,
             status_code=200,
             body=None,
@@ -175,7 +251,7 @@ def test_pick_winner_takes_highest_bid() -> None:
     assert winner is not None
     pr, _winner_buyer = winner
     assert pr.buyer_id == b2
-    assert pr.bid_cents == 12000
+    assert pr.bid_cents == 22_000
 
 
 def test_pick_winner_ties_break_by_speed() -> None:
@@ -185,7 +261,7 @@ def test_pick_winner_ties_break_by_speed() -> None:
         PingResponse(
             b1,
             accepted=True,
-            bid_cents=10000,
+            bid_cents=20_000,
             response_ms=300,
             status_code=200,
             body=None,
@@ -194,7 +270,7 @@ def test_pick_winner_ties_break_by_speed() -> None:
         PingResponse(
             b2,
             accepted=True,
-            bid_cents=10000,
+            bid_cents=20_000,
             response_ms=120,
             status_code=200,
             body=None,
@@ -234,7 +310,7 @@ def test_pick_winner_skips_buyer_without_wallet_balance() -> None:
         PingResponse(
             b1,
             accepted=True,
-            bid_cents=15000,
+            bid_cents=20_000,
             response_ms=90,
             status_code=200,
             body=None,
@@ -243,7 +319,7 @@ def test_pick_winner_skips_buyer_without_wallet_balance() -> None:
         PingResponse(
             b2,
             accepted=True,
-            bid_cents=10000,
+            bid_cents=18_000,
             response_ms=140,
             status_code=200,
             body=None,
@@ -255,12 +331,103 @@ def test_pick_winner_skips_buyer_without_wallet_balance() -> None:
     assert winner[0].buyer_id == b2
 
 
+def test_pick_winner_rejects_non_positive_bids() -> None:
+    buyer_id = uuid4()
+    buyers = {buyer_id: _buyer()}
+    responses = [
+        PingResponse(
+            buyer_id,
+            accepted=True,
+            bid_cents=-1,
+            response_ms=90,
+            status_code=200,
+            body=None,
+            error=None,
+        )
+    ]
+
+    assert _pick_winner(responses, buyers, DamageTier.TIER_3_ON_STRUCTURE) is None
+
+
+def test_pick_winner_rejects_bid_below_configured_price() -> None:
+    buyer = _buyer()
+    buyers = {buyer.id: buyer}
+    responses = [
+        PingResponse(
+            buyer.id,
+            accepted=True,
+            bid_cents=1,
+            response_ms=90,
+            status_code=200,
+            body=None,
+            error=None,
+        )
+    ]
+
+    assert _pick_winner(responses, buyers, DamageTier.TIER_3_ON_STRUCTURE) is None
+
+
 def test_wallet_helpers_convert_cents_to_dollars() -> None:
     buyer = _buyer()
     buyer.deposit_balance = Decimal("99.99")
     assert _buyer_can_afford_bid(buyer, 9999)
     assert not _buyer_can_afford_bid(buyer, 10000)
+    assert not _buyer_can_afford_bid(buyer, 0)
     assert _debit_amount(12550) == Decimal("125.5")
+
+
+def test_buyer_activation_readiness_requires_launch_fields() -> None:
+    ready = buyer_activation_readiness(_activation_buyer())
+    assert ready["autopilot_ready"] is True
+
+    missing_api_key = buyer_activation_readiness(_activation_buyer(api_key=None))
+    assert missing_api_key["autopilot_ready"] is False
+    assert "api_key_ready" in missing_api_key["missing_requirements"]
+
+
+def test_buyer_activation_readiness_counts_exclusive_zip_as_coverage() -> None:
+    readiness = buyer_activation_readiness(
+        _activation_buyer(target_zips=[], exclusive_zips=["33101"])
+    )
+
+    assert readiness["zip_ready"] is True
+    assert readiness["coverage_zips"] == ["33101"]
+
+
+def test_buyer_delivery_stays_local_before_commercial_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("STORMLEAD_COMMERCIAL_LAUNCH_APPROVED", raising=False)
+    assert _buyer_delivery_allowed("http://localhost:9999/webhook")
+    assert _buyer_delivery_allowed("http://host.docker.internal:9999/webhook")
+    assert not _buyer_delivery_allowed("https://buyer.stormlead.test/leads")
+
+
+def test_buyer_delivery_requires_approved_https_host_after_commercial_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STORMLEAD_COMMERCIAL_LAUNCH_APPROVED", "true")
+    monkeypatch.delenv("STORMLEAD_APPROVED_BUYER_WEBHOOK_HOSTS", raising=False)
+
+    assert not _buyer_delivery_allowed("https://buyer.stormlead.test/leads")
+
+    monkeypatch.setenv("STORMLEAD_APPROVED_BUYER_WEBHOOK_HOSTS", "buyer.stormlead.test")
+    monkeypatch.setattr(
+        "stormlead_core.env_gate.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [(0, 0, 0, "", ("93.184.216.34", 443))],
+    )
+    assert _buyer_delivery_allowed("https://buyer.stormlead.test/leads")
+    assert not _buyer_delivery_allowed("http://buyer.stormlead.test/leads")
+
+    monkeypatch.setenv("STORMLEAD_APPROVED_BUYER_WEBHOOK_HOSTS", "10.0.0.5")
+    assert not _buyer_delivery_allowed("https://10.0.0.5/leads")
+
+    monkeypatch.setenv("STORMLEAD_APPROVED_BUYER_WEBHOOK_HOSTS", "buyer.stormlead.test")
+    monkeypatch.setattr(
+        "stormlead_core.env_gate.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [(0, 0, 0, "", ("10.0.0.5", 443))],
+    )
+    assert not _buyer_delivery_allowed("https://buyer.stormlead.test/leads")
 
 
 def test_debit_amount_handles_zero_bid() -> None:
@@ -279,6 +446,38 @@ def test_paid_pilot_rules_require_target_zip_when_configured() -> None:
     assert not _buyer_matches_paid_pilot_rules(buyer, _lead())
     buyer.target_zips = ["33101"]
     assert _buyer_matches_paid_pilot_rules(buyer, _lead())
+
+
+def test_paid_pilot_rules_treat_exclusive_zip_as_coverage() -> None:
+    buyer = _buyer()
+    buyer.target_zips = []
+    buyer.exclusive_zips = ["33101"]
+    assert _buyer_matches_paid_pilot_rules(buyer, _lead())
+
+    buyer.exclusive_zips = ["78701"]
+    assert not _buyer_matches_paid_pilot_rules(buyer, _lead())
+
+
+def test_exclusive_zip_routing_only_returns_exclusive_buyers() -> None:
+    exclusive = _buyer()
+    exclusive.exclusive_zips = [" 33101 "]
+    general = _buyer()
+    general.target_zips = ["33101"]
+
+    routed = _apply_exclusive_zip_routing(
+        _lead(), [general, exclusive], active_exclusive_owner_exists=True
+    )
+
+    assert routed == [exclusive]
+
+
+def test_exclusive_zip_routing_does_not_spill_when_owner_unready() -> None:
+    general = _buyer()
+    general.target_zips = ["33101"]
+
+    routed = _apply_exclusive_zip_routing(_lead(), [general], active_exclusive_owner_exists=True)
+
+    assert routed == []
 
 
 def test_paid_pilot_rules_require_requested_service_when_configured() -> None:
@@ -319,6 +518,25 @@ def test_low_score_or_cd_class_goes_to_manual_review() -> None:
     assert reason3 == "class_requires_review"
 
 
+def test_life_safety_lead_requires_review_before_auction() -> None:
+    lead = _lead(tier=DamageTier.TIER_4_LIFE_SAFETY, safety_flags=["power_line"])
+
+    ok, reason = _lead_can_enter_auction(lead)
+
+    assert not ok
+    assert reason == "safety_review_required"
+
+
+def test_restricted_resale_source_is_not_auctioned() -> None:
+    lead = _lead()
+    lead.campaign_source = "google_lsa"
+
+    ok, reason = _lead_can_enter_auction(lead)
+
+    assert not ok
+    assert reason == "restricted_source_no_resale"
+
+
 def test_recommended_refill_is_zero_above_threshold() -> None:
     assert (
         _recommended_refill_cents(
@@ -329,6 +547,19 @@ def test_recommended_refill_is_zero_above_threshold() -> None:
             gross_spend_today_cents=20_000,
         )
         == 0
+    )
+
+
+def test_recommended_refill_triggers_at_threshold() -> None:
+    assert (
+        _recommended_refill_cents(
+            balance_cents=15_000,
+            threshold_cents=15_000,
+            monthly_budget_cents=100_000,
+            delivered_today=0,
+            gross_spend_today_cents=0,
+        )
+        == 25_000
     )
 
 
@@ -343,3 +574,33 @@ def test_recommended_refill_uses_largest_buffer_below_threshold() -> None:
         )
         == 30_000
     )
+
+
+async def test_bid_window_preserves_completed_bids_and_times_out_only_pending() -> None:
+    fast_a = _buyer()
+    fast_b = _buyer()
+    slow = _buyer()
+    buyers = [fast_a, slow, fast_b]
+
+    async def ping_buyer(buyer: Buyer) -> PingResponse:
+        if buyer.id == slow.id:
+            await asyncio.sleep(0.05)
+        return PingResponse(
+            buyer_id=buyer.id,
+            accepted=buyer.id != slow.id,
+            bid_cents=12_000 if buyer.id == fast_a.id else 10_000,
+            response_ms=10,
+            status_code=200,
+            body=None,
+            error=None,
+        )
+
+    responses = await _collect_bid_window_responses(
+        lead_id=uuid4(), buyers=buyers, ping_buyer=ping_buyer, bid_window_s=0.01
+    )
+
+    by_buyer = {response.buyer_id: response for response in responses}
+    assert by_buyer[fast_a.id].accepted
+    assert by_buyer[fast_b.id].accepted
+    assert not by_buyer[slow.id].accepted
+    assert by_buyer[slow.id].error == "timeout"

@@ -1,10 +1,14 @@
 import type { APIRequestContext } from '@playwright/test';
+import { randomInt } from 'node:crypto';
 
 export const FORM_RECEIVER = process.env.FORM_RECEIVER_URL ?? 'http://127.0.0.1:8002';
 export const PING_POST     = process.env.PING_POST_URL     ?? 'http://127.0.0.1:8003';
 export const LANDING       = process.env.LANDING_URL       ?? 'http://127.0.0.1:8005';
 export const BUYER_PORTAL  = process.env.BUYER_PORTAL_URL  ?? 'http://127.0.0.1:8004';
 const OPERATOR_TOKEN = process.env.STORMLEAD_OPERATOR_TOKEN;
+const PHONE_MID_COUNT = 700;
+const PHONE_SUFFIX_COUNT = 9000;
+const PHONE_SPACE = PHONE_MID_COUNT * PHONE_SUFFIX_COUNT;
 
 type RequestOptions = { data?: unknown; headers?: Record<string, string> };
 
@@ -17,12 +21,13 @@ function withOperatorHeaders(options: RequestOptions = {}): RequestOptions {
 }
 
 export function runSeed(): number {
-  return Date.now() % 10_000_000;
+  return randomInt(0, PHONE_SPACE);
 }
 
 export function syntheticPhone(seed: number, offset: number): string {
-  const mid = (200 + (seed % 700)).toString().padStart(3, '0');
-  const suffix = (1000 + ((seed * 97 + offset) % 9000)).toString().padStart(4, '0');
+  const phoneIndex = (seed + offset * 7919) % PHONE_SPACE;
+  const mid = (200 + Math.floor(phoneIndex / PHONE_SUFFIX_COUNT)).toString().padStart(3, '0');
+  const suffix = (1000 + (phoneIndex % PHONE_SUFFIX_COUNT)).toString().padStart(4, '0');
   return `+1512${mid}${suffix}`;
 }
 
@@ -133,6 +138,29 @@ export class StormLeadApiClient {
   // GET /v1/admin/workflow-kpis
   async getWorkflowKPIs() {
     const res = await this.req.get(`${PING_POST}/v1/admin/workflow-kpis`, withOperatorHeaders());
+    return { status: res.status(), body: await res.json() };
+  }
+
+  async getAutopilotKPIs() {
+    const res = await this.req.get(`${PING_POST}/v1/admin/autopilot/kpis`, withOperatorHeaders());
+    return { status: res.status(), body: await res.json() };
+  }
+
+  async getAutopilotExceptions(params?: { kind?: string; lead_id?: string; buyer_id?: string; limit?: number }) {
+    const url = new URL(`${PING_POST}/v1/admin/autopilot/exceptions`);
+    if (params?.kind) url.searchParams.set('kind', params.kind);
+    if (params?.lead_id) url.searchParams.set('lead_id', params.lead_id);
+    if (params?.buyer_id) url.searchParams.set('buyer_id', params.buyer_id);
+    if (params?.limit) url.searchParams.set('limit', String(params.limit));
+    const res = await this.req.get(url.toString(), withOperatorHeaders());
+    return { status: res.status(), body: await res.json() };
+  }
+
+  async getNormalizedKPIs(params?: { market_state?: string; market_zip?: string }) {
+    const url = new URL(`${PING_POST}/v1/kpis/normalized`);
+    if (params?.market_state) url.searchParams.set('market_state', params.market_state);
+    if (params?.market_zip) url.searchParams.set('market_zip', params.market_zip);
+    const res = await this.req.get(url.toString(), withOperatorHeaders());
     return { status: res.status(), body: await res.json() };
   }
 

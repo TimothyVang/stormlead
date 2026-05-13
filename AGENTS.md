@@ -4,9 +4,9 @@ Use this file as the repo-local operating guide for coding agents.
 
 ## Operating Mode
 
-- Default target is local simulation and technical proofing, not commercial paid launch.
-- Use synthetic leads and local/dev services only unless the user explicitly approves a real external action.
-- Do not contact real homeowners, buyers, ad platforms, payment processors, SMS/email/phone providers, or public webhooks from this workspace.
+- Default target is production launch readiness; agents should build launch-required features and verification, while real external actions still require explicit action-level approval.
+- Use synthetic leads and local/dev services by default until the user explicitly approves a specific real external action.
+- Do not contact real homeowners, buyers, ad platforms, payment processors, SMS/email/phone providers, or public webhooks from this workspace without explicit action-level approval.
 - Keep evidence under ignored `testing/` paths and do not commit generated artifacts.
 - Do not commit, push, amend, rewrite history, or run destructive Git commands unless the user explicitly asks.
 

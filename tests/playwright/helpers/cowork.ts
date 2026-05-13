@@ -245,8 +245,24 @@ export class CoworkRun {
 
   async screenshot(name: string, comment: string): Promise<void> {
     const file = join(this.screenshotsDir, `${String(this.step).padStart(2, '0')}-${name}.png`);
-    await this.page.screenshot({ path: file, fullPage: true });
-    this.note(`Screenshot: ${file} - ${comment}`);
+    const maxAttempts = 3;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        await this.page.waitForLoadState('domcontentloaded');
+        await this.page.waitForTimeout(attempt === 1 ? 150 : 500);
+        await this.page.screenshot({ path: file, fullPage: true, animations: 'disabled', caret: 'hide' });
+        this.note(`Screenshot: ${file} - ${comment}`);
+        return;
+      } catch (error) {
+        this.note(`Screenshot fullPage attempt ${attempt}/${maxAttempts} failed for ${name}: ${error}`);
+        if (attempt === maxAttempts) {
+          await this.page.screenshot({ path: file, fullPage: false, animations: 'disabled', caret: 'hide' });
+          this.note(`Screenshot fallback viewport: ${file} - ${comment}`);
+          return;
+        }
+      }
+    }
   }
 
   async assertSelectorText(selector: string, text: string, comment: string): Promise<void> {

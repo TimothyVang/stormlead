@@ -115,6 +115,12 @@
       .local-result { background: rgba(8,8,8,.82); border: 1px solid var(--border); border-radius: 1.2rem; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; line-height: 1.55; min-height: 3.25rem; padding: 1rem; text-align: left; }
       .local-result.ok { border-color: rgba(16,185,129,.45); color: #6ee7b7; }
       .local-result.error { border-color: rgba(251,113,133,.45); color: #fecdd3; }
+      .verification-card { background: rgba(6, 182, 212, .08); border: 1px solid rgba(6,182,212,.22); border-radius: 1.2rem; display: grid; gap: .85rem; padding: 1rem; }
+      .verification-copy { color: var(--muted); font-size: .9rem; line-height: 1.6; margin: 0; text-align: left; }
+      .photo-list { color: #d4d4d4; font-size: .85rem; line-height: 1.6; margin: 0; padding-left: 1.2rem; text-align: left; }
+      .secondary-button { background: rgba(255,255,255,.08); border: 1px solid var(--border); border-radius: 999px; color: #fff; cursor: pointer; font-weight: 800; min-height: 3rem; padding: .85rem 1.1rem; width: fit-content; }
+      .checkbox-label { align-items: start; display: flex; gap: .65rem; letter-spacing: 0; line-height: 1.45; text-transform: none; }
+      .checkbox-label input { min-height: auto; margin-top: .2rem; width: auto; }
       .pill { background: rgba(10,10,10,.7); border: 1px solid var(--border); border-radius: 999px; color: #d4d4d4; display: inline-flex; font-size: .7rem; font-weight: 600; letter-spacing: .16em; padding: .4rem .75rem; text-transform: uppercase; }
       code { color: #22d3ee; }
       .code-window { background: rgba(8,8,8,.8); overflow: hidden; }
@@ -157,7 +163,7 @@
         <div class="hero-inner">
           <div class="eyebrow">Storm damage response</div>
           <h1>Tree on your <span class="shimmer">property?</span></h1>
-          <p class="hero-copy">Tell us what happened and StormLead will route your request to a verified local storm cleanup partner when commercial launch is approved.</p>
+          <p class="hero-copy">Tell us what happened and StormLead will match your request with a verified local storm cleanup partner when commercial launch is approved. We are a referral and matching service, not the tree crew.</p>
           <div class="hero-actions">
             <a class="shiny-button" href="#request"><span>Open request form</span></a>
             <a class="text-link" href="#proof">Review local proof</a>
@@ -196,6 +202,13 @@
           <p>This browser form signs a synthetic Formbricks-style envelope through the local landing service and forwards only to the local form receiver. It does not contact real homeowners, buyers, payments, ads, SMS, email, or public webhooks.</p>
           <form class="local-form" data-testid="local-lead-form" aria-label="local synthetic storm request form">
             <input type="hidden" name="page_url" value="/">
+            <input type="hidden" name="gps_latitude" data-testid="gps-latitude">
+            <input type="hidden" name="gps_longitude" data-testid="gps-longitude">
+            <input type="hidden" name="gps_accuracy_meters" data-testid="gps-accuracy">
+            <input type="hidden" name="gps_captured_at" data-testid="gps-captured-at">
+            <input type="hidden" name="location_source" value="browser_gps">
+            <input type="hidden" name="location_confirmed_at" data-testid="location-confirmed-at">
+            <input type="hidden" name="damage_photo_keys" data-testid="damage-photo-keys">
             {% for key, value in hidden_fields.items() %}
             <input type="hidden" name="{{ key }}" value="{{ value }}">
             {% endfor %}
@@ -204,15 +217,38 @@
               <label>Phone<input name="phone" value="+15126011023" autocomplete="tel" required></label>
               <label>Email<input name="email" value="synthetic-homeowner@example-stormlead-test.com" autocomplete="email"></label>
               <label>Service<select name="requested_service"><option value="tree_removal">Tree removal</option><option value="roof_tarp">Roof tarp</option><option value="water_mitigation">Water mitigation</option></select></label>
+              <label>Damage type<select name="damage_type" required><option value="fallen_tree">Fallen tree</option><option value="leaning_tree">Leaning tree</option><option value="broken_branch">Broken branch</option><option value="driveway_blocked">Driveway blocked</option><option value="roof_impact">Roof or structure impact</option><option value="stump">Stump only</option><option value="unknown">Not sure</option></select></label>
+              <label>Urgency<select name="urgency" required><option value="same_day">Today / same day</option><option value="emergency">Emergency</option><option value="24_48_hours">24 to 48 hours</option><option value="this_week">This week</option><option value="quote_only">Quote only</option></select></label>
+              <label>Power line involved?<select name="power_line_involved" required><option value="false">No</option><option value="true">Yes or not sure</option></select></label>
+              <label>Anyone injured?<select name="injury_reported" required><option value="false">No</option><option value="true">Yes</option></select></label>
+              <label class="wide">Active danger?<select name="active_danger" required><option value="false">No immediate danger</option><option value="true">Yes, active danger</option></select></label>
+              <label class="wide">What happened?<textarea name="damage_description" required>Large limb fell across the driveway after a storm. No injuries or power lines reported in this synthetic proof.</textarea></label>
               <label class="wide">Address<input name="address_line1" value="999 Local Proof Ln" autocomplete="street-address" required></label>
               <label>City<input name="city" value="Austin" autocomplete="address-level2" required></label>
               <label>State<input name="state" value="TX" maxlength="2" autocomplete="address-level1" required></label>
               <label>ZIP<input name="zip" value="78761" autocomplete="postal-code" required></label>
-              <label class="wide">Consent text<textarea name="consent_text" required>I agree to be contacted regarding storm damage repair services. This local proof submission is synthetic test data.</textarea></label>
+              <label class="wide">Consent text<textarea name="consent_text" required>I agree that StormLead may call, text, or email me about my tree-damage request, may use AI-assisted review of my request details and photos, and may share my contact information, address, precise location if shared, and damage photos with selected local tree-service providers for this request. Consent is not required to buy services. Reply STOP to opt out. This local proof submission is synthetic test data.</textarea></label>
             </div>
+            <section class="verification-card" aria-label="location verification">
+              <strong>Required damage-location verification</strong>
+              <p class="verification-copy">Use current location at or near the damage site. We use it only for this request, routing, fraud prevention, and provider matching. We do not track background location.</p>
+              <button class="secondary-button" type="button" data-testid="capture-location">Use my current location</button>
+              <span class="pill" data-testid="location-status">Location not captured</span>
+            </section>
+            <section class="verification-card" aria-label="damage photo verification">
+              <strong>Required damage photos</strong>
+              <p class="verification-copy">Take photos in daylight if possible. Stay back, show the damage clearly, and do not approach power lines, unstable trees, roofs, flood water, or unsafe areas. If anyone is injured or a utility line is involved, call emergency services or the utility before contractor matching.</p>
+              <ol class="photo-list">
+                <li>Wide photo: stand back and show the full damaged area.</li>
+                <li>Close photo: show the damage detail clearly.</li>
+              </ol>
+              <label class="wide">Upload or take two damage photos<input name="damage_photos" data-testid="damage-photos" type="file" accept="image/*" capture="environment" multiple required></label>
+              <span class="pill" data-testid="photo-status">0 of 2 photos ready</span>
+            </section>
+            <label class="checkbox-label"><input name="consent_ack" data-testid="consent-ack" type="checkbox" required> I confirm the address, GPS location, and photos are for the storm damage site and I agree to be contacted about this request.</label>
             <div class="form-actions">
-              <button type="submit" data-testid="local-lead-submit">Submit synthetic lead</button>
-              <span class="pill">No external contact</span>
+              <button type="submit" data-testid="local-lead-submit" disabled>Submit synthetic lead</button>
+              <span class="pill" data-testid="verification-status">Complete verification to submit</span>
             </div>
           </form>
           <div class="local-result" data-testid="local-lead-result" role="status" aria-live="polite">Ready to submit local synthetic sample data.</div>
@@ -249,10 +285,124 @@
       const localLeadForm = document.querySelector('[data-testid="local-lead-form"]');
       const localLeadResult = document.querySelector('[data-testid="local-lead-result"]');
       if (localLeadForm && localLeadResult) {
+        const submitButton = localLeadForm.querySelector('[data-testid="local-lead-submit"]');
+        const locationButton = localLeadForm.querySelector('[data-testid="capture-location"]');
+        const locationStatus = localLeadForm.querySelector('[data-testid="location-status"]');
+        const photoInput = localLeadForm.querySelector('[data-testid="damage-photos"]');
+        const photoStatus = localLeadForm.querySelector('[data-testid="photo-status"]');
+        const verificationStatus = localLeadForm.querySelector('[data-testid="verification-status"]');
+        let photosUploading = false;
+        let photoUploadError = '';
+
+        const setValue = (name, value) => {
+          const input = localLeadForm.elements.namedItem(name);
+          if (input) input.value = value;
+        };
+
+        const getPhotoKeys = () => {
+          const raw = localLeadForm.elements.namedItem('damage_photo_keys')?.value || '[]';
+          try {
+            const keys = JSON.parse(raw);
+            return Array.isArray(keys) ? keys.filter((key) => typeof key === 'string' && key.length > 0) : [];
+          } catch {
+            return [];
+          }
+        };
+
+        const refreshVerification = () => {
+          const hasLocation = Boolean(localLeadForm.elements.namedItem('gps_latitude')?.value && localLeadForm.elements.namedItem('gps_longitude')?.value && localLeadForm.elements.namedItem('location_confirmed_at')?.value);
+          const selectedPhotoCount = photoInput?.files?.length || 0;
+          const uploadedPhotoCount = getPhotoKeys().length;
+          const hasPhotos = uploadedPhotoCount >= 2;
+          const hasConsent = Boolean(localLeadForm.elements.namedItem('consent_ack')?.checked);
+          if (photoStatus) {
+            if (photosUploading) {
+              photoStatus.textContent = `Uploading ${Math.min(selectedPhotoCount, 2)} of 2 photos...`;
+            } else if (photoUploadError) {
+              photoStatus.textContent = photoUploadError;
+            } else if (hasPhotos) {
+              photoStatus.textContent = `${Math.min(uploadedPhotoCount, 2)} of 2 photos uploaded`;
+            } else {
+              photoStatus.textContent = `${Math.min(selectedPhotoCount, 2)} of 2 photos selected`;
+            }
+          }
+          const ready = hasLocation && hasPhotos && hasConsent && !photosUploading;
+          if (submitButton) submitButton.disabled = !ready;
+          if (verificationStatus) verificationStatus.textContent = ready ? 'Verified and ready' : 'Complete verification to submit';
+        };
+
+        locationButton?.addEventListener('click', () => {
+          if (!navigator.geolocation) {
+            locationStatus.textContent = 'GPS unavailable in this browser';
+            refreshVerification();
+            return;
+          }
+          locationStatus.textContent = 'Capturing GPS...';
+          navigator.geolocation.getCurrentPosition((position) => {
+            setValue('gps_latitude', String(position.coords.latitude));
+            setValue('gps_longitude', String(position.coords.longitude));
+            setValue('gps_accuracy_meters', String(Math.round(position.coords.accuracy)));
+            setValue('gps_captured_at', new Date(position.timestamp).toISOString());
+            setValue('location_confirmed_at', new Date().toISOString());
+            locationStatus.textContent = `GPS captured ±${Math.round(position.coords.accuracy)}m`;
+            refreshVerification();
+          }, (error) => {
+            locationStatus.textContent = `GPS failed: ${error.message}`;
+            refreshVerification();
+          }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 });
+        });
+
+        photoInput?.addEventListener('change', async () => {
+          const files = Array.from(photoInput.files || []);
+          setValue('damage_photo_keys', '[]');
+          photoUploadError = '';
+          if (files.length < 2) {
+            refreshVerification();
+            return;
+          }
+
+          const uploadData = new FormData();
+          files.forEach((file) => uploadData.append('damage_photos', file));
+          photosUploading = true;
+          refreshVerification();
+
+          try {
+            const response = await fetch('/local-demo/uploads', { method: 'POST', body: uploadData });
+            const body = await response.json().catch(() => ({}));
+            if (!response.ok) {
+              throw new Error(body.detail || `HTTP ${response.status}`);
+            }
+            const keys = Array.isArray(body.photo_keys) ? body.photo_keys : [];
+            if (keys.length < 2) {
+              throw new Error('upload did not return two damage photo keys');
+            }
+            setValue('damage_photo_keys', JSON.stringify(keys));
+          } catch (error) {
+            photoUploadError = `Photo upload failed: ${error.message}`;
+            setValue('damage_photo_keys', '[]');
+          } finally {
+            photosUploading = false;
+            refreshVerification();
+          }
+        });
+
+        localLeadForm.elements.namedItem('consent_ack')?.addEventListener('change', refreshVerification);
+        refreshVerification();
+
         localLeadForm.addEventListener('submit', async (event) => {
           event.preventDefault();
+          refreshVerification();
+          if (submitButton?.disabled) {
+            localLeadResult.className = 'local-result error';
+            localLeadResult.textContent = 'Complete GPS, two damage photos, and consent before submitting.';
+            return;
+          }
+          const uploadedPhotoKeys = getPhotoKeys();
           const formData = new FormData(localLeadForm);
           formData.set('page_url', window.location.href);
+          formData.set('damage_photo_keys', JSON.stringify(uploadedPhotoKeys));
+          // Files are uploaded locally first; the signed envelope carries only local photo keys.
+          formData.delete('damage_photos');
           const payload = Object.fromEntries(formData.entries());
           localLeadResult.className = 'local-result';
           localLeadResult.textContent = 'Submitting signed local envelope...';

@@ -1,4 +1,4 @@
-import { test, expect } from './fixtures';
+import { test, expect, buyerWebhookUrl } from './fixtures';
 import { BUYER_PORTAL } from './helpers/api';
 
 function buyerPayload(seed: number) {
@@ -7,7 +7,7 @@ function buyerPayload(seed: number) {
     company: `Playwright Wallet UI Co ${seed}`,
     contact_email: `buyer-wallet-ui-${seed}@example-stormlead-test.com`,
     contact_phone_e164: `+1512${Date.now().toString().slice(-7)}`,
-    webhook_url: 'http://localhost:9999/webhook-sink',
+    webhook_url: buyerWebhookUrl('/webhook-sink'),
     webhook_secret: `playwright-wallet-ui-secret-${seed}`,
     bid_per_lead_t1_t2: 45.0,
     bid_per_lead_t3: 25.0,

@@ -1,4 +1,4 @@
-import { expect, test } from './fixtures';
+import { expect, test, buyerWebhookUrl } from './fixtures';
 import { CoworkRun, type CoworkWorkflow } from './helpers/cowork';
 import { FORM_RECEIVER, PING_POST, runSeed, syntheticPhone, syntheticEmail } from './helpers/api';
 import { buildSignedHeaders, buildEnvelope, resolveWebhookSecret } from './helpers/webhook';
@@ -42,7 +42,7 @@ test('operator views sold lead timeline in admin UI', async ({ page, request }, 
       company: 'Playwright Operator Review Co',
       contact_email: `buyer-operator-review-${Date.now()}@example-stormlead-test.com`,
       contact_phone_e164: `+1512${Date.now().toString().slice(-7)}`,
-      webhook_url: 'http://host.docker.internal:9999/buyer-operator-review',
+      webhook_url: buyerWebhookUrl('/buyer-operator-review'),
       webhook_secret: 'playwright-operator-review-secret',
       bid_per_lead_t1_t2: 50.0,
       bid_per_lead_t3: 200.0,

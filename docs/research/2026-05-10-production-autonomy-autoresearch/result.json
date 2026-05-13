@@ -1,0 +1,48 @@
+{
+  "status": "complete_with_caveats",
+  "topic": "How to get StormLead from local synthetic lead ingestion to production-grade autonomous lead generation: required SDKs, official docs, self-hosted sales funnel architecture, compliant lead capture, ads/search/social traffic sources, enrichment, CRM, buyer delivery, payments, observability, and validation gates",
+  "slug": "how-to-get-stormlead-from-local-synthetic-lead-ingestion-to-prod",
+  "mode": "high-data_with_manual_primary_source_supplement",
+  "created_at": "2026-05-10T14:42:50Z",
+  "updated_at": "2026-05-10T15:55:00Z",
+  "workspace": "C:\\Users\\newbi\\Desktop\\hadi projects\\stormlead",
+  "run_dir": "C:\\Users\\newbi\\Desktop\\hadi projects\\stormlead\\.omx\\specs\\autoresearch-how-to-get-stormlead-from-local-synthetic-lead-ingestion-to-prod",
+  "counts": {
+    "provider_results": 816,
+    "selected_sources": 129,
+    "fetched_sources": 128,
+    "evidence_entries": 128,
+    "citation_validations": 128,
+    "citation_failures": 0,
+    "unsupported_claims": 0,
+    "official_sources_added": 21,
+    "source_appraisals": 129,
+    "claim_graph_records": 114,
+    "research_questions": 4
+  },
+  "senior_research": {
+    "status": "approved_with_caveats",
+    "decision_memo": "C:\\Users\\newbi\\Desktop\\hadi projects\\stormlead\\.omx\\specs\\autoresearch-how-to-get-stormlead-from-local-synthetic-lead-ingestion-to-prod\\decision-memo.md",
+    "validated_roadmap": "C:\\Users\\newbi\\Desktop\\hadi projects\\stormlead\\.omx\\specs\\autoresearch-how-to-get-stormlead-from-local-synthetic-lead-ingestion-to-prod\\validated-roadmap.md"
+  },
+  "provider_gaps": [
+    "brave skipped: BRAVE_API_KEY unavailable",
+    "tavily skipped: TAVILY_API_KEY unavailable",
+    "serpapi skipped: SERPAPI_KEY unavailable",
+    "exa skipped: EXA_API_KEY unavailable",
+    "bing skipped: BING_SEARCH_API_KEY unavailable",
+    "semantic_scholar skipped: SEMANTIC_SCHOLAR_API_KEY unavailable",
+    "github skipped: GITHUB_TOKEN unavailable",
+    "developers.facebook.com docs returned 400/404 in webfetch; official SDK repositories fetched as partial fallback"
+  ],
+  "artifacts": {
+    "validated_roadmap": "C:\\Users\\newbi\\Desktop\\hadi projects\\stormlead\\.omx\\specs\\autoresearch-how-to-get-stormlead-from-local-synthetic-lead-ingestion-to-prod\\validated-roadmap.md",
+    "sources": "C:\\Users\\newbi\\Desktop\\hadi projects\\stormlead\\.omx\\specs\\autoresearch-how-to-get-stormlead-from-local-synthetic-lead-ingestion-to-prod\\sources.jsonl",
+    "source_appraisal": "C:\\Users\\newbi\\Desktop\\hadi projects\\stormlead\\.omx\\specs\\autoresearch-how-to-get-stormlead-from-local-synthetic-lead-ingestion-to-prod\\source-appraisal.jsonl",
+    "evidence": "C:\\Users\\newbi\\Desktop\\hadi projects\\stormlead\\.omx\\specs\\autoresearch-how-to-get-stormlead-from-local-synthetic-lead-ingestion-to-prod\\evidence.jsonl",
+    "citation_validation": "C:\\Users\\newbi\\Desktop\\hadi projects\\stormlead\\.omx\\specs\\autoresearch-how-to-get-stormlead-from-local-synthetic-lead-ingestion-to-prod\\citation-validation.jsonl",
+    "claim_graph": "C:\\Users\\newbi\\Desktop\\hadi projects\\stormlead\\.omx\\specs\\autoresearch-how-to-get-stormlead-from-local-synthetic-lead-ingestion-to-prod\\claim-graph.jsonl",
+    "validation_summary": "C:\\Users\\newbi\\Desktop\\hadi projects\\stormlead\\.omx\\specs\\autoresearch-how-to-get-stormlead-from-local-synthetic-lead-ingestion-to-prod\\validation-summary.jsonl",
+    "completion": "C:\\Users\\newbi\\Desktop\\hadi projects\\stormlead\\.omx\\specs\\autoresearch-how-to-get-stormlead-from-local-synthetic-lead-ingestion-to-prod\\completion.json"
+  }
+}

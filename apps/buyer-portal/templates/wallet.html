@@ -38,6 +38,67 @@
 </section>
 {% endif %}
 
+{% if key_message %}
+<section class="panel result" data-testid="api-key-result" data-status="{{ key_status }}">
+  <div class="section-header"><h2>API Key Status</h2><span class="pill {% if key_status == 'ok' %}ok{% else %}danger{% endif %}">{{ key_status }}</span></div>
+  <p>{{ key_message }}</p>
+</section>
+{% endif %}
+
+{% if rotated_api_key %}
+<section class="panel result" data-testid="api-key-rotated">
+  <div class="section-header"><h2>New API Key</h2><span class="pill danger">Shown once</span></div>
+  <p>Store this key now. The old buyer API key no longer works for portal or wallet API access.</p>
+  <pre class="mono">{{ rotated_api_key }}</pre>
+</section>
+{% endif %}
+
+<section class="panel" data-testid="buyer-readiness-panel" aria-label="buyer readiness">
+  <div class="section-header">
+    <h2>Launch Readiness</h2>
+    <span class="pill {% if readiness_view.autopilot_ready %}ok{% else %}danger{% endif %}">{{ readiness_view.status_label }}</span>
+  </div>
+  <p>No homeowner PII is shown here. These checks explain why this buyer can or cannot receive paid-pilot leads.</p>
+  <div class="grid" aria-label="readiness metrics">
+    <article class="card">
+      <div class="muted">Wallet threshold</div>
+      <div class="metric">{% if readiness_view.wallet_below_threshold %}Low{% else %}OK{% endif %}</div>
+      <p>Balance {{ readiness_view.balance }} vs. threshold {{ readiness_view.low_balance_threshold }}. Recommended refill: {{ readiness_view.recommended_refill }}.</p>
+    </article>
+    <article class="card">
+      <div class="muted">Ledger reconciliation</div>
+      <div class="metric">{% if readiness_view.ledger_reconciled %}Clean{% else %}Delta{% endif %}</div>
+      <p>Difference: {{ readiness_view.ledger_delta }}. A delta means the mutable wallet balance and append-only billing ledger need operator reconciliation before launch.</p>
+    </article>
+    <article class="card">
+      <div class="muted">Local payment proof</div>
+      <div class="metric">{% if readiness_view.payment_local_ready %}Ready{% else %}Missing{% endif %}</div>
+      <p>{% if readiness_view.live_payments_approved %}Live payments approved.{% else %}Live Stripe remains approval-gated.{% endif %}</p>
+    </article>
+  </div>
+  <div class="table-wrap">
+    <table aria-label="buyer readiness gaps">
+      <thead><tr><th>Requirement</th><th>Action</th><th>Status</th></tr></thead>
+      <tbody>
+        {% for item in readiness_view.missing_items %}
+        <tr><td>{{ item.label }} <span class="mono">{{ item.key }}</span></td><td>{{ item.action }}</td><td><span class="pill danger">Missing</span></td></tr>
+        {% else %}
+        <tr><td>Activation ready <span class="mono">activation_ready</span></td><td>No setup gaps returned.</td><td><span class="pill ok">Satisfied</span></td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p>Coverage ZIPs: <span class="mono">{{ readiness_view.coverage_zips | join(', ') if readiness_view.coverage_zips else 'none configured' }}</span></p>
+</section>
+
+<section class="panel" data-testid="api-key-rotation-panel" aria-label="buyer API key rotation">
+  <div class="section-header"><h2>API Key Rotation</h2><span class="pill">Self-service</span></div>
+  <p>Rotate the buyer API key if it was exposed or an operator asks you to refresh access. The new key is shown once and replaces the portal cookie.</p>
+  <form method="post" action="/buyer-portal/api-key/rotate" data-testid="api-key-rotate-form" aria-label="rotate buyer API key form" onsubmit="return confirm('Rotate this buyer API key now? Existing integrations using the old key will fail immediately.');">
+    <button type="submit" data-testid="api-key-rotate-submit">Rotate buyer API key</button>
+  </form>
+</section>
+
 {% if local_demo_enabled %}
 <section class="panel" aria-label="synthetic wallet refill">
   <div class="section-header"><h2>Synthetic Refill</h2><span class="pill">No Stripe charge</span></div>

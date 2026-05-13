@@ -6,8 +6,13 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
     "jinja2>=3.1",
+    "python-multipart>=0.0.20",
+    "stormlead-core",
     "uvicorn[standard]>=0.32",
 ]
 
 [tool.uv]
 package = false
+
+[tool.uv.sources]
+stormlead-core = { workspace = true }

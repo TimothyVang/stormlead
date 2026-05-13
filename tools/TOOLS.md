@@ -18,6 +18,7 @@ This project uses a small, local-first tool loadout. Add or enable more tools on
 - Do not replace headed browser proof with route mocks or direct database setup.
 - Main command: `npm run test:playwright -- --project=chromium --reporter=line`.
 - Cowork demo command: `npm run cowork:admin:record`.
+- UI-TARS/Agent TARS is optional exploratory proof. Prepare a local-only brief with `npm run tars:brief`; if no fork is attached, use `npm run tars:run -- --run-id <run-id>` for deterministic local fallback screenshots/findings, then convert findings into edits, tests, backlog, or blockers.
 
 ## Docker And Kubernetes MCP
 

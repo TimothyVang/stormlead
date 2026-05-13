@@ -1,4 +1,4 @@
-import { test, expect } from './fixtures';
+import { test, expect, buyerWebhookUrl } from './fixtures';
 import { FORM_RECEIVER } from './helpers/api';
 import { buildSignedHeaders, buildEnvelope } from './helpers/webhook';
 import { waitForLeadStatus, waitForTimelineEvent } from './helpers/wait';
@@ -11,7 +11,7 @@ test.describe('Lead Lifecycle Scenarios', () => {
       company: 'Playwright Qualified Sold Co',
       contact_email: `buyer-qualified-sold-${Date.now()}@example-stormlead-test.com`,
       contact_phone_e164: `+1512${Date.now().toString().slice(-7)}`,
-      webhook_url: 'http://host.docker.internal:9999/buyer-qualified-sold',
+      webhook_url: buyerWebhookUrl('/buyer-qualified-sold'),
       webhook_secret: 'playwright-qualified-sold-secret',
       bid_per_lead_t1_t2: 50.0,
       bid_per_lead_t3: 200.0,
@@ -84,7 +84,7 @@ test.describe('Lead Lifecycle Scenarios', () => {
     expect(timeline.events.some((event) => event.event_type === 'lead.rejected')).toBeTruthy();
   });
 
-  test('duplicate_capture — second submission with same phone returns accepted-duplicate', async ({ request, phone, email, webhookSecret }) => {
+  test('duplicate_capture — second submission with same phone returns duplicate conflict', async ({ request, phone, email, webhookSecret }) => {
     const sharedPhone = phone(30);
     const sharedEmail = email('duplicate');
 
@@ -102,8 +102,11 @@ test.describe('Lead Lifecycle Scenarios', () => {
     const { envelope: env2 } = buildEnvelope({ ...base, webhookId: id2 });
     const { headers: h2, bodyStr: s2 } = buildSignedHeaders(id2, env2, webhookSecret);
     const res2 = await request.post(`${FORM_RECEIVER}/webhooks/formbricks`, { headers: h2, data: s2 });
-    expect(res2.status()).toBe(200);
-    expect((await res2.json()).status).toBe('accepted-duplicate');
+    expect(res2.status()).toBe(409);
+    const duplicate = await res2.json();
+    expect(duplicate.detail.status).toBe('duplicate');
+    expect(duplicate.detail.reason).toBe('duplicate_window_match');
+    expect(duplicate.detail).not.toHaveProperty('lead_id');
   });
 
   test('suppressed_opt_out — opted-out contact returns suppressed', async ({ request, phone, email, webhookSecret }) => {
@@ -144,6 +147,7 @@ test.describe('Lead Lifecycle Scenarios', () => {
     expect(res1.status()).toBe(200);
 
     const res2 = await request.post(`${FORM_RECEIVER}/webhooks/formbricks`, { headers, data: bodyStr });
-    expect([200, 409]).toContain(res2.status());
+    expect(res2.status()).toBe(200);
+    expect((await res2.json()).status).toBe('accepted-duplicate');
   });
 });

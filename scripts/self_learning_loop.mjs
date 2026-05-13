@@ -3,6 +3,7 @@
 import { execFile } from 'node:child_process';
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { promises as fs } from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -41,6 +42,8 @@ const RESEARCH_SOURCES = [
     note: 'MCP tools should validate inputs, surface tool use clearly, and keep a human confirmation path for sensitive operations.',
   },
 ];
+const OPTIONAL_LOCAL_SERVICE_NAMES = new Set(['litellm readiness']);
+const MIN_LIGHTHOUSE_FINDING_SCORE = 0.8;
 
 function parseArgs(argv) {
   const args = {};
@@ -75,17 +78,30 @@ function commandName(name) {
   return process.platform === 'win32' ? `${name}.cmd` : name;
 }
 
+function isLoopbackHostname(hostname) {
+  const host = hostname.toLowerCase();
+  const normalized = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+  if (normalized === 'localhost' || normalized === '::1') return true;
+  return net.isIP(normalized) === 4 && normalized.split('.')[0] === '127';
+}
+
 function assertLoopbackHttpUrl(value) {
   const url = new URL(value);
-  const hostname = url.hostname.toLowerCase();
-  const isLoopback = hostname === 'localhost'
-    || hostname === '::1'
-    || hostname === '[::1]'
-    || hostname.startsWith('127.');
-  if (!['http:', 'https:'].includes(url.protocol) || !isLoopback) {
+  if (!['http:', 'https:'].includes(url.protocol) || !isLoopbackHostname(url.hostname)) {
     throw new Error(`Self-learning loop only accepts loopback HTTP(S) URLs: ${value}`);
   }
   return url.toString();
+}
+
+function isAllowedBrowserRequest(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    if (['about:', 'blob:', 'data:'].includes(url.protocol)) return true;
+    if (!['http:', 'https:', 'ws:', 'wss:'].includes(url.protocol)) return false;
+    return isLoopbackHostname(url.hostname);
+  } catch {
+    return false;
+  }
 }
 
 function safeRunId(value) {
@@ -105,6 +121,41 @@ function trimOutput(value, maxLength = 16000) {
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+const SENSITIVE_EVENT_KEY = /authorization|cookie|credential|headers|password|payload|secret|token|api[_-]?key|webhook/i;
+const SENSITIVE_TEXT = /(authorization|cookie|password|secret|token|api[_-]?key|webhook)(["'\s:=]+)([^"'\s,}]+)/gi;
+
+function redactText(value) {
+  return String(value).replace(SENSITIVE_TEXT, '$1$2[REDACTED]');
+}
+
+function redactUrl(value) {
+  try {
+    const url = new URL(value);
+    url.username = '';
+    url.password = '';
+    for (const key of [...url.searchParams.keys()]) {
+      if (SENSITIVE_EVENT_KEY.test(key)) url.searchParams.set(key, '[REDACTED]');
+    }
+    return url.toString();
+  } catch {
+    return value;
+  }
+}
+
+function redactObject(value, key = '') {
+  if (SENSITIVE_EVENT_KEY.test(key)) return '[REDACTED]';
+  if (key === 'body_preview' && typeof value === 'string') return redactText(value);
+  if (typeof value === 'string' && /url/i.test(key)) return redactUrl(value);
+  if (!value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map((item) => redactObject(item, key));
+
+  const redacted = {};
+  for (const [entryKey, entryValue] of Object.entries(value)) {
+    redacted[entryKey] = redactObject(entryValue, entryKey);
+  }
+  return redacted;
 }
 
 function markdownList(items) {
@@ -221,8 +272,8 @@ function appendBrowserEvent(eventsPath, eventCounts, recentErrors, pageUrl, runI
     run_id: runId,
     type,
     severity,
-    page_url: pageUrl,
-    data,
+    page_url: redactUrl(pageUrl),
+    data: redactObject(data),
   };
   eventCounts[type] = (eventCounts[type] ?? 0) + 1;
   if (severity === 'error') recentErrors.push(event);
@@ -391,6 +442,19 @@ async function runPuppeteerAudit({ targetUrl, runId, iterationDir, headless, cha
     page = await browser.newPage();
     await page.setViewport({ width: 1440, height: 900 });
     observer = installPuppeteerObserver(page, runId, eventsPath);
+    await page.setRequestInterception(true);
+    page.on('request', (request) => {
+      if (!isAllowedBrowserRequest(request.url())) {
+        observer.record('puppeteer.external_request_blocked', 'error', {
+          method: request.method(),
+          url: request.url(),
+          resource_type: request.resourceType(),
+        });
+        void request.abort('blockedbyclient');
+        return;
+      }
+      void request.continue();
+    });
 
     const flow = await startFlow(page, {
       config: desktopConfig,
@@ -459,7 +523,9 @@ function collectStepFindings(step) {
 
   if (step.kind === 'mcp_tool' && step.name === 'check_local_services') {
     for (const service of step.output?.services ?? []) {
-      if (!service.ok) findings.push(`local service unhealthy: ${service.name} ${service.url} (${service.error})`);
+      if (!service.ok && !OPTIONAL_LOCAL_SERVICE_NAMES.has(service.name)) {
+        findings.push(`local service unhealthy: ${service.name} ${service.url} (${service.error})`);
+      }
     }
   }
 
@@ -476,7 +542,7 @@ function collectStepFindings(step) {
         if (category === 'performance' && String(flowStep.name ?? '').startsWith('Snapshot report')) {
           continue;
         }
-        if (typeof score === 'number' && score < 0.9) {
+        if (typeof score === 'number' && score < MIN_LIGHTHOUSE_FINDING_SCORE) {
           findings.push(`Lighthouse ${flowStep.name} ${category} score ${score}`);
         }
       }

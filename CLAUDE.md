@@ -10,6 +10,18 @@ Dev runs on Windows + WSL2 with Docker Compose. Prod targets Hetzner + Docker Co
 
 ## Commands
 
+### Windows-native quickstart (primary on this machine)
+
+The Windows path is PowerShell-driven via `scripts/bootstrap.ps1`. Prefer these over the WSL2 `just` path on Windows hosts.
+
+```powershell
+npm run setup:local      # one-shot bootstrap: deps, .env, compose up, migrate, seed, verify
+npm run start:local      # restart the local pipeline stack (no install/migrate/verify)
+npm run verify:local     # readiness doctor + synthetic smoke (use as the local readiness gate)
+npm run doctor           # readiness status + next safe command, no smoke
+npm run reset:demo       # re-seed fixed local demo buyers/leads
+```
+
 ### Python (via uv workspace)
 
 ```bash
@@ -48,6 +60,7 @@ npm run typecheck:python       # mypy
 npm run test:python            # pytest
 npm run smoke                  # scripts/smoke_e2e.py
 npm run simulate:v1            # scripts/simulate_v1_leads.py
+npm run validate:local         # single pre-commit gate: compose + lint + typecheck + tests
 
 # Playwright (headed, one worker)
 npm run test:playwright -- --project=chromium --reporter=line
@@ -99,10 +112,15 @@ services/
   enrich-worker/    Deterministic lead enrichment, emits lead.enriched event
   agent-runtime/    LiteLLM-routed qualify/nurture workers
   form-receiver/    Formbricks webhook ingestion, emits lead.captured event
+  voice-bridge/     Local-safe follow-up preview contracts; no live carrier calls
 
 libs/
   stormlead_core/   Shared Pydantic models, CEL evaluator wrapper
   stormlead_db/     SQLAlchemy models + Alembic migrations (Postgres schema)
+
+apps/
+  landing/          Local landing page + synthetic lead submit gate (port 8005)
+  buyer-portal/     Buyer wallet, delivery report, return review UI (port 8004)
 ```
 
 ### Data flow
@@ -117,6 +135,9 @@ Webhook/storm poll → Hatchet workflow → enrich-worker → agent-runtime → 
 - **Langfuse**: LLM observability at `http://localhost:3001`.
 - **Hatchet UI**: `http://localhost:8080`.
 - **ping-post admin**: `http://127.0.0.1:8003/admin` (Playwright baseURL).
+- **landing**: `http://127.0.0.1:8005`.
+- **buyer-portal**: `http://127.0.0.1:8004`.
+- **voice-bridge**: `http://127.0.0.1:8006/readyz` with Docker Compose profile `voice`.
 
 ### Python package structure
 
@@ -139,7 +160,7 @@ Both agents read `AGENTS.md` first. OpenCode uses `opencode.json`; Codex uses `.
 5. **Local-only by default**: agents must not contact real homeowners, buyers, ad platforms, payment processors, or public webhooks. Use synthetic leads and local services unless the user explicitly approves a real external action.
 6. **No NATS / SeaweedFS / OpenBao in V1**: cut after architecture review. Hatchet handles durable workflows; add these only when a concrete need surfaces.
 7. **No Rust**: Python everywhere. Rewrite ping-post hot path in Go only if sustained >500 leads/sec load proves it necessary.
-8. **jambonz**: NOT in dev Docker Compose (SIP/RTP doesn't work in WSL2). Point voice-bridge at a jambonz instance on real Linux.
+8. **jambonz**: NOT in dev Docker Compose (SIP/RTP doesn't work in WSL2). `voice-bridge` only runs a local preview profile in dev; future provider/call integration must point at a real Linux carrier bridge after explicit approval.
 
 ## Operating Mode (for agents)
 
@@ -155,8 +176,11 @@ Both agents read `AGENTS.md` first. OpenCode uses `opencode.json`; Codex uses `.
 - `docs/research/2026-05-architectural-fit.md` — why Postgres + Hatchet + FastAPI + US-region
 - `docs/research/visual-agentic-workflow-runbook.md` — admin workflow timeline, review actions, KPI semantics
 - `docs/research/v1-paid-pilot-runbook.md` — V1 technical controls and scoped readiness
+- `docs/research/2026-05-end-to-end-automation-roadmap.md` — prioritized engineering plan to end-to-end automated operation; gap list with file:line citations and timeline
+- `docs/research/2026-05-stack-improvements.md` — active technical risk register and implementation corrections
+- `docs/research/ui-tars-agent-tars-runbook.md` — optional local UI-TARS/Agent TARS coworker workflow
 - `testing/README.md` — Playwright/Cowork evidence rules, artifact hygiene
 - `tools/TOOLS.md` — tool routing and MCP safety rules
 - `tools/mcp/README.md` — StormLead Local Ops MCP tool reference
-- `.codex/README.md` — Codex CLI setup and in-app browser usage
+- `.codex/README.md` — Codex CLI scripts and project-scoped MCP setup
 - `AGENTS.md` — repo-local agent operating guide

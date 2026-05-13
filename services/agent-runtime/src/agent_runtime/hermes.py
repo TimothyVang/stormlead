@@ -24,7 +24,7 @@ from uuid import UUID, uuid4
 import httpx
 from hatchet_sdk import Context
 from stormlead_core import get_logger
-from stormlead_db import SkillProposalRow, get_session
+from stormlead_db import LearningProposal, SkillProposalRow, get_session
 
 from agent_runtime.execution import (
     ModelPolicy,
@@ -36,6 +36,9 @@ from agent_runtime.execution import (
 
 log = get_logger(__name__)
 
+_SKILL_PROPOSAL_TYPES = {"prompt_update", "new_skill", "retire_skill"}
+_LEARNING_PROPOSAL_TYPES = {"scoring_threshold", "cadence_change", "prompt_update"}
+
 
 _HERMES_SYSTEM_PROMPT = """\
 You are a self-improvement engineer for an agentic lead-gen system.
@@ -46,8 +49,9 @@ current skill / prompt registry.
 Output up to 5 proposed changes as a JSON array. Each item:
 
 {
-  "skill_name": "<which skill to modify>",
-  "proposal_type": "prompt_update" | "new_skill" | "retire_skill",
+  "target_area": "<scoring, cadence, prompt, or skill area>",
+  "skill_name": "<which skill to modify, when relevant>",
+  "proposal_type": "scoring_threshold" | "cadence_change" | "prompt_update" | "new_skill" | "retire_skill",
   "title": "<short operator-facing title>",
   "rationale": "<which trace failure modes this addresses>",
   "confidence": <float 0.0..1.0>
@@ -113,11 +117,20 @@ def _load_skill_registry(skills_dir: Path | None = None) -> list[dict[str, Any]]
 
 def _coerce_proposal_type(value: Any) -> str | None:
     proposal_type = str(value or "").strip()
-    if proposal_type in {"prompt_update", "new_skill", "retire_skill"}:
+    if proposal_type in _SKILL_PROPOSAL_TYPES | _LEARNING_PROPOSAL_TYPES:
         return proposal_type
     if proposal_type in {"prompt", "tool_choice", "parameter"}:
         return "prompt_update"
+    if proposal_type in {"threshold", "scoring", "score_threshold"}:
+        return "scoring_threshold"
+    if proposal_type in {"cadence", "schedule", "frequency"}:
+        return "cadence_change"
     return None
+
+
+def _learning_target_area(item: dict[str, Any]) -> str:
+    target = item.get("target_area") or item.get("skill_name") or item.get("metric")
+    return str(target or item.get("proposal_type") or "agent_policy")[:64]
 
 
 def _parse_proposals(proposals_text: str) -> list[dict[str, Any]]:
@@ -131,7 +144,9 @@ def _parse_proposals(proposals_text: str) -> list[dict[str, Any]]:
     for item in payload:
         if not isinstance(item, dict):
             continue
-        proposal_type = _coerce_proposal_type(item.get("proposal_type") or item.get("mutation_type"))
+        proposal_type = _coerce_proposal_type(
+            item.get("proposal_type") or item.get("mutation_type")
+        )
         if proposal_type is None:
             continue
         title = str(
@@ -160,17 +175,39 @@ async def _persist_proposals(proposals: str | list[dict[str, Any]], proposal_dat
 
     async with get_session() as session:
         for item in rows:
-            session.add(
-                SkillProposalRow(
-                    proposal_date=proposal_date,
-                    proposal_type=str(item["proposal_type"]),
-                    skill_name=item.get("skill_name"),
-                    title=str(item.get("title") or "Hermes proposal")[:255],
-                    rationale=item.get("rationale") or item.get("expected_impact"),
-                    proposal_json=item,
-                    status="pending_review",
+            proposal_type = str(item["proposal_type"])
+            title = str(item.get("title") or "Hermes proposal")[:255]
+            rationale = item.get("rationale") or item.get("expected_impact")
+            skill_row_id: UUID | None = None
+            if proposal_type in _SKILL_PROPOSAL_TYPES:
+                skill_row_id = uuid4()
+                session.add(
+                    SkillProposalRow(
+                        id=skill_row_id,
+                        proposal_date=proposal_date,
+                        proposal_type=proposal_type,
+                        skill_name=item.get("skill_name"),
+                        title=title,
+                        rationale=rationale,
+                        proposal_json=item,
+                        status="pending_review",
+                    )
                 )
-            )
+            if proposal_type in _LEARNING_PROPOSAL_TYPES:
+                session.add(
+                    LearningProposal(
+                        source_proposal_id=skill_row_id,
+                        proposal_date=proposal_date,
+                        proposal_type=proposal_type,
+                        target_area=_learning_target_area(item),
+                        title=title,
+                        rationale=rationale,
+                        proposal_json=item,
+                        status="pending_replay",
+                        canary_percent=0,
+                        approval_required=True,
+                    )
+                )
     return len(rows)
 
 

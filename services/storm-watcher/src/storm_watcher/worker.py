@@ -14,12 +14,16 @@ docs/research/2026-05-architectural-fit.md.
 from __future__ import annotations
 
 import asyncio
+import os
+import re
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from hatchet_sdk import Context, Hatchet
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from stormlead_core import ERROR_SINK, configure_logging, emit_metric, get_logger
+from stormlead_core import ERROR_SINK, Storm, configure_logging, emit_metric, get_logger
 from stormlead_db import StormRow, get_session
 
 from storm_watcher.fema import fetch_recent_declarations, normalize_declaration
@@ -29,27 +33,82 @@ from storm_watcher.tropycal_poller import fetch_active_tropical_systems, normali
 configure_logging()
 log = get_logger(__name__)
 
+_DEV_HATCHET_TOKEN = (
+    "eyJhbGciOiJub25lIn0.eyJzdWIiOiJkZXYiLCJzZXJ2ZXJfdXJsIjoiaHR0cDovL2xvY2Fs"  # noqa: S105 - unsigned local dev JWT, not a secret.
+    "aG9zdDo4MDgwIiwiZ3JwY19icm9hZGNhc3RfYWRkcmVzcyI6ImxvY2FsaG9zdDo3MDc3"
+    "In0."
+)
+_PLACEHOLDER_HATCHET_TOKENS = {"generated-by-dev", "generated-by-dev-env", "dev"}
+
+
+def _configure_local_hatchet_defaults() -> None:
+    token = os.environ.get("HATCHET_CLIENT_TOKEN", "").strip()
+    if not token or token in _PLACEHOLDER_HATCHET_TOKENS:
+        os.environ["HATCHET_CLIENT_TOKEN"] = _DEV_HATCHET_TOKEN
+    os.environ.setdefault("HATCHET_CLIENT_HOST_PORT", "localhost:7077")
+    os.environ.setdefault("HATCHET_CLIENT_TLS_STRATEGY", "none")
+
+
+_configure_local_hatchet_defaults()
+
 hatchet = Hatchet(debug=False)
 _supports_legacy_hatchet_worker = hasattr(hatchet, "step")
+_legacy_hatchet = cast(Any, hatchet)
+_ZIP_RE = re.compile(r"^\d{5}$")
 
 
-async def _upsert_storm(storm) -> bool:  # type: ignore[no-untyped-def]
+def _normalized_zip_codes(values: Any) -> list[str]:
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+        return []
+    zips: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        zip_code = str(value).strip()[:5]
+        if not _ZIP_RE.fullmatch(zip_code) or zip_code in seen:
+            continue
+        zips.append(zip_code)
+        seen.add(zip_code)
+    return zips
+
+
+def impacted_zips_from_storm_raw(raw: Mapping[str, Any]) -> list[str]:
+    for key in ("impacted_zips", "affected_zips", "target_zips"):
+        zips = _normalized_zip_codes(raw.get(key))
+        if zips:
+            return zips
+    return []
+
+
+def _storm_row_values(storm: Storm) -> dict[str, Any]:
+    return {
+        "id": storm.id,
+        "external_id": storm.external_id,
+        "name": storm.name[:128],
+        "source": storm.source,
+        "severity": storm.severity.value,
+        "affected_states": storm.affected_states,
+        "affected_counties": storm.affected_counties,
+        "detected_at": storm.detected_at,
+        "declared_at": storm.declared_at,
+        "raw": storm.raw,
+    }
+
+
+async def list_impacted_zips_for_storm(external_id: str) -> list[str]:
+    async with get_session() as s:
+        result = await s.execute(select(StormRow.raw).where(StormRow.external_id == external_id))
+        raw = result.scalar_one_or_none()
+    if not isinstance(raw, Mapping):
+        return []
+    return impacted_zips_from_storm_raw(raw)
+
+
+async def _upsert_storm(storm: Storm) -> bool:
     """returns True if this is a new storm (vs already-seen update)."""
     async with get_session() as s:
         stmt = (
             pg_insert(StormRow)
-            .values(
-                id=storm.id,
-                external_id=storm.external_id,
-                name=storm.name[:128],
-                source=storm.source,
-                severity=storm.severity.value,
-                affected_states=storm.affected_states,
-                affected_counties=storm.affected_counties,
-                detected_at=storm.detected_at,
-                declared_at=storm.declared_at,
-                raw=storm.raw,
-            )
+            .values(**_storm_row_values(storm))
             .on_conflict_do_update(
                 index_elements=["external_id"],
                 set_={"severity": storm.severity.value, "raw": storm.raw},
@@ -148,21 +207,21 @@ async def _poll_nhc_tropycal() -> dict[str, Any]:
 
 if _supports_legacy_hatchet_worker:
 
-    @hatchet.workflow(name="nws-cap-poller", on_crons=["*/5 * * * *"])
+    @_legacy_hatchet.workflow(name="nws-cap-poller", on_crons=["*/5 * * * *"])
     class NwsCapPoller:
-        @hatchet.step(timeout="60s", retries=2)
+        @_legacy_hatchet.step(timeout="60s", retries=2)
         async def poll(self, context: Context) -> dict:
             return await _poll_nws()
 
-    @hatchet.workflow(name="fema-poller", on_crons=["*/30 * * * *"])
+    @_legacy_hatchet.workflow(name="fema-poller", on_crons=["*/30 * * * *"])
     class FemaPoller:
-        @hatchet.step(timeout="120s", retries=2)
+        @_legacy_hatchet.step(timeout="120s", retries=2)
         async def poll(self, context: Context) -> dict:
             return await _poll_fema()
 
-    @hatchet.workflow(name="NHCTropycalPoller", on_crons=["*/15 * * * *"])
+    @_legacy_hatchet.workflow(name="NHCTropycalPoller", on_crons=["*/15 * * * *"])
     class NHCTropycalPoller:
-        @hatchet.step(timeout="180s", retries=2)
+        @_legacy_hatchet.step(timeout="180s", retries=2)
         async def poll(self, context: Context) -> dict:
             return await _poll_nhc_tropycal()
 
@@ -198,7 +257,7 @@ else:
 
 def main() -> None:
     if _supports_legacy_hatchet_worker:
-        worker = hatchet.worker("storm-watcher", max_runs=5)
+        worker = _legacy_hatchet.worker("storm-watcher", max_runs=5)
         worker.register_workflow(NwsCapPoller())
         worker.register_workflow(FemaPoller())
         worker.register_workflow(NHCTropycalPoller())

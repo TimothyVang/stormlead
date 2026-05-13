@@ -8,6 +8,14 @@ from stormlead_core.dedup import (
     normalize_address,
     normalize_phone,
 )
+from stormlead_core.env_gate import (
+    ProductionSafetyError,
+    assert_production_safe,
+    hostname_resolves_to_global_addresses,
+    is_approved_external_webhook_url,
+    is_local_webhook_url,
+    is_production,
+)
 from stormlead_core.events import (
     CallEvent,
     LeadCaptured,
@@ -30,6 +38,14 @@ from stormlead_core.models import (
     Storm,
     StormSeverity,
 )
+from stormlead_core.object_storage import (
+    InvalidObjectKeyError,
+    LocalFilesystemObjectStorage,
+    ObjectNotFoundError,
+    ObjectStorageError,
+    StoredObject,
+    local_object_storage_from_env,
+)
 from stormlead_core.observability import (
     ERROR_SINK,
     bind_correlation_id,
@@ -46,6 +62,16 @@ from stormlead_core.pipeline import (
     is_terminal,
     next_states,
 )
+from stormlead_core.provider_safety import (
+    ProviderArea,
+    ProviderDecision,
+    provider_decision,
+    provider_kill_switch_change_plan,
+    provider_live_approved,
+    provider_pause_snapshot,
+    provider_paused,
+    provider_url_allowed,
+)
 from stormlead_core.replay import ReplayPlan, build_replay_plan
 
 __all__ = [
@@ -57,6 +83,7 @@ __all__ = [
     "CallEvent",
     "DamageTier",
     "DuplicateWindow",
+    "InvalidObjectKeyError",
     "InvalidPipelineTransitionError",
     "Lead",
     "LeadCaptured",
@@ -64,14 +91,22 @@ __all__ = [
     "LeadEvent",
     "LeadSource",
     "LeadStatus",
+    "LocalFilesystemObjectStorage",
+    "ObjectNotFoundError",
+    "ObjectStorageError",
     "PingPostResult",
     "PipelineState",
+    "ProductionSafetyError",
+    "ProviderArea",
+    "ProviderDecision",
     "QualityScore",
     "ReplayPlan",
+    "StoredObject",
     "Storm",
     "StormDetected",
     "StormEvent",
     "StormSeverity",
+    "assert_production_safe",
     "assert_transition",
     "bind_correlation_id",
     "build_duplicate_window",
@@ -84,9 +119,20 @@ __all__ = [
     "emit_metric",
     "evaluate_filter",
     "get_logger",
+    "hostname_resolves_to_global_addresses",
     "initial_quality_score",
+    "is_approved_external_webhook_url",
+    "is_local_webhook_url",
+    "is_production",
     "is_terminal",
+    "local_object_storage_from_env",
     "next_states",
     "normalize_address",
     "normalize_phone",
+    "provider_decision",
+    "provider_kill_switch_change_plan",
+    "provider_live_approved",
+    "provider_pause_snapshot",
+    "provider_paused",
+    "provider_url_allowed",
 ]

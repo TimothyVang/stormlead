@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -58,11 +59,24 @@ def build_duplicate_window(
     )
 
 
+HIGH_RISK_SAFETY_FLAGS = frozenset(
+    {"power_line", "injury", "active_danger", "roof_impact", "structure_impact"}
+)
+
+
 def initial_quality_score(
-    *, dwell_ms: int | None, has_email: bool, duplicate: bool
+    *,
+    dwell_ms: int | None,
+    has_email: bool,
+    duplicate: bool,
+    photo_count: int = 0,
+    location_verified: bool = False,
+    urgency: str | None = None,
+    safety_flags: Sequence[str] | None = None,
 ) -> QualityScore:
     score = 1.0
     reasons: list[str] = []
+    normalized_flags = {flag.strip().lower() for flag in safety_flags or [] if flag.strip()}
     if duplicate:
         score -= 0.7
         reasons.append("duplicate_window_match")
@@ -72,10 +86,22 @@ def initial_quality_score(
     if not has_email:
         score -= 0.1
         reasons.append("missing_email")
+    if photo_count < 2:
+        score -= 0.15
+        reasons.append("insufficient_photos")
+    if not location_verified:
+        score -= 0.2
+        reasons.append("location_not_verified")
+    if urgency in {"emergency", "same_day"}:
+        score = min(1.0, score + 0.05)
+        reasons.append(f"urgency_{urgency}")
+    high_risk_flags = normalized_flags & HIGH_RISK_SAFETY_FLAGS
+    if high_risk_flags:
+        reasons.append("safety_review_required:" + ",".join(sorted(high_risk_flags)))
 
     score = max(0.0, min(1.0, score))
     blocked = duplicate
-    hold = score < 0.6 or duplicate
+    hold = score < 0.6 or duplicate or bool(high_risk_flags)
     return QualityScore(
         score=score, reason=",".join(reasons) or "baseline", hold=hold, blocked=blocked
     )

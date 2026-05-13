@@ -21,6 +21,7 @@ services/
   enrich-worker/            deterministic lead enrichment + lead.enriched event
   agent-runtime/            LiteLLM-routed qualify/nurture/hermes workers
   form-receiver/            formbricks webhook ingestion + lead.captured event
+  voice-bridge/             local-safe voice follow-up preview skeleton
 
 libs/
   stormlead_core/           shared pydantic models, cel evaluator wrapper
@@ -31,7 +32,7 @@ apps/
   buyer-portal/             buyer wallet, delivery report, and return review UI
 
 infra/
-  compose/dev/              docker-compose for wsl2 (12 services post-cuts)
+  compose/dev/              docker-compose for wsl2 (optional voice profile)
   compose/prod/             (placeholder) docker-compose for hetzner
   caddy/                    caddyfile + coraza waf rules (re-add when apps land)
   litellm/                  config.yaml (pinned image, cosign-verified)
@@ -46,7 +47,7 @@ scripts/                    smoke, simulation, replay, browser evidence, and ops
 .github/workflows/          (placeholder) ci/cd
 ```
 
-unimplemented yet (will return as they ship): `services/voice-bridge`.
+provider-backed voice calls are not enabled yet; `services/voice-bridge` is a local-safe preview skeleton only.
 
 ## visual map
 
@@ -107,7 +108,7 @@ flowchart TD
   Auction --> Unsold["unsold no buyer"]
   Sold --> ReturnReview["return request + admin review"]
   ReturnReview --> Credited["approved credit flow"]
-  Unsold --> Nurture["no-contact local nurture proof"]
+  Unsold --> Nurture["no-contact local nurture proof<br/>channel suppression gate"]
   Rejected --> Nurture
   Nurture --> Evidence["audit timeline + evidence manifest"]
   Credited --> Evidence
@@ -174,6 +175,7 @@ After setup:
 Admin:        http://127.0.0.1:8003/admin
 Landing:      http://127.0.0.1:8005
 Buyer Portal: http://127.0.0.1:8004
+Voice Bridge: http://127.0.0.1:8006/readyz (with Docker Compose profile `voice`)
 ```
 
 Useful local commands:
@@ -181,9 +183,16 @@ Useful local commands:
 ```powershell
 npm run start:local      # start the local pipeline stack again
 npm run verify:local     # readiness doctor + synthetic smoke
+npm run validate:ingress # check Caddy reverse proxies exist in dev Compose
 npm run simulate:v1      # broader synthetic V1 scenario simulation
 npm run doctor           # readiness status and next safe command
 npm run reset:demo       # re-seed fixed local demo buyers/leads
+```
+
+To run the local-safe voice follow-up preview without phone-provider contact:
+
+```powershell
+docker compose -f infra/compose/dev/docker-compose.yml --profile voice up voice-bridge
 ```
 
 ## quickstart (wsl2 / just optional)
@@ -207,6 +216,8 @@ prod compose + deploy script are placeholders (`infra/compose/prod/`, `.github/w
 - `docs/research/visual-agentic-workflow-runbook.md` — admin workflow timeline, review actions, KPI semantics, and Cowork evidence manifests.
 - `docs/research/v1-paid-pilot-runbook.md` — local technical V1 controls, scoped readiness, and evidence commands.
 - `testing/README.md` — visible Playwright/Cowork evidence rules, the MCP/Puppeteer self-learning loop, artifact hygiene, and official browser automation references.
+- `docs/research/ui-tars-agent-tars-runbook.md` — optional local UI-TARS/Agent TARS coworker workflow for human-like visual and UX exploration.
+- `docs/research/tree-damage-mvp-compliance-plan.md` — MVP ad, consent, safety-gate, and buyer-delivery rules for tree-damage lead resale.
 - `docs/research/2026-05-stack-improvements.md` — active technical risk register and implementation corrections.
 - `tools/TOOLS.md` — local-first tool routing, MCP safety rules, and validation commands.
 - `tools/mcp/README.md` — custom StormLead Local Ops MCP tools and safety model.

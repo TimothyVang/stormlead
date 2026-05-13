@@ -2,6 +2,7 @@
 
 import { execFile } from 'node:child_process';
 import { promises as fs } from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -34,14 +35,24 @@ function textResult(text) {
   };
 }
 
+function errorResult(value) {
+  const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+  return {
+    isError: true,
+    content: [{ type: 'text', text }],
+  };
+}
+
+function isLoopbackHostname(hostname) {
+  const host = hostname.toLowerCase();
+  const normalized = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+  if (normalized === 'localhost' || normalized === '::1') return true;
+  return net.isIP(normalized) === 4 && normalized.split('.')[0] === '127';
+}
+
 function assertLoopbackBaseUrl(name, value) {
   const url = new URL(value);
-  const hostname = url.hostname.toLowerCase();
-  const isLoopback = hostname === 'localhost'
-    || hostname === '::1'
-    || hostname === '[::1]'
-    || hostname.startsWith('127.');
-  if (!isLoopback) {
+  if (!isLoopbackHostname(url.hostname)) {
     throw new Error(`${name} must use a loopback hostname for local-only MCP access: ${value}`);
   }
   return url.toString();
@@ -368,6 +379,77 @@ server.registerTool(
 );
 
 server.registerTool(
+  'prepare_tars_exploration',
+  {
+    title: 'Prepare TARS Exploration',
+    description: 'Prepare a local-only UI-TARS/Agent TARS browser exploration brief and evidence folder under testing/runs. Requires explicit confirm_synthetic_local=true.',
+    inputSchema: {
+      confirm_synthetic_local: z.boolean().default(false),
+      targets: z.array(z.enum(['admin', 'landing', 'buyer-portal'])).default(['admin', 'landing', 'buyer-portal']),
+      run_id: z.string().min(1).max(120).optional(),
+      timeout_seconds: z.number().int().min(5).max(60).default(30),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  },
+  async ({ confirm_synthetic_local, targets, run_id, timeout_seconds }) => {
+    if (!confirm_synthetic_local) {
+      return textResult('Refusing to run. Call again with confirm_synthetic_local=true to prepare a local-only TARS exploration package under testing/runs.');
+    }
+
+    const selectedTargets = targets?.length ? targets : ['admin', 'landing', 'buyer-portal'];
+    const commandArgs = ['--targets', selectedTargets.join(',')];
+    if (run_id) commandArgs.push('--run-id', run_id);
+    const result = await runNodeLocalCommand({
+      script: 'scripts/prepare_tars_exploration.mjs',
+      args: commandArgs,
+      timeoutSeconds: timeout_seconds,
+    });
+    if (!result.ok) return errorResult({ local_only: true, command: result });
+    try {
+      return jsonResult({ local_only: true, result: JSON.parse(result.stdout), command: { ok: result.ok, stderr: result.stderr } });
+    } catch {
+      return jsonResult({ local_only: true, command: result });
+    }
+  },
+);
+
+server.registerTool(
+  'run_tars_exploration',
+  {
+    title: 'Run TARS Exploration',
+    description: 'Run the local StormLead TARS runner bridge against a prepared TARS package. Consumes runner-prompt.md, saves screenshots, and appends structured findings. Requires explicit confirm_synthetic_local=true.',
+    inputSchema: {
+      confirm_synthetic_local: z.boolean().default(false),
+      run_id: z.string().min(1).max(160).optional(),
+      targets: z.array(z.enum(['admin', 'landing', 'buyer-portal'])).default(['admin', 'landing', 'buyer-portal']),
+      headless: z.boolean().default(true),
+      timeout_seconds: z.number().int().min(30).max(180).default(90),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  },
+  async ({ confirm_synthetic_local, run_id, targets, headless, timeout_seconds }) => {
+    if (!confirm_synthetic_local) {
+      return textResult('Refusing to run. Call again with confirm_synthetic_local=true to run the local TARS bridge against loopback StormLead surfaces.');
+    }
+
+    const selectedTargets = targets?.length ? targets : ['admin', 'landing', 'buyer-portal'];
+    const commandArgs = ['--targets', selectedTargets.join(','), '--headless', String(headless)];
+    if (run_id) commandArgs.push('--run-id', run_id);
+    const result = await runNodeLocalCommand({
+      script: 'scripts/run_tars_exploration.mjs',
+      args: commandArgs,
+      timeoutSeconds: timeout_seconds,
+    });
+    if (!result.ok) return errorResult({ local_only: true, command: result });
+    try {
+      return jsonResult({ local_only: true, result: JSON.parse(result.stdout), command: { ok: result.ok, stderr: result.stderr } });
+    } catch {
+      return jsonResult({ local_only: true, command: result });
+    }
+  },
+);
+
+server.registerTool(
   'run_v1_simulation',
   {
     title: 'Run V1 Simulation',
@@ -450,6 +532,7 @@ server.registerTool(
       headless: z.boolean().default(true),
       channel: z.string().min(1).max(40).optional(),
       dispatch_codex: z.boolean().default(false),
+      confirm_external_llm_dispatch: z.boolean().default(false),
       max_runners: z.number().int().min(1).max(3).default(1),
       timeout_seconds: z.number().int().min(30).max(900).default(240),
     },
@@ -467,11 +550,15 @@ server.registerTool(
     headless,
     channel,
     dispatch_codex,
+    confirm_external_llm_dispatch,
     max_runners,
     timeout_seconds,
   }) => {
     if (!confirm_synthetic_local) {
       return textResult('Refusing to run. Call again with confirm_synthetic_local=true to run the local self-learning loop and write testing/runs evidence.');
+    }
+    if (dispatch_codex && !confirm_external_llm_dispatch) {
+      return textResult('Refusing to dispatch Codex from MCP without confirm_external_llm_dispatch=true. Keep MCP self-learning local-only by default.');
     }
 
     const commandArgs = [

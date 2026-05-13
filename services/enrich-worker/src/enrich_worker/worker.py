@@ -12,6 +12,7 @@ configure_logging()
 log = get_logger(__name__)
 hatchet = Hatchet(debug=False)
 _supports_legacy_hatchet_worker = hasattr(hatchet, "step")
+_legacy_hatchet = cast(Any, hatchet)
 
 
 class _ContextAdapter:
@@ -34,9 +35,9 @@ def _payload(task_input: Any, context: Context) -> dict[str, Any]:
 
 if _supports_legacy_hatchet_worker:
 
-    @hatchet.workflow(name="enrich-lead", on_events=["lead.captured"])
+    @_legacy_hatchet.workflow(name="enrich-lead", on_events=["lead.captured"])
     class EnrichLead:
-        @hatchet.step(timeout="60s", retries=2)
+        @_legacy_hatchet.step(timeout="60s", retries=2)
         async def step(self, context: Context) -> dict:
             return await enrich_lead(context)
 
@@ -55,7 +56,7 @@ else:
 
 def main() -> None:
     if _supports_legacy_hatchet_worker:
-        worker = hatchet.worker("enrich-worker", max_runs=4)
+        worker = _legacy_hatchet.worker("enrich-worker", max_runs=4)
         worker.register_workflow(EnrichLead())
     else:
         worker = hatchet.worker("enrich-worker", slots=4, workflows=[enrich_lead_task])

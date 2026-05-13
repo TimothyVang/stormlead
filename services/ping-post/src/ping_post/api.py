@@ -14,14 +14,21 @@ hatchet workflow:
 from __future__ import annotations
 
 import asyncio
+import csv
+import hashlib
 import hmac
+import html
 import ipaddress
+import json
 import os
-from collections.abc import AsyncIterator
+import re
+import secrets
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from io import StringIO
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -29,21 +36,30 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from hatchet_sdk import Context, Hatchet
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import Integer, and_, func, select, text
+from sqlalchemy import Integer, and_, func, or_, select, text
 from stormlead_core import (
     BuyerSalesStage,
     BuyerStatus,
     Lead,
     PipelineState,
+    ProviderArea,
     configure_logging,
     get_logger,
+    provider_decision,
+    provider_kill_switch_change_plan,
+    provider_live_approved,
+    provider_pause_snapshot,
 )
 from stormlead_db import (
     BillingEvent,
+    BudgetActionLog,
     BuyerRow,
     CallEventRow,
+    ExceptionQueueItem,
     LeadRow,
     LeadStateTransition,
+    LearningProposal,
+    PaymentWebhookEvent,
     PingAttempt,
     PostResult,
     ReturnRequest,
@@ -57,7 +73,15 @@ from stormlead_db import (
 )
 
 from ping_post.attribution import get_campaign_roi, get_roi_by_zip
-from ping_post.auction import run_auction
+from ping_post.auction import (
+    PING_TIMEOUT_S,
+    POST_MAX_ATTEMPTS,
+    POST_RETRY_BASE_DELAY_S,
+    POST_TIMEOUT_S,
+    run_auction,
+    validate_buyer_webhook_url,
+)
+from ping_post.buyer_activation import buyer_activation_readiness
 from ping_post.buyer_crm import check_exclusive_zip_conflict
 from ping_post.guardrails import evaluate_buyer_guardrails
 from ping_post.mailer import export_mailer_csv
@@ -76,6 +100,106 @@ VALID_RETURN_REASONS = {
 VALID_REVIEW_ACTIONS = {"approve", "hold", "review"}
 VALID_RETURN_REVIEW_ACTIONS = {"approve", "hold", "reject"}
 ACTIVE_RETURN_REQUEST_STATUSES = ("pending_review", "held")
+AUTO_RETURN_APPROVE_REASONS = {"outside_service_area"}
+AUTO_RETURN_REJECT_REASONS = {"job_already_completed"}
+AUTOPILOT_POLICY_VERSION = "paid-pilot-autopilot-v1"
+AUTOPILOT_SUCCESS_STATES = {"sold", "rejected"}
+AUTOPILOT_UNSELLABLE_REASONS = {"no_eligible_buyers", "no_accepted_bid"}
+EXCEPTION_OWNER_BY_KIND = {
+    "return_pending": "support-ops",
+    "lead_review": "review-ops",
+    "delivery_failure": "ops-oncall",
+    "buyer_timeout_cluster": "ops-oncall",
+    "no_buyer_coverage": "growth-ops",
+    "buyer_wallet_low": "buyer-success",
+    "buyer_onboarding_incomplete": "buyer-success",
+}
+EXCEPTION_SLA_BY_SEVERITY = {
+    "critical": timedelta(hours=1),
+    "warning": timedelta(hours=24),
+    "info": timedelta(hours=72),
+}
+EXCEPTION_DASHBOARD_AREA_BY_KIND = {
+    "return_pending": "support",
+    "lead_review": "auction",
+    "delivery_failure": "auction",
+    "buyer_timeout_cluster": "auction",
+    "no_buyer_coverage": "growth",
+    "buyer_wallet_low": "finance",
+    "buyer_onboarding_incomplete": "growth",
+}
+ACTIVE_EXCEPTION_QUEUE_STATUSES = {"open", "in_progress"}
+ACTIVE_BUDGET_ACTION_STATUSES = {"planned", "approval_required", "blocked"}
+ACTIVE_LEARNING_PROPOSAL_STATUSES = {
+    "pending_replay",
+    "replay_passed",
+    "canary_active",
+    "rollback_triggered",
+    "pending_approval",
+}
+BUYER_TIMEOUT_CLUSTER_MIN_FAILURES = 3
+BUYER_TIMEOUT_CLUSTER_WINDOW = timedelta(hours=1)
+PAYMENT_PROVIDERS = {"local", "stripe"}
+PAYMENT_CREDITABLE_STATUSES = {"succeeded", "paid"}
+PAYMENT_SENSITIVE_METADATA_KEYWORDS = {
+    "authorization",
+    "card",
+    "client_secret",
+    "cookie",
+    "secret",
+    "token",
+}
+PAYMENT_SENSITIVE_METADATA_VALUE_MARKERS = (
+    "bearer ",
+    "client_secret=",
+    "pi_",
+    "secret_",
+    "sk_live_",
+    "sk_test_",
+    "rk_live_",
+    "rk_test_",
+    "whsec_",
+)
+ADS_OFFLINE_CONVERSION_COLUMNS = [
+    "Google Click ID",
+    "Conversion Name",
+    "Conversion Time",
+    "Conversion Value",
+    "Conversion Currency",
+    "Order ID",
+]
+ADS_DEFAULT_CONVERSION_NAME = "StormLead Sold Lead"
+ADS_CLICK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$")
+ADS_CONVERSION_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _./()&+'-]{0,127}$")
+BUYER_ACTIVATION_FIELDS = frozenset(
+    {
+        "status",
+        "sales_stage",
+        "notes",
+        "services",
+        "target_zips",
+        "exclusive_zips",
+        "daily_cap",
+        "monthly_budget",
+        "bid_per_lead_t1_t2",
+        "bid_per_lead_t3",
+        "bid_per_call",
+        "webhook_url",
+        "webhook_secret",
+        "low_balance_threshold",
+    }
+)
+
+
+def _local_buyer_webhook_base() -> str:
+    return os.environ.get(
+        "STORMLEAD_LOCAL_BUYER_WEBHOOK_BASE",
+        "http://host.docker.internal:9999",
+    ).rstrip("/")
+
+
+def _default_buyer_webhook_url(path: str) -> str:
+    return f"{_local_buyer_webhook_base()}/{path.lstrip('/')}"
 
 
 class KpiThresholdConfig(BaseModel):
@@ -127,6 +251,11 @@ class BuyerCreateRequest(BaseModel):
             raise ValueError("contact_phone_e164 must start with +")
         return value
 
+    @field_validator("webhook_url")
+    @classmethod
+    def webhook_url_must_be_local_until_approved(cls, value: str) -> str:
+        return validate_buyer_webhook_url(value) or value
+
     @field_validator("license_state")
     @classmethod
     def license_state_uppercase(cls, value: str | None) -> str | None:
@@ -136,6 +265,12 @@ class BuyerCreateRequest(BaseModel):
     @classmethod
     def normalize_string_list(cls, value: list[str]) -> list[str]:
         return _normalize_string_list(value)
+
+
+class ProviderKillSwitchChangePlanRequest(BaseModel):
+    area: ProviderArea
+    desired_paused: bool
+    reason: str = Field(min_length=3, max_length=500)
 
 
 class BuyerUpdateRequest(BaseModel):
@@ -174,6 +309,11 @@ class BuyerUpdateRequest(BaseModel):
     def license_state_uppercase(cls, value: str | None) -> str | None:
         return value.upper() if value else None
 
+    @field_validator("webhook_url")
+    @classmethod
+    def webhook_url_must_be_local_until_approved(cls, value: str | None) -> str | None:
+        return validate_buyer_webhook_url(value)
+
     @field_validator("services", "target_zips", "exclusive_zips")
     @classmethod
     def normalize_optional_string_list(cls, value: list[str] | None) -> list[str] | None:
@@ -183,6 +323,65 @@ class BuyerUpdateRequest(BaseModel):
 class DepositRequest(BaseModel):
     amount_cents: int = Field(gt=0)
     external_reference: str | None = Field(default=None, max_length=255)
+
+
+class WalletRefillIntentRequest(BaseModel):
+    amount_cents: int = Field(gt=0, le=5_000_000)
+    currency: str = Field(default="USD", min_length=3, max_length=3)
+    provider: str = Field(default="local", min_length=3, max_length=32)
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=128)
+    description: str | None = Field(default=None, max_length=255)
+
+    @field_validator("provider")
+    @classmethod
+    def provider_must_be_supported(cls, value: str) -> str:
+        provider = value.strip().lower()
+        if provider not in PAYMENT_PROVIDERS:
+            allowed = ", ".join(sorted(PAYMENT_PROVIDERS))
+            raise ValueError(f"provider must be one of: {allowed}")
+        return provider
+
+    @field_validator("currency")
+    @classmethod
+    def currency_must_be_usd(cls, value: str) -> str:
+        currency = value.strip().upper()
+        if currency != "USD":
+            raise ValueError("currency must be USD for paid-pilot wallet refills")
+        return currency
+
+
+class PaymentRefillEventRequest(BaseModel):
+    provider: str = Field(default="local", min_length=3, max_length=32)
+    provider_event_id: str = Field(min_length=6, max_length=255)
+    payment_intent_id: str = Field(min_length=6, max_length=255)
+    buyer_id: UUID
+    amount_cents: int = Field(gt=0, le=5_000_000)
+    currency: str = Field(default="USD", min_length=3, max_length=3)
+    status: str = Field(min_length=1, max_length=64)
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=128)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("provider")
+    @classmethod
+    def event_provider_must_be_supported(cls, value: str) -> str:
+        provider = value.strip().lower()
+        if provider not in PAYMENT_PROVIDERS:
+            allowed = ", ".join(sorted(PAYMENT_PROVIDERS))
+            raise ValueError(f"provider must be one of: {allowed}")
+        return provider
+
+    @field_validator("currency")
+    @classmethod
+    def event_currency_must_be_usd(cls, value: str) -> str:
+        currency = value.strip().upper()
+        if currency != "USD":
+            raise ValueError("currency must be USD for paid-pilot wallet refills")
+        return currency
+
+    @field_validator("status")
+    @classmethod
+    def normalize_event_status(cls, value: str) -> str:
+        return value.strip().lower()
 
 
 class ReturnLeadRequest(BaseModel):
@@ -232,6 +431,7 @@ class LeadReviewRequest(BaseModel):
 
 hatchet = Hatchet()
 _supports_legacy_hatchet_worker = hasattr(hatchet, "step")
+_legacy_hatchet = cast(Any, hatchet)
 
 
 class _ContextAdapter:
@@ -273,19 +473,35 @@ async def _auction_step(context: Context) -> dict[str, Any]:
     }
 
 
+async def _latest_delivered_post_for_lead(lead_id: UUID) -> PostResult | None:
+    async with get_session() as s:
+        return (
+            (
+                await s.execute(
+                    select(PostResult)
+                    .where(PostResult.lead_id == lead_id, PostResult.delivered.is_(True))
+                    .order_by(PostResult.created_at.desc())
+                    .limit(1)
+                )
+            )
+            .scalars()
+            .first()
+        )
+
+
 if _supports_legacy_hatchet_worker:
 
-    @hatchet.workflow(name="ping-post-auction", on_events=["lead.qualified"])
+    @_legacy_hatchet.workflow(name="ping-post-auction", on_events=["lead.qualified"])
     class PingPostWorkflow:
         """Hatchet SDK v0.x workflow wrapper."""
 
-        @hatchet.step(timeout=timedelta(seconds=30), retries=3)
+        @_legacy_hatchet.step(timeout=timedelta(seconds=30), retries=3)
         async def auction(self, context: Context) -> dict[str, Any]:
             return await _auction_step(context)
 
-    @hatchet.workflow(name="GuardrailEvaluation", on_crons=["0 6 * * *"])
+    @_legacy_hatchet.workflow(name="GuardrailEvaluation", on_crons=["0 6 * * *"])
     class GuardrailEvaluation:
-        @hatchet.step(timeout=timedelta(seconds=300), retries=1)
+        @_legacy_hatchet.step(timeout=timedelta(seconds=300), retries=1)
         async def evaluate(self, context: Context) -> dict[str, Any]:
             return {"actions": await evaluate_buyer_guardrails()}
 
@@ -328,8 +544,15 @@ def _row_to_lead(row: LeadRow) -> Lead:
         zip=row.zip,
         storm_id=row.storm_id,
         damage_description=row.damage_description,
+        damage_type=row.damage_type,
+        urgency=row.urgency,
+        damage_summary=row.damage_summary,
+        visible_risk_level=row.visible_risk_level,
+        estimated_job_size=row.estimated_job_size,
+        buyer_notes=row.buyer_notes,
         damage_tier=DamageTier(row.damage_tier) if row.damage_tier else None,
         photo_s3_keys=row.photo_s3_keys or [],
+        safety_flags=row.safety_flags or [],
         consent_text=row.consent_text,
         consent_ip=row.consent_ip,
         consent_user_agent=row.consent_user_agent,
@@ -363,7 +586,7 @@ def _row_to_lead(row: LeadRow) -> Lead:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     task: asyncio.Task | None = None
     if _supports_legacy_hatchet_worker:
-        worker = hatchet.worker("ping-post-worker", max_runs=10)
+        worker = _legacy_hatchet.worker("ping-post-worker", max_runs=10)
         worker.register_workflow(PingPostWorkflow())
         worker.register_workflow(GuardrailEvaluation())
     else:
@@ -434,6 +657,11 @@ def _authorization_bearer_token(request: Request) -> str | None:
     return None
 
 
+def _buyer_api_key_matches(request: Request, buyer: BuyerRow) -> bool:
+    supplied = _authorization_bearer_token(request)
+    return bool(buyer.api_key and supplied and hmac.compare_digest(str(buyer.api_key), supplied))
+
+
 def _operator_token(request: Request) -> str | None:
     header_token = request.headers.get("x-stormlead-operator-token", "").strip()
     return header_token or _authorization_bearer_token(request)
@@ -442,13 +670,19 @@ def _operator_token(request: Request) -> str | None:
 def _operator_path_requires_gate(path: str, method: str) -> bool:
     if path.startswith("/v1/admin/"):
         return True
+    if path.startswith("/v1/kpis/"):
+        return True
     if path == "/v1/auction":
         return True
     if path == "/v1/buyers":
         return True
     if path.startswith("/v1/return-requests/") and path.endswith("/review"):
         return True
+    if path.startswith("/v1/payments/"):
+        return True
     if path.startswith("/v1/buyers/") and method in {"PATCH", "DELETE"}:
+        return True
+    if path.startswith("/v1/buyers/") and path.endswith("/wallet/refill-intents"):
         return True
     return path.startswith("/v1/buyers/") and path.endswith("/deposits")
 
@@ -463,7 +697,9 @@ def _operator_authorized(request: Request) -> bool:
 
 @app.middleware("http")
 async def operator_surface_gate(request: Request, call_next: Any) -> Response:
-    if _operator_path_requires_gate(request.url.path, request.method) and not _operator_authorized(request):
+    if _operator_path_requires_gate(request.url.path, request.method) and not _operator_authorized(
+        request
+    ):
         return JSONResponse(
             {"detail": "operator token required for admin or funding operations"},
             status_code=401,
@@ -478,10 +714,19 @@ def _buyer_api_key_required(request: Request) -> bool:
 def _require_buyer_api_key(request: Request, buyer: BuyerRow) -> None:
     if not _buyer_api_key_required(request):
         return
-    supplied = _authorization_bearer_token(request)
-    if buyer.api_key and supplied and hmac.compare_digest(str(buyer.api_key), supplied):
+    if _buyer_api_key_matches(request, buyer):
         return
     raise HTTPException(401, "valid buyer API key required")
+
+
+def _operator_token_supplied_and_authorized(request: Request) -> bool:
+    expected = os.getenv("STORMLEAD_OPERATOR_TOKEN", "").strip()
+    supplied = _operator_token(request)
+    return bool(expected and supplied and hmac.compare_digest(expected, supplied))
+
+
+def _new_buyer_api_key() -> str:
+    return f"buyer_{secrets.token_urlsafe(32)}"
 
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -585,7 +830,7 @@ async def admin() -> str:
   <div class="orb cyan"></div>
   <nav class="nav-pill" aria-label="primary navigation">
     <a class="brand" href="/admin"><span class="brand-dot"></span><span>StormLead</span></a>
-    <div class="nav-links"><a href="#kpis">Metrics</a><a href="#workflow-runs">Runs</a><a href="#buyers">Buyers</a></div>
+    <div class="nav-links"><a href="#kpis">Metrics</a><a href="#autopilot">Autopilot</a><a href="#workflow-runs">Runs</a><a href="#buyers">Buyers</a></div>
     <a class="nav-cta" href="#buyer-form">Create</a>
   </nav>
   <main class="admin-shell">
@@ -619,6 +864,66 @@ async def admin() -> str:
 
     <section class="grid" id="kpis" aria-label="business kpis"></section>
 
+    <section class="panel" id="autopilot" aria-label="paid pilot autopilot">
+      <div class="section-header">
+        <div>
+          <h2>99% Autopilot</h2>
+          <p class="muted">Straight-through paid-pilot processing: normal synthetic leads sell, reject, or route automatically; only exceptions stay here for operator review.</p>
+        </div>
+        <span class="pill" id="autopilot-label">loading</span>
+      </div>
+      <section class="grid" id="autopilot-kpis" aria-label="autopilot kpis"></section>
+      <div class="section-header">
+        <div>
+          <h2>Durable Queue Summary</h2>
+          <p class="muted">Read-only `exception_queue` rollup by owner, SLA, severity, and operations area. Aggregates only; no homeowner PII.</p>
+        </div>
+        <span class="pill" id="exception-summary-label">loading</span>
+      </div>
+      <section class="grid" id="exception-summary" aria-label="durable exception queue summary"></section>
+      <div class="section-header">
+        <div>
+          <h2>Budget Action Queue</h2>
+          <p class="muted">Read-only `budget_action_logs` view for pause recommendations, blocked cap breaches, and approval-required budget increases. No ad platform mutation or spend.</p>
+        </div>
+        <span class="pill" id="budget-actions-label">loading</span>
+      </div>
+      <section class="grid" id="budget-actions-summary" aria-label="budget action summary"></section>
+      <div class="table-wrap">
+        <table aria-label="budget action approval queue">
+          <thead><tr><th>Action</th><th>Status</th><th>Platform</th><th>Campaign</th><th>Reason</th><th>Safety</th></tr></thead>
+          <tbody id="budget-actions"></tbody>
+        </table>
+      </div>
+      <div class="section-header">
+        <div>
+          <h2>Learning Proposal Queue</h2>
+          <p class="muted">Read-only `learning_proposals` view for replay guardrails, 5% canaries, rollbacks, and approval-required promotions. No live traffic routing or automatic promotion.</p>
+        </div>
+        <span class="pill" id="learning-proposals-label">loading</span>
+      </div>
+      <section class="grid" id="learning-proposals-summary" aria-label="learning proposal summary"></section>
+      <div class="table-wrap">
+        <table aria-label="learning proposal replay queue">
+          <thead><tr><th>Type</th><th>Status</th><th>Target</th><th>Canary</th><th>Guardrail</th><th>Safety</th></tr></thead>
+          <tbody id="learning-proposals"></tbody>
+        </table>
+      </div>
+      <div class="section-header">
+        <div>
+          <h2>Exception Queue</h2>
+          <p class="muted">Derived from local audit rows, return requests, delivery results, and buyer wallet readiness. List view avoids homeowner PII.</p>
+        </div>
+        <button type="button" class="secondary" onclick="loadAutopilot()">Refresh Exceptions</button>
+      </div>
+      <div class="table-wrap">
+        <table aria-label="autopilot exception queue">
+          <thead><tr><th>Severity</th><th>Reason</th><th>Context</th><th>Age</th><th>Recommended Action</th><th>Actions</th></tr></thead>
+          <tbody id="exception-queue"></tbody>
+        </table>
+      </div>
+    </section>
+
     <section class="panel" aria-label="launch readiness">
       <div class="section-header">
         <div>
@@ -637,7 +942,7 @@ async def admin() -> str:
           <p>Create a real buyer, activate/fund it, then verify dashboard KPIs and roster state.</p>
         </div>
       </div>
-      <div class="status" id="workflow-status">Ready. No mock data is used.</div>
+      <div class="status" id="workflow-status" role="status" aria-live="polite">Ready. No mock data is used.</div>
     </section>
 
     <div class="two-column">
@@ -650,7 +955,7 @@ async def admin() -> str:
           <p class="muted">Inspect append-only state transitions, agent decisions, review actions, and redacted payload summaries from real database audit rows.</p>
           <form id="timeline-form" aria-label="load lead timeline form">
             <div class="form-grid">
-              <label>Lead ID <input name="lead_id" id="timeline-lead-id" placeholder="Paste a lead UUID" /></label>
+              <label>Lead ID <input name="lead_id" id="timeline-lead-id" placeholder="Paste a lead UUID" aria-describedby="timeline-summary" aria-invalid="false" inputmode="text" /></label>
               <label>Review Notes <input name="notes" id="review-notes" value="Reviewed in StormLead admin timeline." /></label>
             </div>
             <div class="actions">
@@ -659,7 +964,7 @@ async def admin() -> str:
               <button type="button" class="secondary" id="review-approve">Approve / Clear Hold</button>
             </div>
           </form>
-          <div id="timeline-summary" class="status">Select a lead from Recent Workflow Runs or paste a lead UUID.</div>
+          <div id="timeline-summary" class="status" role="status" aria-live="polite">Select a lead from Recent Workflow Runs or paste a lead UUID.</div>
           <div class="timeline" id="timeline"></div>
         </section>
       </section>
@@ -685,7 +990,7 @@ async def admin() -> str:
         <label>Company <input name="company" value="Cowork Tree Pros" required /></label>
         <label>Email <input name="contact_email" value="ops@cowork-tree.example" required /></label>
         <label>Phone <input name="contact_phone_e164" value="+15125550199" required /></label>
-        <label>Webhook URL <input name="webhook_url" value="http://host.docker.internal:9999/cowork-buyer" required /></label>
+        <label>Webhook URL <input name="webhook_url" value="__DEFAULT_BUYER_WEBHOOK_URL__" required /></label>
         <label>Webhook Secret <input name="webhook_secret" value="cowork-secret-minimum-16" required /></label>
         <label>Tier 1/2 Bid <input name="bid_per_lead_t1_t2" value="75.00" required /></label>
         <label>Tier 3 Bid <input name="bid_per_lead_t3" value="175.00" required /></label>
@@ -757,8 +1062,23 @@ async def admin() -> str:
     };
     const htmlEscapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
     const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, ch => htmlEscapeMap[ch]);
+    const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     const list = value => value.split(',').map(v => v.trim()).filter(Boolean);
     const formJson = form => Object.fromEntries(new FormData(form).entries());
+    const setTimelineMessage = (msg, kind = '') => {
+      const summary = document.querySelector('#timeline-summary');
+      const input = document.querySelector('#timeline-lead-id');
+      summary.textContent = msg;
+      summary.className = ['status', kind].filter(Boolean).join(' ');
+      summary.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+      summary.setAttribute('aria-live', kind === 'error' ? 'assertive' : 'polite');
+      input.setAttribute('aria-invalid', kind === 'error' ? 'true' : 'false');
+    };
+    const validateLeadId = leadId => {
+      if (!leadId) return 'Paste or select a lead UUID before loading the timeline.';
+      if (!uuidPattern.test(leadId)) return 'Lead ID must be a valid UUID before StormLead can load the audit timeline.';
+      return '';
+    };
     const operatorHeaders = () => {
       const token = window.localStorage.getItem('stormlead_operator_token') || '';
       return token ? { Authorization: `Bearer ${token}` } : {};
@@ -769,7 +1089,12 @@ async def admin() -> str:
         headers: { 'Content-Type': 'application/json', ...operatorHeaders(), ...(options.headers || {}) },
       });
       const text = await res.text();
-      const data = text ? JSON.parse(text) : {};
+      let data = {};
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch {
+        data = { detail: text };
+      }
       if (res.status === 401) {
         const token = window.prompt('Operator token required for protected admin operations.');
         if (token) {
@@ -828,6 +1153,182 @@ async def admin() -> str:
         </div>`).join('') : '<div class="muted">No workflow KPIs are available yet.</div>';
     }
 
+    function renderAutopilotKpis(data) {
+      const label = document.querySelector('#autopilot-label');
+      const score = Number(data.straight_through_rate || 0);
+      label.textContent = `${(score * 100).toFixed(1)}% STP`;
+      label.className = `pill ${score >= 0.99 ? 'ok' : score >= 0.9 ? 'warn' : 'danger'}`;
+      const metrics = data.metrics || [];
+      document.querySelector('#autopilot-kpis').innerHTML = metrics.length ? metrics.map(metric => `
+        <div class="card">
+          <div>${escapeHtml(metric.label)}</div>
+          <div class="metric">${escapeHtml(metricValue(metric))}</div>
+          <div class="muted">${escapeHtml(metricDetail(metric))}</div>
+        </div>`).join('') : '<div class="muted">No autopilot KPI data is available yet.</div>';
+    }
+
+    function compactCounts(counts) {
+      const entries = Object.entries(counts || {}).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+      if (!entries.length) return 'none';
+      return entries.map(([key, value]) => `${titleize(key)}: ${value}`).join(' | ');
+    }
+
+    function renderExceptionSummary(data) {
+      const label = document.querySelector('#exception-summary-label');
+      const active = Number(data.active_count || 0);
+      const overdue = Number(data.overdue_count || 0);
+      label.textContent = `${active} active`;
+      label.className = `pill ${overdue ? 'danger' : active ? 'warn' : 'ok'}`;
+      document.querySelector('#exception-summary').innerHTML = `
+        <div class="card"><div>Active Durable Exceptions</div><div class="metric">${escapeHtml(active)}</div><div class="muted">Open or in-progress queue rows</div></div>
+        <div class="card"><div>SLA Overdue</div><div class="metric">${escapeHtml(overdue)}</div><div class="muted">Oldest due: ${escapeHtml(data.oldest_sla_due_at || 'none')}</div></div>
+        <div class="card"><div>Operations Areas</div><div class="metric">${escapeHtml(Object.keys(data.by_area || {}).length)}</div><div class="muted">${escapeHtml(compactCounts(data.by_area))}</div></div>
+        <div class="card"><div>Owners</div><div class="metric">${escapeHtml(Object.keys(data.by_owner || {}).length)}</div><div class="muted">${escapeHtml(compactCounts(data.by_owner))}</div></div>
+        <div class="card"><div>Severity Mix</div><div class="metric">${escapeHtml(Object.keys(data.by_severity || {}).length)}</div><div class="muted">${escapeHtml(compactCounts(data.by_severity))}</div></div>`;
+    }
+
+    function renderBudgetActions(data) {
+      const label = document.querySelector('#budget-actions-label');
+      const active = Number(data.active_count || 0);
+      const approvals = Number(data.approval_required_count || 0);
+      const unsafeIntent = Number(data.rows_with_provider_contact_intent || 0) + Number(data.rows_with_provider_mutation_intent || 0) + Number(data.rows_with_spend_intent || 0);
+      label.textContent = `${approvals} approvals`;
+      label.className = `pill ${unsafeIntent || Number(data.blocked_count || 0) ? 'danger' : active ? 'warn' : 'ok'}`;
+      document.querySelector('#budget-actions-summary').innerHTML = `
+        <div class="card"><div>Active Budget Actions</div><div class="metric">${escapeHtml(active)}</div><div class="muted">Read-only local audit rows</div></div>
+        <div class="card"><div>Approval Required</div><div class="metric">${escapeHtml(approvals)}</div><div class="muted">Budget increases stay manual</div></div>
+        <div class="card"><div>Auto-Pause Plans</div><div class="metric">${escapeHtml(data.auto_pause_count || 0)}</div><div class="muted">Loss threshold recommendations</div></div>
+        <div class="card"><div>Blocked Cap Breaches</div><div class="metric">${escapeHtml(data.blocked_count || 0)}</div><div class="muted">Above configured caps</div></div>
+        <div class="card"><div>Platforms</div><div class="metric">${escapeHtml(Object.keys(data.by_platform || {}).length)}</div><div class="muted">${escapeHtml(compactCounts(data.by_platform))}</div></div>`;
+      const tbody = document.querySelector('#budget-actions');
+      const rows = data.recent_actions || [];
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="muted">No active budget pacing actions. Loss controls and increase approvals will appear here after local evaluation.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = rows.map(item => `
+        <tr data-budget-action-id="${escapeHtml(item.id)}">
+          <td><span class="pill ${item.action === 'block_increase' ? 'danger' : item.action === 'hold' ? 'ok' : 'warn'}">${escapeHtml(titleize(item.action))}</span></td>
+          <td>${escapeHtml(titleize(item.status))}${item.approval_required ? '<div class="muted">Admin approval required</div>' : ''}</td>
+          <td>${escapeHtml(item.platform)}</td>
+          <td class="mono">${escapeHtml(item.external_campaign_id)}</td>
+          <td>${escapeHtml(item.reason)}</td>
+          <td class="mono">contact=${escapeHtml(item.safety?.would_contact_ads_provider)} | mutate=${escapeHtml(item.safety?.would_mutate_ads_provider)} | spend=${escapeHtml(item.safety?.would_spend_money)}</td>
+        </tr>`).join('');
+    }
+
+    function renderLearningProposals(data) {
+      const label = document.querySelector('#learning-proposals-label');
+      const active = Number(data.active_count || 0);
+      const approvals = Number(data.pending_approval_count || 0);
+      const rollbacks = Number(data.rollback_count || 0);
+      label.textContent = `${approvals} approvals`;
+      label.className = `pill ${rollbacks || Number(data.rows_with_full_rollout_intent || 0) ? 'danger' : active ? 'warn' : 'ok'}`;
+      document.querySelector('#learning-proposals-summary').innerHTML = `
+        <div class="card"><div>Active Proposals</div><div class="metric">${escapeHtml(active)}</div><div class="muted">Replay/canary rows needing visibility</div></div>
+        <div class="card"><div>Canary Active</div><div class="metric">${escapeHtml(data.canary_active_count || 0)}</div><div class="muted">Max canary: ${escapeHtml(data.max_canary_percent || 0)}%</div></div>
+        <div class="card"><div>Pending Approval</div><div class="metric">${escapeHtml(approvals)}</div><div class="muted">100% rollout stays manual</div></div>
+        <div class="card"><div>Rollbacks</div><div class="metric">${escapeHtml(rollbacks)}</div><div class="muted">Guardrail-triggered rollback states</div></div>
+        <div class="card"><div>Target Areas</div><div class="metric">${escapeHtml(Object.keys(data.by_target_area || {}).length)}</div><div class="muted">${escapeHtml(compactCounts(data.by_target_area))}</div></div>`;
+      const tbody = document.querySelector('#learning-proposals');
+      const rows = data.recent_proposals || [];
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="muted">No active learning proposals. Replay, canary, rollback, and approval states will appear here after Hermes creates local proposals.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = rows.map(item => `
+        <tr data-learning-proposal-id="${escapeHtml(item.id)}">
+          <td>${escapeHtml(titleize(item.proposal_type))}<div class="muted">${escapeHtml(item.title)}</div></td>
+          <td><span class="pill ${item.status === 'rollback_triggered' ? 'danger' : item.status === 'canary_active' ? 'ok' : 'warn'}">${escapeHtml(titleize(item.status))}</span>${item.approval_required ? '<div class="muted">Admin approval required</div>' : ''}</td>
+          <td>${escapeHtml(item.target_area)}</td>
+          <td class="mono">${escapeHtml(item.canary_percent)}%</td>
+          <td class="mono">${escapeHtml(item.guardrail?.metric)}: ${escapeHtml(item.guardrail?.baseline_value ?? 'n/a')} -> ${escapeHtml(item.guardrail?.candidate_value ?? 'n/a')}</td>
+          <td class="mono">route=${escapeHtml(item.safety?.would_route_live_traffic)} | promote=${escapeHtml(item.safety?.would_promote_without_admin_approval)} | full approval=${escapeHtml(item.safety?.requires_admin_approval_for_full_rollout)}</td>
+        </tr>`).join('');
+    }
+
+    function exceptionActionButton(item, action, label) {
+      return `<button type="button" class="secondary" data-exception-action="${escapeHtml(action)}" data-lead-id="${escapeHtml(item.lead_id || '')}" data-return-request-id="${escapeHtml(item.return_request_id || '')}">${escapeHtml(label)}</button>`;
+    }
+
+    function renderExceptions(data) {
+      const tbody = document.querySelector('#exception-queue');
+      const rows = data.exceptions || [];
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="muted">No active autopilot exceptions. Normal eligible workflows are straight-through.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = rows.map(item => {
+        const context = [item.entity_type, item.lead_id ? `lead ${item.lead_id}` : '', item.buyer_id ? `buyer ${item.buyer_id}` : '', item.market || '', item.service || ''].filter(Boolean).join(' | ');
+        const actions = [
+          item.lead_id ? exceptionActionButton(item, 'open_timeline', 'Open Timeline') : '',
+          item.actions?.includes('approve_lead') ? exceptionActionButton(item, 'approve_lead', 'Approve Lead') : '',
+          item.actions?.includes('approve_return') ? exceptionActionButton(item, 'approve_return', 'Approve Return') : '',
+          item.actions?.includes('reject_return') ? exceptionActionButton(item, 'reject_return', 'Reject Return') : '',
+        ].filter(Boolean).join(' ');
+        return `
+          <tr data-exception-id="${escapeHtml(item.exception_id)}">
+            <td><span class="pill ${item.severity === 'critical' ? 'danger' : item.severity === 'warning' ? 'warn' : 'ok'}">${escapeHtml(item.severity)}</span></td>
+            <td>${escapeHtml(item.reason)}<div class="muted mono">${escapeHtml(item.kind)}</div></td>
+            <td class="mono">${escapeHtml(context)}</td>
+            <td>${escapeHtml(item.sla_age_minutes)} min</td>
+            <td>${escapeHtml(item.recommended_action)}</td>
+            <td><div class="actions">${actions || '<span class="muted">Review only</span>'}</div></td>
+          </tr>`;
+      }).join('');
+      tbody.querySelectorAll('button[data-exception-action]').forEach(button => {
+        button.addEventListener('click', async () => handleExceptionAction(button));
+      });
+    }
+
+    async function handleExceptionAction(button) {
+      const action = button.getAttribute('data-exception-action');
+      const leadId = button.getAttribute('data-lead-id');
+      const returnRequestId = button.getAttribute('data-return-request-id');
+      if (action === 'open_timeline' && leadId) {
+        document.querySelector('#timeline-lead-id').value = leadId;
+        await loadTimeline(leadId);
+        document.querySelector('#timeline-summary').scrollIntoView({ behavior: 'smooth', block: 'center' });
+        return;
+      }
+      button.disabled = true;
+      try {
+        if (action === 'approve_lead' && leadId) {
+          await api(`/v1/admin/leads/${encodeURIComponent(leadId)}/review`, {
+            method: 'POST',
+            body: JSON.stringify({ action: 'approve', notes: 'Approved from Autopilot exception queue.', operator: 'local-admin' }),
+          });
+        } else if ((action === 'approve_return' || action === 'reject_return') && returnRequestId) {
+          await api(`/v1/return-requests/${encodeURIComponent(returnRequestId)}/review`, {
+            method: 'POST',
+            body: JSON.stringify({ action: action === 'approve_return' ? 'approve' : 'reject', notes: 'Reviewed from Autopilot exception queue.', operator: 'local-admin' }),
+          });
+        }
+        await loadAutopilot();
+        setStatus(`Autopilot action ${action} completed.`, 'ok');
+      } catch (err) {
+        setStatus(`Autopilot action ${action} failed: ${err.message}`, 'error');
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function loadAutopilot() {
+      const [autopilotKpis, exceptions, exceptionSummary, budgetActions, learningProposals] = await Promise.all([
+        api('/v1/admin/autopilot/kpis'),
+        api('/v1/admin/autopilot/exceptions'),
+        api('/v1/admin/autopilot/exception-queue/summary'),
+        api('/v1/admin/autopilot/budget-actions/summary'),
+        api('/v1/admin/autopilot/learning-proposals/summary'),
+      ]);
+      renderAutopilotKpis(autopilotKpis);
+      renderExceptionSummary(exceptionSummary);
+      renderBudgetActions(budgetActions);
+      renderLearningProposals(learningProposals);
+      renderExceptions(exceptions);
+      return { autopilotKpis, exceptions, exceptionSummary, budgetActions, learningProposals };
+    }
+
     function renderWorkflowRuns(runs) {
       const tbody = document.querySelector('#workflow-runs');
       if (!runs.length) {
@@ -854,7 +1355,13 @@ async def admin() -> str:
 
     function renderTimeline(data) {
       const lead = data.lead || {};
-      document.querySelector('#timeline-summary').textContent = `Lead ${data.lead_id}\nCurrent state: ${data.current_state}\nStatus: ${lead.status || 'unknown'} | Service: ${lead.requested_service || 'unknown'} | Class: ${lead.lead_class || 'unknown'} | Hold: ${lead.hold_for_review ? 'yes' : 'no'}`;
+      const summary = document.querySelector('#timeline-summary');
+      const input = document.querySelector('#timeline-lead-id');
+      summary.textContent = `Lead ${data.lead_id}\nCurrent state: ${data.current_state}\nStatus: ${lead.status || 'unknown'} | Service: ${lead.requested_service || 'unknown'} | Class: ${lead.lead_class || 'unknown'} | Hold: ${lead.hold_for_review ? 'yes' : 'no'}`;
+      summary.className = 'status';
+      summary.setAttribute('role', 'status');
+      summary.setAttribute('aria-live', 'polite');
+      input.setAttribute('aria-invalid', 'false');
       const events = data.events || [];
       document.querySelector('#timeline').innerHTML = events.length ? events.map(event => {
         const isReview = event.event_type.startsWith('admin.review');
@@ -872,11 +1379,26 @@ async def admin() -> str:
     }
 
     async function loadTimeline(leadId) {
-      if (!leadId) return;
-      setStatus(`Loading real audit timeline for lead ${leadId}...`);
-      const data = await api(`/v1/admin/leads/${encodeURIComponent(leadId)}/timeline`);
-      renderTimeline(data);
-      setStatus(`Timeline loaded from lead_state_transitions. Events: ${(data.events || []).length}`);
+      const normalizedLeadId = String(leadId || '').trim();
+      const validationError = validateLeadId(normalizedLeadId);
+      if (validationError) {
+        setTimelineMessage(validationError, 'error');
+        setStatus(validationError, 'error');
+        document.querySelector('#timeline-lead-id').focus();
+        return false;
+      }
+      setStatus(`Loading real audit timeline for lead ${normalizedLeadId}...`);
+      try {
+        const data = await api(`/v1/admin/leads/${encodeURIComponent(normalizedLeadId)}/timeline`);
+        renderTimeline(data);
+        setStatus(`Timeline loaded from lead_state_transitions. Events: ${(data.events || []).length}`);
+        return true;
+      } catch (err) {
+        const message = `Timeline could not be loaded for ${normalizedLeadId}. Confirm the lead ID exists in local synthetic evidence, then try again.`;
+        setTimelineMessage(message, 'error');
+        setStatus(`${message}\n${err.message}`, 'error');
+        return false;
+      }
     }
 
     function renderBuyers(buyers) {
@@ -904,12 +1426,13 @@ async def admin() -> str:
     }
 
     async function load() {
-      const [summary, buyers, workflowKpis, workflowRuns, readiness] = await Promise.all([
+      const [summary, buyers, workflowKpis, workflowRuns, readiness, autopilot] = await Promise.all([
         api('/v1/admin/kpis'),
         api('/v1/buyers'),
         api('/v1/admin/workflow-kpis'),
         api('/v1/admin/workflow-runs/recent'),
         api('/v1/admin/launch-readiness'),
+        loadAutopilot(),
       ]);
       document.querySelector('#kpis').innerHTML = [
         ['Prepaid cash', money(summary.prepaid_cash_cents)],
@@ -922,7 +1445,7 @@ async def admin() -> str:
       renderWorkflowKpis(workflowKpis);
       renderWorkflowRuns(workflowRuns.runs || []);
       renderReadiness(readiness);
-      setStatus(`Dashboard loaded from real APIs. Buyers: ${(buyers.buyers || []).length}`);
+      setStatus(`Dashboard loaded from real APIs. Buyers: ${(buyers.buyers || []).length}. Open autopilot exceptions: ${(autopilot.exceptions.exceptions || []).length}`);
     }
 
     document.querySelector('#buyer-form').addEventListener('submit', async event => {
@@ -986,8 +1509,11 @@ async def admin() -> str:
 
     async function reviewLead(action) {
       const leadId = document.querySelector('#timeline-lead-id').value.trim();
-      if (!leadId) {
-        setStatus('Paste or select a lead ID before recording a review action.');
+      const validationError = validateLeadId(leadId);
+      if (validationError) {
+        setTimelineMessage(validationError, 'error');
+        setStatus(validationError, 'error');
+        document.querySelector('#timeline-lead-id').focus();
         return;
       }
       const notes = document.querySelector('#review-notes').value;
@@ -1011,7 +1537,10 @@ async def admin() -> str:
   </script>
 </body>
 </html>
-"""
+    """.replace(
+        "__DEFAULT_BUYER_WEBHOOK_URL__",
+        html.escape(_default_buyer_webhook_url("cowork-buyer"), quote=True),
+    )
 
 
 @app.get("/healthz")
@@ -1038,12 +1567,16 @@ async def readyz() -> dict[str, str]:
 @app.post("/v1/auction")
 async def trigger_auction(payload: dict[str, Any]) -> dict[str, Any]:
     """sync auction. for testing only — production goes through hatchet."""
-    lead_id = payload.get("lead_id")
-    if not lead_id:
+    raw_lead_id = payload.get("lead_id")
+    if not raw_lead_id:
         raise HTTPException(400, "lead_id required")
     try:
+        lead_uuid = UUID(str(raw_lead_id))
+    except ValueError as e:
+        raise HTTPException(400, "lead_id must be a UUID") from e
+    try:
         async with get_session() as s:
-            row = await s.get(LeadRow, lead_id)
+            row = await s.get(LeadRow, lead_uuid)
             if row is None:
                 raise HTTPException(404, "lead not found; verify the lead id and try again")
             lead = _row_to_lead(row)
@@ -1051,6 +1584,21 @@ async def trigger_auction(payload: dict[str, Any]) -> dict[str, Any]:
     except HTTPException:
         raise
     except Exception as e:
+        delivered = await _latest_delivered_post_for_lead(lead_uuid)
+        if delivered is not None:
+            log.warning(
+                "auction.trigger_idempotent_delivery_race",
+                lead_id=str(lead_uuid),
+                buyer_id=str(delivered.buyer_id),
+                error=str(e),
+            )
+            return {
+                "lead_id": str(lead_uuid),
+                "pinged_buyer_ids": [],
+                "winning_buyer_id": str(delivered.buyer_id),
+                "winning_bid_cents": delivered.bid_cents,
+                "duration_ms": 0,
+            }
         log.error("auction.trigger_failed", error=str(e))
         raise HTTPException(
             500, "auction failed; retry after checking buyer and database health"
@@ -1192,8 +1740,145 @@ async def admin_campaign_attribution(campaign_id: str) -> dict[str, Any] | None:
 
 
 @app.get("/v1/admin/attribution/by-zip")
-async def admin_attribution_by_zip(state: str = Query(min_length=2, max_length=2)) -> list[dict[str, Any]]:
+async def admin_attribution_by_zip(
+    state: str = Query(min_length=2, max_length=2),
+) -> list[dict[str, Any]]:
     return await get_roi_by_zip(state)
+
+
+@app.get("/v1/admin/ads/offline-conversions")
+async def admin_ads_offline_conversions(
+    market_state: str | None = Query(default=None, min_length=2, max_length=2),
+    market_zip: str | None = Query(default=None, min_length=3, max_length=10),
+    service: str | None = Query(default=None, min_length=1, max_length=64),
+    campaign_id: str | None = Query(default=None, min_length=1, max_length=128),
+    conversion_name: str = Query(default=ADS_DEFAULT_CONVERSION_NAME, min_length=1, max_length=128),
+    campaign_budget_cents: int = Query(default=100_000, ge=0),
+    planned_spend_cents: int = Query(default=0, ge=0),
+    max_rows: int = Query(default=100, ge=1, le=1000),
+) -> dict[str, Any]:
+    """Build a local-only Google Ads offline conversion import preview."""
+    conversion_name = _normalize_ads_conversion_name(conversion_name)
+    if market_state and market_zip:
+        raise HTTPException(400, "choose either market_state or market_zip, not both")
+    dry_run_gate = provider_decision(
+        ProviderArea.ADS,
+        action="build dry-run offline conversion export",
+    )
+    if not dry_run_gate.allowed:
+        raise HTTPException(
+            403,
+            {
+                "message": "ads dry-run export is paused by provider safety settings",
+                "provider_gate": _provider_decision_response(dry_run_gate),
+            },
+        )
+
+    filters = [
+        PostResult.delivered.is_(True),
+        PostResult.returned.is_(False),
+        LeadRow.google_click_id.is_not(None),
+        LeadRow.google_click_id != "",
+    ]
+    buyer_filters = [BuyerRow.status == BuyerStatus.ACTIVE.value]
+    if market_state:
+        filters.append(LeadRow.state == market_state.upper())
+    if market_zip:
+        filters.append(LeadRow.zip == market_zip)
+        buyer_filters.append(
+            or_(
+                BuyerRow.target_zips.contains([market_zip]),
+                BuyerRow.exclusive_zips.contains([market_zip]),
+            )
+        )
+    if service:
+        normalized_service = service.strip().lower()
+        filters.append(LeadRow.requested_service == normalized_service)
+        buyer_filters.append(BuyerRow.services.contains([normalized_service]))
+    if campaign_id:
+        filters.append(LeadRow.campaign_id == campaign_id)
+
+    try:
+        async with get_session() as s:
+            ranked_conversions = (
+                select(
+                    LeadRow.id.label("lead_id"),
+                    PostResult.id.label("post_result_id"),
+                    func.row_number()
+                    .over(
+                        partition_by=(LeadRow.id, LeadRow.google_click_id),
+                        order_by=PostResult.created_at.desc(),
+                    )
+                    .label("conversion_rank"),
+                )
+                .join(PostResult, PostResult.lead_id == LeadRow.id)
+                .where(and_(*filters))
+                .subquery()
+            )
+            conversion_rows = (
+                await s.execute(
+                    select(LeadRow, PostResult)
+                    .select_from(LeadRow)
+                    .join(ranked_conversions, ranked_conversions.c.lead_id == LeadRow.id)
+                    .join(PostResult, PostResult.id == ranked_conversions.c.post_result_id)
+                    .where(ranked_conversions.c.conversion_rank == 1)
+                    .order_by(PostResult.created_at.desc())
+                    .limit(max_rows)
+                )
+            ).all()
+            wallet_runway_cents = await s.scalar(
+                select(func.coalesce(func.sum(BuyerRow.deposit_balance * 100), 0)).where(
+                    and_(*buyer_filters)
+                )
+            )
+    except Exception as e:
+        log.error("admin.ads_offline_export_failed", error=str(e))
+        raise HTTPException(
+            500, "ads offline conversion preview could not be built from local data"
+        ) from e
+
+    export_rows = _ads_offline_conversion_rows(conversion_rows, conversion_name)
+    attributed_value_cents = sum(int(row["conversion_value_cents"]) for row in export_rows)
+    guardrails = _ads_spend_guardrail_preview(
+        row_count=len(export_rows),
+        attributed_conversion_value_cents=attributed_value_cents,
+        campaign_budget_cents=campaign_budget_cents,
+        planned_spend_cents=planned_spend_cents,
+        wallet_runway_cents=int(wallet_runway_cents or 0),
+        live_ads_approved=provider_live_approved(ProviderArea.ADS),
+    )
+    upload_gate = provider_decision(
+        ProviderArea.ADS,
+        action="upload offline conversions to ads provider",
+        requires_live_approval=True,
+        live_spend=True,
+    )
+    return {
+        "mode": "dry_run",
+        "would_contact_ads_provider": False,
+        "would_upload": False,
+        "scope": {
+            "market_state": market_state.upper() if market_state else None,
+            "market_zip": market_zip,
+            "service": service.strip().lower() if service else None,
+            "campaign_id": campaign_id,
+            "max_rows": max_rows,
+        },
+        "provider_gate": {
+            "dry_run": _provider_decision_response(dry_run_gate),
+            "live_upload": _provider_decision_response(upload_gate),
+        },
+        "export": {
+            "format": "google_ads_offline_conversion_csv",
+            "columns": ADS_OFFLINE_CONVERSION_COLUMNS,
+            "row_count": len(export_rows),
+            "rows": export_rows,
+            "csv_preview": _ads_offline_conversion_csv(export_rows),
+            "pii_redacted": True,
+            "excluded_fields": ["name", "phone_e164", "email", "address_line1"],
+        },
+        "guardrails": guardrails,
+    }
 
 
 @app.get("/v1/admin/export/mailer-csv")
@@ -1334,6 +2019,360 @@ async def admin_workflow_kpis() -> dict[str, Any]:
         ) from e
 
 
+@app.get("/v1/admin/autopilot/kpis")
+async def admin_autopilot_kpis() -> dict[str, Any]:
+    """Paid-pilot straight-through processing KPIs derived from local audit rows."""
+    try:
+        async with get_session() as s:
+            leads = (await s.execute(select(LeadRow))).scalars().all()
+            transitions = (
+                (
+                    await s.execute(
+                        select(LeadStateTransition).order_by(LeadStateTransition.created_at.asc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            posts = (await s.execute(select(PostResult))).scalars().all()
+            returns = (await s.execute(select(ReturnRequest))).scalars().all()
+            buyers = (await s.execute(select(BuyerRow))).scalars().all()
+            exceptions = await _build_autopilot_exceptions(s, limit=250)
+
+        latest_by_lead: dict[UUID, LeadStateTransition] = {}
+        events_by_lead: dict[UUID, set[str]] = {}
+        for transition in transitions:
+            latest_by_lead[transition.lead_id] = transition
+            events_by_lead.setdefault(transition.lead_id, set()).add(transition.event_type)
+
+        posts_by_lead: dict[UUID, list[PostResult]] = {}
+        for post in posts:
+            posts_by_lead.setdefault(post.lead_id, []).append(post)
+
+        exclusion_counts: dict[str, int] = {}
+        eligible = 0
+        automated_successes = 0
+        auto_sold = 0
+        auto_rejected = 0
+        manual_touched = 0
+        for lead in leads:
+            lead_events = events_by_lead.get(lead.id, set())
+            manual_touch = any(event.startswith("admin.") for event in lead_events)
+            if manual_touch:
+                manual_touched += 1
+            exclusions = _autopilot_exclusion_reasons(
+                lead, latest_by_lead.get(lead.id), posts_by_lead.get(lead.id, [])
+            )
+            for reason in exclusions:
+                exclusion_counts[reason] = exclusion_counts.get(reason, 0) + 1
+            if exclusions:
+                continue
+            if lead.status in AUTOPILOT_SUCCESS_STATES:
+                eligible += 1
+                if not manual_touch:
+                    automated_successes += 1
+                    if lead.status == "sold":
+                        auto_sold += 1
+                    if lead.status == "rejected":
+                        auto_rejected += 1
+
+        delivered_posts = sum(1 for post in posts if post.delivered)
+        failed_posts = sum(1 for post in posts if not post.delivered)
+        returned_posts = sum(1 for post in posts if post.returned)
+        total_post_attempts = delivered_posts + failed_posts
+        auto_decided_returns = sum(
+            1
+            for request in returns
+            if request.status in {"approved", "rejected"}
+            and request.reviewed_by == "autopilot-policy"
+        )
+        active_return_requests = sum(
+            1 for request in returns if request.status in ACTIVE_RETURN_REQUEST_STATUSES
+        )
+        low_wallet_buyers = sum(
+            1
+            for buyer in buyers
+            if buyer.status == BuyerStatus.ACTIVE.value
+            and _decimal_to_cents(buyer.deposit_balance)
+            <= _decimal_to_cents(buyer.low_balance_threshold)
+        )
+        revenue_leads = delivered_posts - returned_posts
+        lead_revenue_cents = sum(
+            post.bid_cents for post in posts if post.delivered and not post.returned
+        )
+        attributed_source_count = len(
+            {lead.campaign_source for lead in leads if lead.campaign_source}
+        )
+        straight_through_rate = _normalize_ratio(automated_successes, eligible)
+        exception_reason_counts: dict[str, int] = {}
+        for item in exceptions:
+            reason = str(item["reason"])
+            exception_reason_counts[reason] = exception_reason_counts.get(reason, 0) + 1
+
+        return {
+            "schema_version": 1,
+            "policy_version": AUTOPILOT_POLICY_VERSION,
+            "target_straight_through_rate": 0.99,
+            "straight_through_rate": straight_through_rate,
+            "eligible_workflows": eligible,
+            "automated_successes": automated_successes,
+            "total_leads": len(leads),
+            "open_exceptions": len(exceptions),
+            "exclusion_counts": exclusion_counts,
+            "exception_reason_counts": exception_reason_counts,
+            "buyer_onboarding": {
+                "total_buyers": len(buyers),
+                "autopilot_ready_buyers": sum(
+                    1 for buyer in buyers if _buyer_onboarding_readiness(buyer)["autopilot_ready"]
+                ),
+                "low_wallet_buyers": low_wallet_buyers,
+            },
+            "metrics": [
+                _ratio_metric(
+                    "straight_through_rate",
+                    "Straight-through rate",
+                    automated_successes,
+                    eligible,
+                    "No eligible paid-pilot workflows have completed yet",
+                ),
+                _ratio_metric(
+                    "exception_rate",
+                    "Exception rate",
+                    len(exceptions),
+                    max(len(leads), 1),
+                    "No captured leads are available yet",
+                ),
+                _ratio_metric(
+                    "auto_sold_lead_rate",
+                    "Auto-sold lead rate",
+                    auto_sold,
+                    eligible,
+                    "No eligible paid-pilot workflows have completed yet",
+                ),
+                _ratio_metric(
+                    "auto_rejected_lead_rate",
+                    "Auto-rejected lead rate",
+                    auto_rejected,
+                    eligible,
+                    "No eligible paid-pilot workflows have completed yet",
+                ),
+                _ratio_metric(
+                    "delivery_success_rate",
+                    "Delivery success",
+                    delivered_posts,
+                    total_post_attempts,
+                    "No post attempts have been recorded yet",
+                ),
+                _ratio_metric(
+                    "refund_auto_decision_rate",
+                    "Refund auto-decision",
+                    auto_decided_returns,
+                    len(returns),
+                    "No return requests have been recorded yet",
+                ),
+                _ratio_metric(
+                    "manual_touch_rate",
+                    "Manual touch rate",
+                    manual_touched,
+                    max(len(leads), 1),
+                    "No captured leads are available yet",
+                ),
+                _count_metric("open_exceptions", "Open exceptions", len(exceptions), "items"),
+                _count_metric(
+                    "active_return_requests", "Active returns", active_return_requests, "requests"
+                ),
+                _count_metric(
+                    "buyer_wallet_failures", "Buyer wallet failures", low_wallet_buyers, "buyers"
+                ),
+                _money_metric(
+                    "revenue_per_net_lead",
+                    "Revenue / net lead",
+                    (lead_revenue_cents / 100) / revenue_leads if revenue_leads else None,
+                    "No net delivered leads are available yet",
+                ),
+                _count_metric(
+                    "source_roi_inputs", "Source ROI inputs", attributed_source_count, "sources"
+                ),
+            ],
+        }
+    except Exception as e:
+        log.error("admin.autopilot_kpis_failed", error=str(e))
+        raise HTTPException(
+            500, "autopilot kpis could not be loaded; retry after checking database health"
+        ) from e
+
+
+@app.get("/v1/admin/autopilot/exceptions")
+async def admin_autopilot_exceptions(
+    kind: str | None = Query(default=None, min_length=1, max_length=64),
+    lead_id: UUID | None = None,
+    buyer_id: UUID | None = None,
+    limit: int = Query(default=50, ge=1, le=250),
+) -> dict[str, Any]:
+    """Return unresolved operator work for the 1% exception queue without lead PII."""
+    try:
+        async with get_session() as s:
+            exceptions = await _build_autopilot_exceptions(
+                s, limit=limit, kind=kind, lead_id=lead_id, buyer_id=buyer_id
+            )
+        return {
+            "schema_version": 1,
+            "policy_version": AUTOPILOT_POLICY_VERSION,
+            "exceptions": exceptions,
+            "count": len(exceptions),
+        }
+    except Exception as e:
+        log.error("admin.autopilot_exceptions_failed", error=str(e))
+        raise HTTPException(
+            500, "autopilot exceptions could not be loaded; retry after checking database health"
+        ) from e
+
+
+@app.post("/v1/admin/autopilot/exceptions/sync")
+async def admin_autopilot_exceptions_sync(
+    kind: str | None = Query(default=None, min_length=1, max_length=64),
+    lead_id: UUID | None = None,
+    buyer_id: UUID | None = None,
+    limit: int = Query(default=50, ge=1, le=250),
+) -> dict[str, Any]:
+    """Materialize computed operator exceptions into the durable local queue."""
+    try:
+        async with get_session() as s:
+            exceptions = await _build_autopilot_exceptions(
+                s, limit=limit, kind=kind, lead_id=lead_id, buyer_id=buyer_id
+            )
+            sync_summary = await _sync_exception_queue_items(s, exceptions)
+        return {
+            "schema_version": 1,
+            "policy_version": AUTOPILOT_POLICY_VERSION,
+            "mode": "local_exception_queue_sync",
+            "would_contact_provider": False,
+            "computed_count": len(exceptions),
+            "sync": sync_summary,
+        }
+    except Exception as e:
+        log.error("admin.autopilot_exceptions_sync_failed", error=str(e))
+        raise HTTPException(
+            500, "autopilot exceptions could not be synced; retry after checking database health"
+        ) from e
+
+
+@app.get("/v1/admin/autopilot/exception-queue/summary")
+async def admin_autopilot_exception_queue_summary(
+    limit: int = Query(default=250, ge=1, le=1000),
+) -> dict[str, Any]:
+    """Summarize durable exception_queue items for local operator dashboards."""
+    try:
+        async with get_session() as s:
+            rows = (
+                (
+                    await s.execute(
+                        select(ExceptionQueueItem)
+                        .where(ExceptionQueueItem.status.in_(ACTIVE_EXCEPTION_QUEUE_STATUSES))
+                        .order_by(ExceptionQueueItem.sla_due_at.asc().nulls_last())
+                        .limit(limit)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return _exception_queue_dashboard_summary(rows)
+    except Exception as e:
+        log.error("admin.autopilot_exception_queue_summary_failed", error=str(e))
+        raise HTTPException(
+            500,
+            "autopilot exception queue summary could not be loaded; retry after checking database health",
+        ) from e
+
+
+@app.get("/v1/admin/autopilot/budget-actions/summary")
+async def admin_autopilot_budget_actions_summary(
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    """Summarize local budget pacing actions for read-only admin review."""
+    try:
+        async with get_session() as s:
+            rows = (
+                (
+                    await s.execute(
+                        select(BudgetActionLog)
+                        .where(BudgetActionLog.status.in_(ACTIVE_BUDGET_ACTION_STATUSES))
+                        .order_by(BudgetActionLog.created_at.desc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return _budget_action_dashboard_summary(rows, recent_limit=limit)
+    except Exception as e:
+        log.error("admin.autopilot_budget_actions_summary_failed", error=str(e))
+        raise HTTPException(
+            500,
+            "autopilot budget action summary could not be loaded; retry after checking database health",
+        ) from e
+
+
+@app.get("/v1/admin/autopilot/learning-proposals/summary")
+async def admin_autopilot_learning_proposals_summary(
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    """Summarize local learning proposal replay/canary state for read-only review."""
+    try:
+        async with get_session() as s:
+            rows = (
+                (
+                    await s.execute(
+                        select(LearningProposal)
+                        .where(LearningProposal.status.in_(ACTIVE_LEARNING_PROPOSAL_STATUSES))
+                        .order_by(LearningProposal.created_at.desc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return _learning_proposal_dashboard_summary(rows, recent_limit=limit)
+    except Exception as e:
+        log.error("admin.autopilot_learning_proposals_summary_failed", error=str(e))
+        raise HTTPException(
+            500,
+            "autopilot learning proposal summary could not be loaded; retry after checking database health",
+        ) from e
+
+
+@app.get("/v1/admin/provider-kill-switches")
+async def admin_provider_kill_switches() -> dict[str, Any]:
+    snapshot = provider_pause_snapshot()
+    paused = sorted(area for area, item in snapshot.items() if item["paused"])
+    return {
+        "schema_version": 1,
+        "kill_switches": snapshot,
+        "paused_areas": paused,
+        "paused_count": len(paused),
+        "change_plan_endpoint": "/v1/admin/provider-kill-switches/change-plan",
+        "would_contact_provider": False,
+        "safe_to_call_without_provider_credentials": True,
+    }
+
+
+@app.post("/v1/admin/provider-kill-switches/change-plan")
+async def admin_provider_kill_switch_change_plan(
+    request: ProviderKillSwitchChangePlanRequest,
+) -> dict[str, Any]:
+    plan = provider_kill_switch_change_plan(
+        request.area,
+        desired_paused=request.desired_paused,
+        reason=request.reason.strip(),
+    )
+    return {
+        "mode": "local_provider_kill_switch_change_plan",
+        "plan": plan,
+        "current_snapshot": provider_pause_snapshot()[request.area.value],
+        "would_contact_provider": False,
+        "would_mutate_runtime": False,
+        "safe_to_call_without_provider_credentials": True,
+    }
+
+
 @app.get("/v1/admin/workflow-runs/recent")
 async def recent_workflow_runs(limit: int = Query(default=20, ge=1, le=100)) -> dict[str, Any]:
     try:
@@ -1357,7 +2396,8 @@ async def lead_timeline(
             if lead is None:
                 raise HTTPException(404, "lead not found; verify the lead id and try again")
             events = await list_lead_timeline(s, lead_id, limit=limit)
-            current_state = events[-1].to_state if events else lead.status
+            latest = await latest_state(s, lead_id)
+            current_state = latest.value if latest is not None else lead.status
             return {
                 "lead_id": str(lead_id),
                 "current_state": current_state,
@@ -1452,9 +2492,68 @@ async def get_buyer(buyer_id: UUID, request: Request) -> dict[str, Any]:
         ) from e
 
 
+@app.get("/v1/buyers/{buyer_id}/sandbox-certification")
+async def get_buyer_sandbox_certification(buyer_id: UUID, request: Request) -> dict[str, Any]:
+    try:
+        async with get_session() as s:
+            buyer = await s.get(BuyerRow, buyer_id)
+            if buyer is None:
+                raise HTTPException(404, "buyer not found; verify the buyer id and try again")
+            _require_buyer_api_key(request, buyer)
+            return _buyer_sandbox_certification_response(buyer)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("buyer.sandbox_certification_failed", buyer_id=str(buyer_id), error=str(e))
+        raise HTTPException(
+            500,
+            "buyer sandbox certification could not be built; verify the buyer and retry",
+        ) from e
+
+
+@app.post("/v1/buyers/{buyer_id}/api-key/rotate")
+async def rotate_buyer_api_key(
+    buyer_id: UUID, request: Request, response: Response
+) -> dict[str, Any]:
+    try:
+        async with get_session() as s:
+            buyer = await s.get(BuyerRow, buyer_id)
+            if buyer is None:
+                raise HTTPException(404, "buyer not found; verify the buyer id and try again")
+            if not (
+                _buyer_api_key_matches(request, buyer)
+                or _operator_token_supplied_and_authorized(request)
+            ):
+                raise HTTPException(401, "valid buyer API key or operator token required")
+            old_api_key_set = bool(buyer.api_key)
+            api_key = _new_buyer_api_key()
+            buyer.api_key = api_key
+            await s.flush()
+            response.headers["Cache-Control"] = "no-store, private"
+            response.headers["Pragma"] = "no-cache"
+            return {
+                "buyer_id": str(buyer.id),
+                "api_key": api_key,
+                "api_key_set": True,
+                "old_api_key_set": old_api_key_set,
+                "rotated_at": datetime.now(UTC).isoformat(),
+                "warning": "Store this key now; it is returned once by this rotation response.",
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("buyer.api_key_rotate_failed", buyer_id=str(buyer_id), error=str(e))
+        raise HTTPException(500, "buyer API key could not be rotated; verify auth and retry") from e
+
+
 @app.patch("/v1/buyers/{buyer_id}")
 async def update_buyer(buyer_id: UUID, payload: BuyerUpdateRequest) -> dict[str, Any]:
     updates = payload.model_dump(exclude_unset=True)
+    requested_active_status = updates.get("status") in {
+        BuyerStatus.ACTIVE,
+        BuyerStatus.ACTIVE.value,
+    }
+    readiness_relevant_update = bool(BUYER_ACTIVATION_FIELDS.intersection(updates))
     if "exclusive_zips" in updates:
         await _assert_no_exclusive_zip_conflict(
             updates["exclusive_zips"], exclude_buyer_id=buyer_id
@@ -1474,6 +2573,21 @@ async def update_buyer(buyer_id: UUID, payload: BuyerUpdateRequest) -> dict[str,
                     buyer.follow_up_date = value
                 elif key == "low_balance_threshold":
                     buyer.low_balance_threshold_cents = _decimal_to_cents(value)
+            if requested_active_status:
+                await _assert_no_exclusive_zip_conflict(
+                    buyer.exclusive_zips or [], exclude_buyer_id=buyer_id
+                )
+            readiness = _buyer_onboarding_readiness(buyer)
+            if (
+                buyer.status == BuyerStatus.ACTIVE.value
+                and readiness_relevant_update
+                and not readiness["autopilot_ready"]
+            ):
+                missing = ", ".join(readiness["missing_requirements"])
+                raise HTTPException(
+                    409,
+                    f"buyer is not activation ready; missing requirements: {missing}",
+                )
             await s.flush()
             return _buyer_response(buyer)
     except HTTPException:
@@ -1498,6 +2612,88 @@ async def get_wallet(buyer_id: UUID, request: Request) -> dict[str, Any]:
         log.error("buyer.wallet_lookup_failed", buyer_id=str(buyer_id), error=str(e))
         raise HTTPException(
             500, "wallet could not be loaded; retry after checking database health"
+        ) from e
+
+
+@app.get("/v1/buyers/{buyer_id}/wallet/reconciliation")
+async def get_wallet_reconciliation(buyer_id: UUID, request: Request) -> dict[str, Any]:
+    try:
+        async with get_session() as s:
+            buyer = await s.get(BuyerRow, buyer_id)
+            if buyer is None:
+                raise HTTPException(404, "buyer not found; verify the buyer id and try again")
+            _require_buyer_api_key(request, buyer)
+            ledger_total = await s.scalar(
+                select(func.coalesce(func.sum(BillingEvent.amount_cents), 0)).where(
+                    BillingEvent.buyer_id == buyer_id
+                )
+            )
+            recent_funding_events = (
+                (
+                    await s.execute(
+                        select(BillingEvent)
+                        .where(
+                            BillingEvent.buyer_id == buyer_id,
+                            BillingEvent.event_type == "deposit.added",
+                        )
+                        .order_by(BillingEvent.created_at.desc())
+                        .limit(10)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return _wallet_reconciliation_payload(
+                buyer,
+                ledger_total_cents=int(ledger_total or 0),
+                recent_funding_events=recent_funding_events,
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("buyer.wallet_reconciliation_failed", buyer_id=str(buyer_id), error=str(e))
+        raise HTTPException(
+            500, "wallet reconciliation could not be loaded; retry after checking database health"
+        ) from e
+
+
+@app.post("/v1/buyers/{buyer_id}/wallet/refill-intents")
+async def create_wallet_refill_intent(
+    buyer_id: UUID, payload: WalletRefillIntentRequest
+) -> dict[str, Any]:
+    decision = _payment_provider_decision(
+        payload.provider, action="create buyer wallet refill intent"
+    )
+    if not decision.allowed:
+        raise HTTPException(
+            403,
+            {
+                "message": "payment provider action is not approved",
+                "provider_gate": _provider_decision_response(decision),
+                "approval_packet": _payment_approval_packet(),
+            },
+        )
+    if payload.provider != "local":
+        raise HTTPException(
+            403,
+            {
+                "message": "live payment provider checkout requires signed provider integration before use",
+                "provider_gate": _provider_decision_response(decision),
+                "approval_packet": _payment_approval_packet(),
+            },
+        )
+    try:
+        async with get_session() as s:
+            buyer = await s.get(BuyerRow, buyer_id)
+            if buyer is None:
+                raise HTTPException(404, "buyer not found; verify the buyer id and try again")
+            return _wallet_refill_intent_response(buyer, payload, decision)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("buyer.wallet_refill_intent_failed", buyer_id=str(buyer_id), error=str(e))
+        raise HTTPException(
+            500, "wallet refill intent could not be created; retry after checking database health"
         ) from e
 
 
@@ -1530,8 +2726,125 @@ async def add_deposit(buyer_id: UUID, payload: DepositRequest, request: Request)
         ) from e
 
 
+@app.post("/v1/payments/refill-events")
+async def ingest_payment_refill_event(payload: PaymentRefillEventRequest) -> dict[str, Any]:
+    decision = _payment_provider_decision(
+        payload.provider, action="credit buyer wallet from payment event"
+    )
+    if not decision.allowed:
+        raise HTTPException(
+            403,
+            {
+                "message": "payment provider action is not approved",
+                "provider_gate": _provider_decision_response(decision),
+                "approval_packet": _payment_approval_packet(),
+            },
+        )
+    if payload.provider != "local":
+        raise HTTPException(
+            403,
+            {
+                "message": "live payment events require signed Stripe webhook verification before wallet crediting",
+                "provider_gate": _provider_decision_response(decision),
+                "approval_packet": _payment_approval_packet(),
+            },
+        )
+    if payload.status not in PAYMENT_CREDITABLE_STATUSES:
+        raise HTTPException(409, "payment event status is not creditable")
+    try:
+        conflict_detail: str | None = None
+        async with get_session() as s:
+            await _lock_payment_refill_idempotency_scope(s, payload)
+            buyer = await s.get(BuyerRow, payload.buyer_id, with_for_update=True)
+            if buyer is None:
+                raise HTTPException(404, "buyer not found; verify the buyer id and try again")
+            existing = await _existing_payment_refill_event(
+                s,
+                provider=payload.provider,
+                buyer_id=payload.buyer_id,
+                provider_event_id=payload.provider_event_id,
+                payment_intent_id=payload.payment_intent_id,
+                idempotency_key=payload.idempotency_key,
+            )
+            if existing is not None:
+                event_matches = _payment_refill_event_matches(existing, payload)
+                webhook_event = None
+                if existing.external_event_id != payload.provider_event_id:
+                    webhook_event = await _record_payment_refill_webhook_audit(
+                        s, payload, status="ignored" if event_matches else "failed"
+                    )
+                if not event_matches:
+                    conflict_detail = (
+                        "payment refill idempotency conflict; reconcile wallet ledger "
+                        "before retrying"
+                    )
+                else:
+                    return _payment_refill_event_response(
+                        buyer=buyer,
+                        payload=payload,
+                        decision=decision,
+                        billing_event=existing,
+                        idempotent_replay=True,
+                        webhook_event=webhook_event,
+                    )
+
+            if existing is None:
+                webhook_event = await _record_payment_refill_webhook_audit(
+                    s, payload, status="processed"
+                )
+
+                amount = Decimal(payload.amount_cents) / Decimal(100)
+                buyer.deposit_balance += amount
+                billing_event = BillingEvent(
+                    buyer_id=buyer.id,
+                    lead_id=None,
+                    event_type="deposit.added",
+                    amount_cents=payload.amount_cents,
+                    external_event_id=payload.provider_event_id,
+                    metadata_json={
+                        "source": "payment_refill_event",
+                        "payment_provider": payload.provider,
+                        "payment_event_id": payload.provider_event_id,
+                        "payment_intent_id": payload.payment_intent_id,
+                        "payment_webhook_event_id": str(webhook_event.id),
+                        "idempotency_key": payload.idempotency_key,
+                        "currency": payload.currency,
+                        "local_simulation": payload.provider == "local",
+                        "metadata": _safe_payment_metadata(payload.metadata),
+                    },
+                )
+                s.add(billing_event)
+                await s.flush()
+                return _payment_refill_event_response(
+                    buyer=buyer,
+                    payload=payload,
+                    decision=decision,
+                    billing_event=billing_event,
+                    idempotent_replay=False,
+                    webhook_event=webhook_event,
+                )
+        if conflict_detail is not None:
+            raise HTTPException(409, conflict_detail)
+        raise RuntimeError("payment refill event reached an unreachable state")
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error(
+            "payments.refill_event_failed",
+            buyer_id=str(payload.buyer_id),
+            provider=payload.provider,
+            provider_event_id=payload.provider_event_id,
+            error=str(e),
+        )
+        raise HTTPException(
+            500, "payment refill event could not be recorded; reconcile before retrying"
+        ) from e
+
+
 @app.post("/v1/leads/{lead_id}/return")
-async def return_lead(lead_id: UUID, payload: ReturnLeadRequest, request: Request) -> dict[str, Any]:
+async def return_lead(
+    lead_id: UUID, payload: ReturnLeadRequest, request: Request
+) -> dict[str, Any]:
     try:
         async with get_session() as s:
             result = (
@@ -1577,7 +2890,7 @@ async def return_lead(lead_id: UUID, payload: ReturnLeadRequest, request: Reques
                     f"active return request already exists: {active_request.id}",
                 )
 
-            request = ReturnRequest(
+            return_request = ReturnRequest(
                 post_result_id=result.id,
                 lead_id=lead_id,
                 buyer_id=result.buyer_id,
@@ -1587,7 +2900,8 @@ async def return_lead(lead_id: UUID, payload: ReturnLeadRequest, request: Reques
                 status="pending_review",
                 requested_by=payload.requested_by,
             )
-            s.add(request)
+            s.add(return_request)
+            await s.flush()
             current_state = await latest_state(s, lead_id) or PipelineState.SOLD
             await record_transition(
                 s,
@@ -1597,22 +2911,50 @@ async def return_lead(lead_id: UUID, payload: ReturnLeadRequest, request: Reques
                 event_type="lead.return_requested",
                 task_name="buyer.return_request",
                 status="pending_review",
+                idempotency_key=build_transition_idempotency_key(
+                    lead_id=lead_id,
+                    from_state=None,
+                    to_state=current_state,
+                    event_type="lead.return_requested",
+                    task_name="buyer.return_request",
+                    version=f"return:{return_request.id}:requested",
+                ),
                 payload={
-                    "return_request_id": str(request.id),
+                    "return_request_id": str(return_request.id),
                     "post_result_id": str(result.id),
                     "buyer_id": str(result.buyer_id),
                     "reason": payload.reason,
-                    "notes": payload.notes,
+                    "notes_present": bool(payload.notes),
                     "evidence_keys": sorted(payload.evidence.keys()),
                 },
             )
-            await s.flush()
+            auto_action = None
+            if payload.reason in AUTO_RETURN_APPROVE_REASONS:
+                auto_action = "approve"
+            elif payload.reason in AUTO_RETURN_REJECT_REASONS:
+                auto_action = "reject"
+            if auto_action:
+                decision = await _apply_return_decision(
+                    s,
+                    return_request,
+                    result,
+                    buyer,
+                    action=auto_action,
+                    operator="autopilot-policy",
+                    notes=f"Auto-{auto_action} by {AUTOPILOT_POLICY_VERSION} for reason {payload.reason}.",
+                    task_name="autopilot.return_policy",
+                    policy_version=AUTOPILOT_POLICY_VERSION,
+                )
+                decision["return_reason"] = payload.reason
+                return decision
             return {
                 "lead_id": str(lead_id),
                 "buyer_id": str(result.buyer_id),
-                "return_request_id": str(request.id),
-                "status": request.status,
+                "return_request_id": str(return_request.id),
+                "status": return_request.status,
                 "credited_cents": 0,
+                "auto_decided": False,
+                "policy_version": AUTOPILOT_POLICY_VERSION,
                 "return_reason": payload.reason,
             }
     except HTTPException:
@@ -1642,72 +2984,16 @@ async def review_return_request(
             if buyer is None:
                 raise HTTPException(404, "buyer for this return request was not found")
 
-            request.reviewed_by = payload.operator
-            request.review_notes = payload.notes
-            request.reviewed_at = datetime.now(UTC)
-            credited_cents = 0
-            event_type = f"lead.return_{payload.action}ed"
-            if payload.action == "hold":
-                request.status = "held"
-                event_type = "lead.return_held"
-            elif payload.action == "reject":
-                request.status = "rejected"
-            else:
-                event_type = "lead.return_approved"
-                if result.returned:
-                    raise HTTPException(409, "lead sale has already been credited")
-                credit = Decimal(result.bid_cents) / Decimal(100)
-                buyer.deposit_balance += credit
-                buyer.lifetime_spend -= credit
-                result.returned = True
-                result.return_reason = request.reason
-                request.status = "approved"
-                credited_cents = result.bid_cents
-                s.add(
-                    BillingEvent(
-                        buyer_id=request.buyer_id,
-                        lead_id=request.lead_id,
-                        event_type="lead.returned",
-                        amount_cents=result.bid_cents,
-                        metadata_json={
-                            "return_request_id": str(request.id),
-                            "post_result_id": str(result.id),
-                            "reason": request.reason,
-                            "notes": request.notes,
-                            "review_notes": payload.notes,
-                            "operator": payload.operator,
-                        },
-                    )
-                )
-
-            current_state = await latest_state(s, request.lead_id) or PipelineState.SOLD
-            await record_transition(
+            return await _apply_return_decision(
                 s,
-                lead_id=request.lead_id,
-                from_state=None,
-                to_state=current_state,
-                event_type=event_type,
+                request,
+                result,
+                buyer,
+                action=payload.action,
+                operator=payload.operator,
+                notes=payload.notes,
                 task_name="admin.return_review",
-                status=request.status,
-                payload={
-                    "return_request_id": str(request.id),
-                    "post_result_id": str(result.id),
-                    "buyer_id": str(request.buyer_id),
-                    "reason": request.reason,
-                    "action": payload.action,
-                    "operator": payload.operator,
-                    "credited_cents": credited_cents,
-                },
             )
-            await s.flush()
-            return {
-                "return_request_id": str(request.id),
-                "lead_id": str(request.lead_id),
-                "buyer_id": str(request.buyer_id),
-                "status": request.status,
-                "credited_cents": credited_cents,
-                "wallet": _buyer_wallet_response(buyer),
-            }
     except HTTPException:
         raise
     except Exception as e:
@@ -1775,21 +3061,18 @@ async def buyer_daily_report(buyer_id: UUID, request: Request) -> dict[str, Any]
                 .all()
             )
             delivered_lead_details = (
-                (
-                    await s.execute(
-                        select(PostResult, LeadRow)
-                        .join(LeadRow, LeadRow.id == PostResult.lead_id)
-                        .where(
-                            PostResult.buyer_id == buyer_id,
-                            PostResult.delivered.is_(True),
-                            PostResult.created_at >= day_start,
-                        )
-                        .order_by(PostResult.created_at.desc())
-                        .limit(25)
+                await s.execute(
+                    select(PostResult, LeadRow)
+                    .join(LeadRow, LeadRow.id == PostResult.lead_id)
+                    .where(
+                        PostResult.buyer_id == buyer_id,
+                        PostResult.delivered.is_(True),
+                        PostResult.created_at >= day_start,
                     )
+                    .order_by(PostResult.created_at.desc())
+                    .limit(25)
                 )
-                .all()
-            )
+            ).all()
 
             balance_cents = _decimal_to_cents(buyer.deposit_balance)
             threshold_cents = _decimal_to_cents(buyer.low_balance_threshold)
@@ -1828,7 +3111,7 @@ async def buyer_daily_report(buyer_id: UUID, request: Request) -> dict[str, Any]
                 },
                 "wallet": {
                     "low_balance_threshold_cents": threshold_cents,
-                    "below_threshold": balance_cents < threshold_cents,
+                    "below_threshold": balance_cents <= threshold_cents,
                     "recommended_refill_cents": refill_cents,
                 },
                 "delivered_lead_details": delivered_lead_detail_rows,
@@ -1893,7 +3176,7 @@ def _money_metric(
     }
 
 
-def _sum_agent_cost(payloads: list[dict[str, Any]]) -> float:
+def _sum_agent_cost(payloads: Sequence[Mapping[str, Any]]) -> float:
     total = 0.0
     for payload in payloads:
         try:
@@ -1911,12 +3194,1406 @@ def _recommended_refill_cents(
     delivered_today: int,
     gross_spend_today_cents: int,
 ) -> int:
-    if balance_cents >= threshold_cents:
+    if balance_cents > threshold_cents:
         return 0
     average_bid_cents = gross_spend_today_cents // delivered_today if delivered_today else 0
     three_lead_buffer_cents = average_bid_cents * 3
     monthly_buffer_cents = monthly_budget_cents // 4
     return max(threshold_cents - balance_cents, three_lead_buffer_cents, monthly_buffer_cents)
+
+
+def _ads_offline_conversion_rows(
+    conversion_rows: Sequence[Any], conversion_name: str
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    sorted_rows = sorted(
+        conversion_rows,
+        key=lambda item: _ads_conversion_datetime(item[0], item[1]),
+        reverse=True,
+    )
+    for lead, post in sorted_rows:
+        gclid = str(getattr(lead, "google_click_id", "") or "").strip()
+        if not gclid or not _is_valid_ads_click_id(gclid):
+            continue
+        dedupe_key = (str(lead.id), gclid)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        bid_cents = int(getattr(post, "bid_cents", 0) or 0)
+        if bid_cents <= 0:
+            continue
+        conversion_time = _ads_conversion_datetime(lead, post)
+        rows.append(
+            {
+                "Google Click ID": gclid,
+                "Conversion Name": conversion_name,
+                "Conversion Time": _format_ads_conversion_time(conversion_time),
+                "Conversion Value": f"{bid_cents / 100:.2f}",
+                "Conversion Currency": "USD",
+                "Order ID": f"lead:{lead.id}",
+                "conversion_value_cents": bid_cents,
+                "redacted_context": {
+                    "lead_id": str(lead.id),
+                    "campaign_id": getattr(lead, "campaign_id", None),
+                    "campaign_source": getattr(lead, "campaign_source", None),
+                    "state": getattr(lead, "state", None),
+                    "zip": getattr(lead, "zip", None),
+                    "requested_service": getattr(lead, "requested_service", None),
+                    "lead_class": getattr(lead, "lead_class", None),
+                    "post_result_id": str(post.id),
+                },
+            }
+        )
+    return rows
+
+
+def _is_valid_ads_click_id(value: str) -> bool:
+    return bool(ADS_CLICK_ID_RE.fullmatch(value))
+
+
+def _normalize_ads_conversion_name(value: str) -> str:
+    normalized = value.strip()
+    if not normalized or not ADS_CONVERSION_NAME_RE.fullmatch(normalized):
+        raise HTTPException(
+            400,
+            "conversion_name must start with a letter or number and contain only safe CSV characters",
+        )
+    return normalized
+
+
+def _ads_conversion_datetime(lead: Any, post: Any) -> datetime:
+    value = getattr(post, "created_at", None) or getattr(lead, "created_at", None)
+    if not isinstance(value, datetime):
+        return datetime.min.replace(tzinfo=UTC)
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _format_ads_conversion_time(value: datetime) -> str:
+    utc_value = value.astimezone(UTC)
+    raw = utc_value.strftime("%Y-%m-%d %H:%M:%S%z")
+    return f"{raw[:-2]}:{raw[-2:]}"
+
+
+def _ads_offline_conversion_csv(rows: Sequence[Mapping[str, Any]]) -> str:
+    buffer = StringIO()
+    writer = csv.DictWriter(
+        buffer, fieldnames=ADS_OFFLINE_CONVERSION_COLUMNS, extrasaction="ignore"
+    )
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(row)
+    return buffer.getvalue()
+
+
+def _ads_spend_guardrail_preview(
+    *,
+    row_count: int,
+    attributed_conversion_value_cents: int,
+    campaign_budget_cents: int,
+    planned_spend_cents: int,
+    wallet_runway_cents: int,
+    live_ads_approved: bool,
+) -> dict[str, Any]:
+    planned_spend_within_budget = planned_spend_cents <= campaign_budget_cents
+    wallet_runway_ready = wallet_runway_cents >= campaign_budget_cents
+    conversions_present = row_count > 0
+    value_covers_planned_spend = (
+        attributed_conversion_value_cents >= planned_spend_cents
+        if planned_spend_cents > 0
+        else conversions_present
+    )
+    dry_run_ready = (
+        conversions_present
+        and planned_spend_within_budget
+        and wallet_runway_ready
+        and value_covers_planned_spend
+    )
+    live_upload_ready = dry_run_ready and live_ads_approved
+    actions: list[str] = []
+    if not conversions_present:
+        actions.append("collect_attributed_sold_lead_evidence")
+    if not planned_spend_within_budget:
+        actions.append("reduce_planned_spend_to_campaign_budget")
+    if not wallet_runway_ready:
+        actions.append("fund_buyer_wallets_before_spend")
+    if not value_covers_planned_spend:
+        actions.append("review_unit_economics_before_spend")
+    if not live_ads_approved:
+        actions.append("approval_required_before_live_ads_upload")
+    return {
+        "decision": "live_upload_ready"
+        if live_upload_ready
+        else "dry_run_ready"
+        if dry_run_ready
+        else "not_ready",
+        "dry_run_ready": dry_run_ready,
+        "live_upload_ready": live_upload_ready,
+        "checks": {
+            "conversions_present": conversions_present,
+            "planned_spend_within_budget": planned_spend_within_budget,
+            "wallet_runway_covers_campaign_budget": wallet_runway_ready,
+            "attributed_value_covers_planned_spend": value_covers_planned_spend,
+            "live_ads_approved": live_ads_approved,
+        },
+        "metrics": {
+            "row_count": row_count,
+            "attributed_conversion_value_cents": attributed_conversion_value_cents,
+            "campaign_budget_cents": campaign_budget_cents,
+            "planned_spend_cents": planned_spend_cents,
+            "wallet_runway_cents": wallet_runway_cents,
+        },
+        "recommended_actions": actions,
+    }
+
+
+def _payment_provider_decision(provider: str, *, action: str):
+    live_provider = provider != "local"
+    return provider_decision(
+        ProviderArea.PAYMENTS,
+        action=action,
+        requires_live_approval=live_provider,
+        live_money=live_provider,
+    )
+
+
+def _provider_decision_response(decision: Any) -> dict[str, Any]:
+    return {
+        "area": decision.area.value,
+        "allowed": decision.allowed,
+        "reason": decision.reason,
+        "action": decision.action,
+        "external": decision.external,
+        "live_mode": decision.live_mode,
+        "target_url": decision.target_url,
+    }
+
+
+def _payment_approval_packet() -> dict[str, Any]:
+    approved = provider_live_approved(ProviderArea.PAYMENTS)
+    return {
+        "status": "approved" if approved else "approval_required",
+        "required": not approved,
+        "requested_action": "Approve Stripe sandbox/live payment provider setup for buyer wallet refills.",
+        "scope": "Create Stripe Checkout or PaymentIntent sessions and accept signed Stripe webhook credits for buyer wallet deposits.",
+        "required_env": [
+            "STORMLEAD_APPROVE_PAYMENTS_LIVE=true",
+            "STRIPE_SECRET_KEY=<local secret store>",
+            "STRIPE_WEBHOOK_SECRET=<local secret store>",
+        ],
+        "risk": "Incorrect live payment setup can charge buyers or credit wallets without settled funds.",
+        "safe_alternative": "Use provider=local refill intents plus POST /v1/payments/refill-events with synthetic local events.",
+        "rollback": "Pause payments with STORMLEAD_PAUSE_PAYMENTS=true and reconcile billing_events against buyer.deposit_balance before re-enabling routing.",
+    }
+
+
+def _refill_idempotency_key(
+    *, buyer_id: UUID, amount_cents: int, currency: str, supplied: str | None
+) -> str:
+    scope = f"buyer-wallet-refill:{buyer_id}:{amount_cents}:{currency.lower()}"
+    return f"{scope}:{supplied}" if supplied else scope
+
+
+def _payment_intent_id(provider: str, idempotency_key: str) -> str:
+    digest = hashlib.sha256(f"{provider}:{idempotency_key}".encode()).hexdigest()[:24]
+    prefix = "local_pi" if provider == "local" else f"{provider}_pi"
+    return f"{prefix}_{digest}"
+
+
+def _wallet_refill_intent_response(
+    buyer: BuyerRow, payload: WalletRefillIntentRequest, decision: Any
+) -> dict[str, Any]:
+    idempotency_key = _refill_idempotency_key(
+        buyer_id=buyer.id,
+        amount_cents=payload.amount_cents,
+        currency=payload.currency,
+        supplied=payload.idempotency_key,
+    )
+    payment_intent_id = _payment_intent_id(payload.provider, idempotency_key)
+    event_payload = {
+        "provider": payload.provider,
+        "provider_event_id": f"evt_{payment_intent_id}",
+        "payment_intent_id": payment_intent_id,
+        "buyer_id": str(buyer.id),
+        "amount_cents": payload.amount_cents,
+        "currency": payload.currency,
+        "status": "succeeded",
+        "idempotency_key": idempotency_key,
+        "metadata": {"description": payload.description or "buyer wallet refill"},
+    }
+    return {
+        "buyer_id": str(buyer.id),
+        "provider": payload.provider,
+        "mode": "local_simulation" if payload.provider == "local" else "live_provider",
+        "payment_intent_id": payment_intent_id,
+        "amount_cents": payload.amount_cents,
+        "currency": payload.currency,
+        "status": "requires_refill_event",
+        "idempotency_key": idempotency_key,
+        "provider_gate": _provider_decision_response(decision),
+        "live_payment_approval": _payment_approval_packet(),
+        "checkout_contract": {
+            "type": "local_refill_event"
+            if payload.provider == "local"
+            else "stripe_checkout_pending",
+            "live_checkout_url": None,
+            "would_contact_payment_provider": False,
+            "webhook_endpoint": "/v1/payments/refill-events",
+            "event_payload": event_payload if payload.provider == "local" else None,
+            "operator_steps": [
+                "Collect or confirm the manual buyer deposit outside StormLead.",
+                "Post the synthetic local refill event payload only after manual funds are confirmed.",
+                "Do not create Stripe Checkout sessions or charge buyers without explicit payment approval.",
+            ],
+        },
+        "buyer": _buyer_wallet_response(buyer),
+    }
+
+
+def _safe_payment_metadata(metadata: Mapping[str, Any]) -> dict[str, str]:
+    safe: dict[str, str] = {}
+    for key, value in metadata.items():
+        normalized_key = str(key).strip()[:64]
+        if not normalized_key:
+            continue
+        lowered = normalized_key.lower()
+        if any(keyword in lowered for keyword in PAYMENT_SENSITIVE_METADATA_KEYWORDS):
+            safe[normalized_key] = "[redacted]"
+            continue
+        if isinstance(value, str | int | float | bool) or value is None:
+            value_text = "" if value is None else str(value)
+        else:
+            value_text = json.dumps(value, default=str, sort_keys=True)
+        lowered_value = value_text.lower()
+        if any(marker in lowered_value for marker in PAYMENT_SENSITIVE_METADATA_VALUE_MARKERS):
+            safe[normalized_key] = "[redacted]"
+            continue
+        safe[normalized_key] = value_text[:512]
+    return safe
+
+
+def _payment_refill_event_audit_payload(
+    payload: PaymentRefillEventRequest,
+) -> dict[str, Any]:
+    return {
+        "provider": payload.provider,
+        "provider_event_id": payload.provider_event_id,
+        "payment_intent_id": payload.payment_intent_id,
+        "buyer_id": str(payload.buyer_id),
+        "amount_cents": payload.amount_cents,
+        "currency": payload.currency,
+        "status": payload.status,
+        "idempotency_key": payload.idempotency_key,
+        "local_simulation": payload.provider == "local",
+        "metadata": _safe_payment_metadata(payload.metadata),
+    }
+
+
+def _canonical_payload_sha256(payload: Mapping[str, Any]) -> str:
+    canonical_payload = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()
+
+
+async def _record_payment_refill_webhook_audit(
+    s: Any, payload: PaymentRefillEventRequest, *, status: str
+) -> PaymentWebhookEvent:
+    audit_payload = _payment_refill_event_audit_payload(payload)
+    webhook_event = PaymentWebhookEvent(
+        provider=payload.provider,
+        external_event_id=payload.provider_event_id,
+        event_type=f"wallet.refill.{payload.status}",
+        status=status,
+        payload_sha256=_canonical_payload_sha256(audit_payload),
+        payload_json=audit_payload,
+    )
+    s.add(webhook_event)
+    await s.flush()
+    return webhook_event
+
+
+def _payment_refill_lock_keys(payload: PaymentRefillEventRequest) -> list[str]:
+    base = f"wallet-refill:{payload.provider}"
+    keys = [
+        f"{base}:event:{payload.provider_event_id}",
+        f"{base}:intent:{payload.payment_intent_id}",
+    ]
+    if payload.idempotency_key:
+        keys.append(f"{base}:idempotency:{payload.idempotency_key}")
+    return sorted(set(keys))
+
+
+async def _lock_payment_refill_idempotency_scope(
+    s: Any, payload: PaymentRefillEventRequest
+) -> None:
+    lock_statement = text("SELECT pg_advisory_xact_lock(hashtext(:lock_key)::bigint)")
+    for lock_key in _payment_refill_lock_keys(payload):
+        await s.execute(lock_statement, {"lock_key": lock_key})
+
+
+async def _existing_payment_refill_event(
+    s: Any,
+    *,
+    provider: str,
+    buyer_id: UUID,
+    provider_event_id: str,
+    payment_intent_id: str,
+    idempotency_key: str | None,
+) -> BillingEvent | None:
+    duplicate_match = or_(
+        BillingEvent.external_event_id == provider_event_id,
+        BillingEvent.metadata_json["payment_event_id"].as_string() == provider_event_id,
+        BillingEvent.metadata_json["payment_intent_id"].as_string() == payment_intent_id,
+    )
+    if idempotency_key:
+        duplicate_match = or_(
+            duplicate_match,
+            and_(
+                BillingEvent.buyer_id == buyer_id,
+                BillingEvent.metadata_json["idempotency_key"].as_string() == idempotency_key,
+            ),
+        )
+    result = await s.execute(
+        select(BillingEvent)
+        .where(
+            BillingEvent.event_type == "deposit.added",
+            BillingEvent.metadata_json["payment_provider"].as_string() == provider,
+            duplicate_match,
+        )
+        .order_by(BillingEvent.created_at.desc())
+        .limit(1)
+    )
+    return result.scalars().first()
+
+
+def _payment_refill_event_matches(
+    existing: BillingEvent, payload: PaymentRefillEventRequest
+) -> bool:
+    metadata = existing.metadata_json or {}
+    return (
+        existing.buyer_id == payload.buyer_id
+        and existing.amount_cents == payload.amount_cents
+        and metadata.get("currency") == payload.currency
+        and metadata.get("payment_provider") == payload.provider
+        and metadata.get("payment_intent_id") == payload.payment_intent_id
+        and (
+            metadata.get("payment_event_id") == payload.provider_event_id
+            or metadata.get("payment_intent_id") == payload.payment_intent_id
+            or (
+                payload.idempotency_key is not None
+                and metadata.get("idempotency_key") == payload.idempotency_key
+            )
+        )
+    )
+
+
+def _payment_refill_event_response(
+    *,
+    buyer: BuyerRow,
+    payload: PaymentRefillEventRequest,
+    decision: Any,
+    billing_event: BillingEvent,
+    idempotent_replay: bool,
+    webhook_event: PaymentWebhookEvent | None = None,
+) -> dict[str, Any]:
+    metadata = billing_event.metadata_json or {}
+    webhook_event_id = (
+        str(webhook_event.id)
+        if webhook_event is not None
+        else metadata.get("payment_webhook_event_id")
+    )
+    return {
+        "buyer_id": str(buyer.id),
+        "provider": payload.provider,
+        "provider_event_id": payload.provider_event_id,
+        "external_event_id": billing_event.external_event_id,
+        "payment_intent_id": payload.payment_intent_id,
+        "amount_cents": payload.amount_cents,
+        "currency": payload.currency,
+        "status": "duplicate_ignored" if idempotent_replay else "credited",
+        "idempotent_replay": idempotent_replay,
+        "billing_event_id": str(billing_event.id),
+        "payment_webhook_event_id": webhook_event_id,
+        "payment_webhook_event_status": (
+            webhook_event.status
+            if webhook_event is not None
+            else "processed"
+            if webhook_event_id
+            else None
+        ),
+        "provider_gate": _provider_decision_response(decision),
+        "buyer": _buyer_wallet_response(buyer),
+    }
+
+
+def _billing_event_summary(event: BillingEvent) -> dict[str, Any]:
+    metadata = event.metadata_json or {}
+    return {
+        "billing_event_id": str(event.id),
+        "event_type": event.event_type,
+        "amount_cents": event.amount_cents,
+        "created_at": event.created_at.isoformat() if event.created_at else None,
+        "external_event_id": event.external_event_id,
+        "payment_provider": metadata.get("payment_provider"),
+        "payment_event_id": metadata.get("payment_event_id"),
+        "payment_intent_id": metadata.get("payment_intent_id"),
+        "source": metadata.get("source"),
+    }
+
+
+def _wallet_reconciliation_payload(
+    buyer: BuyerRow,
+    *,
+    ledger_total_cents: int,
+    recent_funding_events: Sequence[BillingEvent],
+) -> dict[str, Any]:
+    balance_cents = _decimal_to_cents(buyer.deposit_balance)
+    delta_cents = balance_cents - ledger_total_cents
+    return {
+        "buyer": _buyer_wallet_response(buyer),
+        "ledger": {
+            "signed_total_cents": ledger_total_cents,
+            "mutable_balance_cents": balance_cents,
+            "delta_cents": delta_cents,
+            "reconciled": delta_cents == 0,
+            "scope": "billing_events signed amount total compared with buyers.deposit_balance",
+            "recent_funding_events": [
+                _billing_event_summary(event) for event in recent_funding_events
+            ],
+        },
+        "payment_readiness": {
+            "local_refills_ready": True,
+            "live_payments_approved": provider_live_approved(ProviderArea.PAYMENTS),
+            "approval_packet": _payment_approval_packet(),
+        },
+    }
+
+
+def _age_minutes(created_at: datetime | None) -> int:
+    if created_at is None:
+        return 0
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=UTC)
+    return max(0, int((datetime.now(UTC) - created_at).total_seconds() // 60))
+
+
+def _transition_reason(transition: LeadStateTransition | None) -> str | None:
+    if transition is None or not isinstance(transition.payload_json, dict):
+        return None
+    reason = transition.payload_json.get("reason")
+    return str(reason) if reason else None
+
+
+def _autopilot_exclusion_reasons(
+    lead: LeadRow, latest: LeadStateTransition | None, posts: list[PostResult]
+) -> list[str]:
+    reasons = []
+    if not (lead.consent_text or "").strip():
+        reasons.append("consent_missing")
+    if not (lead.phone_e164 or "").startswith("+"):
+        reasons.append("invalid_contact")
+    if lead.blocked_for_fraud:
+        reasons.append("fraud_signal")
+    if set(lead.safety_flags or []) & {
+        "power_line",
+        "injury",
+        "active_danger",
+        "roof_impact",
+        "structure_impact",
+    }:
+        reasons.append("safety_review_required")
+    if (lead.campaign_source or "").lower() in {
+        "google_lsa",
+        "local_services_ads",
+        "google_local_services_ads",
+    }:
+        reasons.append("restricted_source_no_resale")
+    if lead.hold_for_review or lead.lead_class in {"c", "d"}:
+        reasons.append("human_review_required")
+    if latest is not None and latest.status not in {"succeeded", "reviewed"}:
+        reasons.append("workflow_pending_or_failed")
+    if latest is not None and latest.event_type == "lead.unsold":
+        reason = _transition_reason(latest)
+        if reason in AUTOPILOT_UNSELLABLE_REASONS:
+            reasons.append("no_buyer_coverage")
+    if any(not post.delivered for post in posts):
+        reasons.append("delivery_failure")
+    return sorted(set(reasons))
+
+
+def _buyer_onboarding_readiness(buyer: BuyerRow) -> dict[str, Any]:
+    return buyer_activation_readiness(buyer)
+
+
+def _buyer_sandbox_certification_response(buyer: BuyerRow) -> dict[str, Any]:
+    readiness = _buyer_onboarding_readiness(buyer)
+    required = (
+        "service_ready",
+        "zip_ready",
+        "pricing_ready",
+        "webhook_ready",
+        "api_key_ready",
+    )
+    missing = [name for name in required if not readiness.get(name)]
+    return {
+        "buyer_id": str(buyer.id),
+        "mode": "local_sandbox_only",
+        "certification_ready": not missing,
+        "missing_requirements": missing,
+        "would_contact_buyer": False,
+        "endpoint_under_test": buyer.webhook_url,
+        "local_execution_note": (
+            "This contract is dry-run evidence only; real buyer webhook calls remain "
+            "approval-gated until a specific buyer endpoint and synthetic certification action "
+            "are explicitly approved."
+        ),
+        "request_contract": {
+            "ping": {
+                "method": "POST",
+                "mode_header": "X-Stormlead-Mode: ping",
+                "content_type": "application/json",
+                "timeout_seconds": PING_TIMEOUT_S,
+                "body_fields": [
+                    "lead_id",
+                    "state",
+                    "zip",
+                    "requested_service",
+                    "damage_tier",
+                    "damage_type",
+                    "urgency",
+                    "damage_summary",
+                    "visible_risk_level",
+                    "estimated_job_size",
+                    "buyer_notes",
+                    "avm_band",
+                ],
+                "expected_response": {
+                    "accept": "boolean",
+                    "bid_cents": "positive integer when accept=true",
+                },
+            },
+            "post": {
+                "method": "POST",
+                "mode_header": "X-Stormlead-Mode: post",
+                "content_type": "application/json",
+                "timeout_seconds": POST_TIMEOUT_S,
+                "body_sections": ["lead", "address", "consent", "purchase"],
+                "required_headers": ["Idempotency-Key"],
+                "success_status_codes": "2xx",
+                "pii_boundary": "PII is sent only after the buyer wins and delivery is approved.",
+            },
+        },
+        "auth_contract": {
+            "scheme": "StormLead HMAC-SHA256",
+            "signed_headers": ["Webhook-Timestamp", "Webhook-Signature", "Webhook-Id"],
+            "secret_source": "buyer.webhook_secret",
+        },
+        "retry_policy": {
+            "retry_on_status_codes": [429, "5xx"],
+            "retry_on_errors": ["timeout", "network_error"],
+            "max_attempts": POST_MAX_ATTEMPTS,
+            "base_delay_seconds": POST_RETRY_BASE_DELAY_S,
+        },
+        "activation_dependency": {
+            "must_pass_before_active_delivery": True,
+            "activation_readiness": readiness,
+        },
+    }
+
+
+def _exception_item(
+    *,
+    exception_id: str,
+    kind: str,
+    severity: str,
+    reason: str,
+    entity_type: str,
+    created_at: datetime | None,
+    recommended_action: str,
+    lead: LeadRow | None = None,
+    buyer: BuyerRow | None = None,
+    return_request: ReturnRequest | None = None,
+    post: PostResult | None = None,
+    actions: list[str] | None = None,
+) -> dict[str, Any]:
+    market = None
+    service = None
+    if lead is not None:
+        market = f"{lead.state}-{lead.zip}"
+        service = lead.requested_service
+    return {
+        "exception_id": exception_id,
+        "kind": kind,
+        "severity": severity,
+        "reason": reason,
+        "entity_type": entity_type,
+        "lead_id": str(lead.id) if lead is not None else str(post.lead_id) if post else None,
+        "buyer_id": str(buyer.id) if buyer is not None else str(post.buyer_id) if post else None,
+        "return_request_id": str(return_request.id) if return_request is not None else None,
+        "post_result_id": str(post.id) if post is not None else None,
+        "market": market,
+        "service": service,
+        "created_at": created_at.isoformat() if created_at else None,
+        "sla_age_minutes": _age_minutes(created_at),
+        "recommended_action": recommended_action,
+        "actions": actions or [],
+    }
+
+
+def _post_result_looks_like_timeout(post: PostResult) -> bool:
+    if post.response_status_code is None:
+        return True
+    response_body = (post.response_body or "").lower()
+    return "timeout" in response_body or "timed out" in response_body
+
+
+def _buyer_timeout_cluster_exception_items(
+    failed_posts: Sequence[PostResult], *, now: datetime | None = None
+) -> list[dict[str, Any]]:
+    current_time = now or datetime.now(UTC)
+    cutoff = current_time - BUYER_TIMEOUT_CLUSTER_WINDOW
+    by_buyer: dict[UUID, list[PostResult]] = {}
+    for post in failed_posts:
+        created_at = _datetime_as_utc(post.created_at)
+        if created_at is None or created_at < cutoff or not _post_result_looks_like_timeout(post):
+            continue
+        by_buyer.setdefault(post.buyer_id, []).append(post)
+
+    items: list[dict[str, Any]] = []
+    for buyer_id, posts in by_buyer.items():
+        if len(posts) < BUYER_TIMEOUT_CLUSTER_MIN_FAILURES:
+            continue
+        created_candidates = [_datetime_as_utc(post.created_at) for post in posts]
+        created_values = [value for value in created_candidates if value is not None]
+        first_seen = min(created_values) if created_values else current_time
+        latest_seen = max(created_values) if created_values else current_time
+        items.append(
+            {
+                "exception_id": f"buyer:{buyer_id}:timeout_cluster",
+                "kind": "buyer_timeout_cluster",
+                "severity": "critical",
+                "reason": "buyer_timeout_cluster",
+                "entity_type": "buyer",
+                "lead_id": None,
+                "buyer_id": str(buyer_id),
+                "return_request_id": None,
+                "post_result_id": None,
+                "market": None,
+                "service": None,
+                "created_at": first_seen.isoformat(),
+                "sla_age_minutes": _age_minutes(first_seen),
+                "recommended_action": (
+                    f"Investigate {len(posts)} timeout-like post failures for this buyer "
+                    f"between {first_seen.isoformat()} and {latest_seen.isoformat()}; "
+                    "pause or reroute only after confirming local-only delivery safety."
+                ),
+                "actions": [],
+            }
+        )
+    return items
+
+
+def _parse_exception_created_at(value: Any) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _exception_uuid(value: Any) -> UUID | None:
+    if value in {None, ""}:
+        return None
+    if isinstance(value, UUID):
+        return value
+    return UUID(str(value))
+
+
+def _exception_queue_sla_due_at(item: Mapping[str, Any], now: datetime) -> datetime:
+    created_at = _parse_exception_created_at(item.get("created_at")) or now
+    severity = str(item.get("severity") or "warning")
+    return created_at + EXCEPTION_SLA_BY_SEVERITY.get(severity, timedelta(hours=24))
+
+
+def _exception_queue_payload(item: Mapping[str, Any], now: datetime) -> dict[str, Any]:
+    return {
+        "source": "computed_admin_autopilot_exceptions",
+        "source_exception_id": str(item["exception_id"]),
+        "policy_version": AUTOPILOT_POLICY_VERSION,
+        "synced_at": now.isoformat(),
+        "market": item.get("market"),
+        "service": item.get("service"),
+        "actions": item.get("actions") or [],
+        "sla_age_minutes": item.get("sla_age_minutes"),
+    }
+
+
+def _new_exception_queue_item(item: Mapping[str, Any], *, now: datetime) -> ExceptionQueueItem:
+    kind = str(item["kind"])
+    return ExceptionQueueItem(
+        kind=kind,
+        severity=str(item["severity"]),
+        status="open",
+        owner=EXCEPTION_OWNER_BY_KIND.get(kind, "ops-oncall"),
+        entity_type=str(item["entity_type"]),
+        lead_id=_exception_uuid(item.get("lead_id")),
+        buyer_id=_exception_uuid(item.get("buyer_id")),
+        return_request_id=_exception_uuid(item.get("return_request_id")),
+        post_result_id=_exception_uuid(item.get("post_result_id")),
+        reason=str(item["reason"]),
+        recommended_action=str(item["recommended_action"]),
+        idempotency_key=str(item["exception_id"]),
+        sla_due_at=_exception_queue_sla_due_at(item, now),
+        payload_json=_exception_queue_payload(item, now),
+    )
+
+
+def _refresh_exception_queue_item(
+    row: ExceptionQueueItem, item: Mapping[str, Any], *, now: datetime
+) -> None:
+    kind = str(item["kind"])
+    row.kind = kind
+    row.severity = str(item["severity"])
+    row.owner = EXCEPTION_OWNER_BY_KIND.get(kind, row.owner or "ops-oncall")
+    row.entity_type = str(item["entity_type"])
+    row.lead_id = _exception_uuid(item.get("lead_id"))
+    row.buyer_id = _exception_uuid(item.get("buyer_id"))
+    row.return_request_id = _exception_uuid(item.get("return_request_id"))
+    row.post_result_id = _exception_uuid(item.get("post_result_id"))
+    row.reason = str(item["reason"])
+    row.recommended_action = str(item["recommended_action"])
+    row.sla_due_at = _exception_queue_sla_due_at(item, now)
+    row.payload_json = _exception_queue_payload(item, now)
+    row.updated_at = now
+
+
+async def _sync_exception_queue_items(
+    s: Any, items: Sequence[Mapping[str, Any]], *, now: datetime | None = None
+) -> dict[str, int]:
+    sync_now = now or datetime.now(UTC)
+    summary = {
+        "inserted": 0,
+        "updated": 0,
+        "skipped_closed": 0,
+        "computed": len(items),
+    }
+    for item in items:
+        idempotency_key = str(item["exception_id"])
+        existing = (
+            (
+                await s.execute(
+                    select(ExceptionQueueItem)
+                    .where(ExceptionQueueItem.idempotency_key == idempotency_key)
+                    .limit(1)
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if existing is None:
+            s.add(_new_exception_queue_item(item, now=sync_now))
+            summary["inserted"] += 1
+            continue
+        if existing.status in {"resolved", "dismissed"}:
+            summary["skipped_closed"] += 1
+            continue
+        _refresh_exception_queue_item(existing, item, now=sync_now)
+        summary["updated"] += 1
+    if summary["inserted"] or summary["updated"]:
+        await s.flush()
+    return summary
+
+
+def _increment_count(counts: dict[str, int], key: str | None) -> None:
+    normalized = (key or "unassigned").strip() or "unassigned"
+    counts[normalized] = counts.get(normalized, 0) + 1
+
+
+def _datetime_as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _exception_queue_dashboard_summary(
+    rows: Sequence[ExceptionQueueItem], *, now: datetime | None = None
+) -> dict[str, Any]:
+    current_time = now or datetime.now(UTC)
+    by_status: dict[str, int] = {}
+    by_severity: dict[str, int] = {}
+    by_owner: dict[str, int] = {}
+    by_kind: dict[str, int] = {}
+    by_area: dict[str, int] = {}
+    oldest_sla_due_at: datetime | None = None
+    overdue_count = 0
+    active_rows = [row for row in rows if row.status in ACTIVE_EXCEPTION_QUEUE_STATUSES]
+    for row in active_rows:
+        kind = str(row.kind)
+        sla_due_at = _datetime_as_utc(row.sla_due_at)
+        _increment_count(by_status, str(row.status))
+        _increment_count(by_severity, str(row.severity))
+        _increment_count(by_owner, row.owner)
+        _increment_count(by_kind, kind)
+        _increment_count(by_area, EXCEPTION_DASHBOARD_AREA_BY_KIND.get(kind, "operations"))
+        if sla_due_at is not None:
+            if oldest_sla_due_at is None or sla_due_at < oldest_sla_due_at:
+                oldest_sla_due_at = sla_due_at
+            if sla_due_at <= current_time:
+                overdue_count += 1
+    return {
+        "schema_version": 1,
+        "policy_version": AUTOPILOT_POLICY_VERSION,
+        "source": "exception_queue",
+        "mode": "local_read_only",
+        "would_contact_provider": False,
+        "pii_redacted": True,
+        "active_count": len(active_rows),
+        "overdue_count": overdue_count,
+        "oldest_sla_due_at": oldest_sla_due_at.isoformat() if oldest_sla_due_at else None,
+        "by_status": by_status,
+        "by_severity": by_severity,
+        "by_owner": by_owner,
+        "by_kind": by_kind,
+        "by_area": by_area,
+    }
+
+
+def _budget_json_subset(payload: object, keys: Sequence[str]) -> dict[str, Any]:
+    if not isinstance(payload, Mapping):
+        return {}
+    return {key: payload.get(key) for key in keys if key in payload}
+
+
+def _budget_decision_flag(payload: object, key: str) -> bool:
+    if not isinstance(payload, Mapping):
+        return False
+    return payload.get(key) is True
+
+
+def _budget_action_summary_item(row: BudgetActionLog) -> dict[str, Any]:
+    created_at = _datetime_as_utc(row.created_at)
+    metrics = _budget_json_subset(
+        row.metrics_json,
+        [
+            "current_daily_budget_cents",
+            "proposed_daily_budget_cents",
+            "spend_cents",
+            "qualified_leads",
+            "cpl_cents",
+            "roas",
+            "sample_ready",
+            "cooldown_active",
+        ],
+    )
+    decision = _budget_json_subset(
+        row.decision_json,
+        [
+            "evaluation_date",
+            "max_daily_budget_cents",
+            "max_cpl_cents",
+            "min_roas",
+            "would_contact_ads_provider",
+            "would_mutate_ads_provider",
+            "would_spend_money",
+            "approval_required_before_live_ads_action",
+        ],
+    )
+    return {
+        "id": str(row.id),
+        "campaign_id": str(row.campaign_id),
+        "platform": row.platform,
+        "external_campaign_id": row.external_campaign_id,
+        "action": row.action,
+        "status": row.status,
+        "approval_required": bool(row.approval_required),
+        "reason": row.reason,
+        "created_at": created_at.isoformat() if created_at else None,
+        "metrics": metrics,
+        "decision": decision,
+        "safety": {
+            "would_contact_ads_provider": _budget_decision_flag(
+                row.decision_json, "would_contact_ads_provider"
+            ),
+            "would_mutate_ads_provider": _budget_decision_flag(
+                row.decision_json, "would_mutate_ads_provider"
+            ),
+            "would_spend_money": _budget_decision_flag(row.decision_json, "would_spend_money"),
+        },
+    }
+
+
+def _budget_action_dashboard_summary(
+    rows: Sequence[BudgetActionLog], *, recent_limit: int = 25
+) -> dict[str, Any]:
+    active_rows = [row for row in rows if row.status in ACTIVE_BUDGET_ACTION_STATUSES]
+    by_action: dict[str, int] = {}
+    by_status: dict[str, int] = {}
+    by_platform: dict[str, int] = {}
+    approval_required_count = 0
+    rows_with_provider_contact_intent = 0
+    rows_with_provider_mutation_intent = 0
+    rows_with_spend_intent = 0
+    for row in active_rows:
+        _increment_count(by_action, row.action)
+        _increment_count(by_status, row.status)
+        _increment_count(by_platform, row.platform)
+        if row.approval_required or row.status == "approval_required":
+            approval_required_count += 1
+        rows_with_provider_contact_intent += int(
+            _budget_decision_flag(row.decision_json, "would_contact_ads_provider")
+        )
+        rows_with_provider_mutation_intent += int(
+            _budget_decision_flag(row.decision_json, "would_mutate_ads_provider")
+        )
+        rows_with_spend_intent += int(_budget_decision_flag(row.decision_json, "would_spend_money"))
+
+    return {
+        "schema_version": 1,
+        "policy_version": AUTOPILOT_POLICY_VERSION,
+        "source": "budget_action_logs",
+        "mode": "local_read_only",
+        "endpoint_would_contact_ads_provider": False,
+        "endpoint_would_mutate_ads_provider": False,
+        "endpoint_would_spend_money": False,
+        "rows_with_provider_contact_intent": rows_with_provider_contact_intent,
+        "rows_with_provider_mutation_intent": rows_with_provider_mutation_intent,
+        "rows_with_spend_intent": rows_with_spend_intent,
+        "active_count": len(active_rows),
+        "approval_required_count": approval_required_count,
+        "auto_pause_count": by_action.get("auto_pause", 0),
+        "blocked_count": by_action.get("block_increase", 0),
+        "by_action": by_action,
+        "by_status": by_status,
+        "by_platform": by_platform,
+        "recent_actions": [_budget_action_summary_item(row) for row in active_rows[:recent_limit]],
+        "operator_note": (
+            "Budget actions are read-only local audit rows. Provider changes and budget "
+            "increases require explicit approval outside this dashboard."
+        ),
+    }
+
+
+def _learning_json_subset(payload: object, keys: Sequence[str]) -> dict[str, Any]:
+    if not isinstance(payload, Mapping):
+        return {}
+    return {key: payload.get(key) for key in keys if key in payload}
+
+
+def _learning_proposal_summary_item(row: LearningProposal) -> dict[str, Any]:
+    created_at = _datetime_as_utc(row.created_at)
+    updated_at = _datetime_as_utc(row.updated_at)
+    return {
+        "id": str(row.id),
+        "source_proposal_id": str(row.source_proposal_id) if row.source_proposal_id else None,
+        "proposal_date": row.proposal_date.isoformat(),
+        "proposal_type": row.proposal_type,
+        "target_area": row.target_area,
+        "title": row.title,
+        "status": row.status,
+        "canary_percent": int(row.canary_percent or 0),
+        "approval_required": bool(row.approval_required),
+        "rollback_reason": row.rollback_reason,
+        "created_at": created_at.isoformat() if created_at else None,
+        "updated_at": updated_at.isoformat() if updated_at else None,
+        "guardrail": {
+            "metric": row.guardrail_metric,
+            "baseline_value": row.baseline_value,
+            "candidate_value": row.candidate_value,
+            "rollback_threshold_pct": row.rollback_threshold_pct,
+        },
+        "proposal": _learning_json_subset(
+            row.proposal_json,
+            [
+                "confidence",
+                "expected_impact",
+                "metric",
+                "proposal_type",
+                "skill_name",
+                "target_area",
+            ],
+        ),
+        "replay_result": _learning_json_subset(
+            row.replay_result_json,
+            [
+                "status",
+                "canary_percent",
+                "approval_required",
+                "rollback_required",
+                "reason",
+                "guardrail_metric",
+                "baseline_rate",
+                "candidate_rate",
+                "relative_drop_pct",
+            ],
+        ),
+        "safety": {
+            "would_route_live_traffic": False,
+            "would_promote_without_admin_approval": False,
+            "requires_admin_approval_for_full_rollout": bool(
+                row.approval_required or row.status == "pending_approval"
+            ),
+        },
+    }
+
+
+def _learning_proposal_dashboard_summary(
+    rows: Sequence[LearningProposal], *, recent_limit: int = 25
+) -> dict[str, Any]:
+    active_rows = [row for row in rows if row.status in ACTIVE_LEARNING_PROPOSAL_STATUSES]
+    by_status: dict[str, int] = {}
+    by_type: dict[str, int] = {}
+    by_target_area: dict[str, int] = {}
+    by_guardrail_metric: dict[str, int] = {}
+    approval_required_count = 0
+    rows_with_full_rollout_intent = 0
+    max_canary_percent = 0
+    for row in active_rows:
+        canary_percent = int(row.canary_percent or 0)
+        max_canary_percent = max(max_canary_percent, canary_percent)
+        _increment_count(by_status, row.status)
+        _increment_count(by_type, row.proposal_type)
+        _increment_count(by_target_area, row.target_area)
+        _increment_count(by_guardrail_metric, row.guardrail_metric)
+        if row.approval_required or row.status == "pending_approval":
+            approval_required_count += 1
+        if canary_percent >= 100:
+            rows_with_full_rollout_intent += 1
+
+    return {
+        "schema_version": 1,
+        "policy_version": AUTOPILOT_POLICY_VERSION,
+        "source": "learning_proposals",
+        "mode": "local_read_only",
+        "endpoint_would_route_live_traffic": False,
+        "endpoint_would_promote_proposal": False,
+        "endpoint_would_contact_provider": False,
+        "endpoint_requires_admin_approval_for_full_rollout": True,
+        "rows_with_full_rollout_intent": rows_with_full_rollout_intent,
+        "active_count": len(active_rows),
+        "pending_replay_count": by_status.get("pending_replay", 0),
+        "canary_active_count": by_status.get("canary_active", 0),
+        "rollback_count": by_status.get("rollback_triggered", 0),
+        "pending_approval_count": by_status.get("pending_approval", 0),
+        "approval_required_count": approval_required_count,
+        "max_canary_percent": max_canary_percent,
+        "by_status": by_status,
+        "by_type": by_type,
+        "by_target_area": by_target_area,
+        "by_guardrail_metric": by_guardrail_metric,
+        "recent_proposals": [
+            _learning_proposal_summary_item(row) for row in active_rows[:recent_limit]
+        ],
+        "operator_note": (
+            "Learning proposals are read-only local replay/canary rows. Full rollout, "
+            "live traffic routing, and proposal promotion require explicit admin approval."
+        ),
+    }
+
+
+async def _build_autopilot_exceptions(
+    s: Any,
+    *,
+    limit: int = 50,
+    kind: str | None = None,
+    lead_id: UUID | None = None,
+    buyer_id: UUID | None = None,
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+
+    def include(item: dict[str, Any]) -> None:
+        if kind is not None and item["kind"] != kind:
+            return
+        if lead_id is not None and item.get("lead_id") != str(lead_id):
+            return
+        if buyer_id is not None and item.get("buyer_id") != str(buyer_id):
+            return
+        items.append(item)
+
+    if kind is None or kind == "return_pending":
+        return_query = select(ReturnRequest).where(
+            ReturnRequest.status.in_(ACTIVE_RETURN_REQUEST_STATUSES)
+        )
+        if lead_id is not None:
+            return_query = return_query.where(ReturnRequest.lead_id == lead_id)
+        if buyer_id is not None:
+            return_query = return_query.where(ReturnRequest.buyer_id == buyer_id)
+        active_returns = (
+            (await s.execute(return_query.order_by(ReturnRequest.created_at.asc()).limit(limit)))
+            .scalars()
+            .all()
+        )
+        for request in active_returns:
+            lead = await s.get(LeadRow, request.lead_id)
+            buyer = await s.get(BuyerRow, request.buyer_id)
+            include(
+                _exception_item(
+                    exception_id=f"return:{request.id}",
+                    kind="return_pending",
+                    severity="warning",
+                    reason=request.reason,
+                    entity_type="return_request",
+                    created_at=request.created_at,
+                    recommended_action="Approve, reject, or hold the buyer return request from policy evidence.",
+                    lead=lead,
+                    buyer=buyer,
+                    return_request=request,
+                    actions=["approve_return", "reject_return"],
+                )
+            )
+
+    if (kind is None or kind == "lead_review") and buyer_id is None:
+        held_query = select(LeadRow).where(
+            (LeadRow.hold_for_review.is_(True)) | (LeadRow.blocked_for_fraud.is_(True))
+        )
+        if lead_id is not None:
+            held_query = held_query.where(LeadRow.id == lead_id)
+        held_leads = (
+            (await s.execute(held_query.order_by(LeadRow.updated_at.asc()).limit(limit)))
+            .scalars()
+            .all()
+        )
+        for lead in held_leads:
+            reason = "fraud_signal" if lead.blocked_for_fraud else "human_review_required"
+            actions = (
+                ["open_timeline"] if lead.blocked_for_fraud else ["open_timeline", "approve_lead"]
+            )
+            include(
+                _exception_item(
+                    exception_id=f"lead:{lead.id}:review",
+                    kind="lead_review",
+                    severity="critical" if lead.blocked_for_fraud else "warning",
+                    reason=reason,
+                    entity_type="lead",
+                    created_at=lead.updated_at or lead.created_at,
+                    recommended_action="Open the timeline and approve only if consent, quality, and fraud checks are acceptable.",
+                    lead=lead,
+                    actions=actions,
+                )
+            )
+
+    if kind is None or kind in {"delivery_failure", "buyer_timeout_cluster"}:
+        failed_post_query = select(PostResult).where(PostResult.delivered.is_(False))
+        if lead_id is not None:
+            failed_post_query = failed_post_query.where(PostResult.lead_id == lead_id)
+        if buyer_id is not None:
+            failed_post_query = failed_post_query.where(PostResult.buyer_id == buyer_id)
+        failed_posts = (
+            (await s.execute(failed_post_query.order_by(PostResult.created_at.asc()).limit(limit)))
+            .scalars()
+            .all()
+        )
+        if kind is None or kind == "delivery_failure":
+            for post in failed_posts:
+                lead = await s.get(LeadRow, post.lead_id)
+                buyer = await s.get(BuyerRow, post.buyer_id)
+                include(
+                    _exception_item(
+                        exception_id=f"post:{post.id}:delivery",
+                        kind="delivery_failure",
+                        severity="critical",
+                        reason="post_failed",
+                        entity_type="post_result",
+                        created_at=post.created_at,
+                        recommended_action="Check buyer webhook health and reroute only after confirming local-only delivery safety.",
+                        lead=lead,
+                        buyer=buyer,
+                        post=post,
+                        actions=["open_timeline"],
+                    )
+                )
+        if (kind is None or kind == "buyer_timeout_cluster") and lead_id is None:
+            for item in _buyer_timeout_cluster_exception_items(failed_posts):
+                include(item)
+
+    if (kind is None or kind == "no_buyer_coverage") and buyer_id is None:
+        unsold_query = select(LeadStateTransition).where(
+            LeadStateTransition.event_type == "lead.unsold"
+        )
+        if lead_id is not None:
+            unsold_query = unsold_query.where(LeadStateTransition.lead_id == lead_id)
+        unsold_rows = (
+            (
+                await s.execute(
+                    unsold_query.order_by(LeadStateTransition.created_at.desc()).limit(limit * 3)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        seen_unsold: set[UUID] = set()
+        for transition in unsold_rows:
+            if transition.lead_id in seen_unsold:
+                continue
+            transition_reason = _transition_reason(transition)
+            if transition_reason not in AUTOPILOT_UNSELLABLE_REASONS:
+                continue
+            lead = await s.get(LeadRow, transition.lead_id)
+            if lead is None or lead.status in AUTOPILOT_SUCCESS_STATES:
+                continue
+            seen_unsold.add(transition.lead_id)
+            include(
+                _exception_item(
+                    exception_id=f"lead:{lead.id}:coverage",
+                    kind="no_buyer_coverage",
+                    severity="warning",
+                    reason=transition_reason or "no_buyer_coverage",
+                    entity_type="lead",
+                    created_at=transition.created_at,
+                    recommended_action="Add or fund a buyer covering this market/service before retrying auction.",
+                    lead=lead,
+                    actions=["open_timeline"],
+                )
+            )
+
+    buyer_exception_kinds = {"buyer_wallet_low", "buyer_onboarding_incomplete"}
+    if (kind is None or kind in buyer_exception_kinds) and lead_id is None:
+        buyer_query = select(BuyerRow)
+        if buyer_id is not None:
+            buyer_query = buyer_query.where(BuyerRow.id == buyer_id)
+        buyers = (await s.execute(buyer_query.order_by(BuyerRow.updated_at.asc()))).scalars().all()
+        for buyer in buyers:
+            readiness = _buyer_onboarding_readiness(buyer)
+            if readiness["autopilot_ready"]:
+                continue
+            if buyer.status == BuyerStatus.ACTIVE.value and readiness["auto_pause_recommended"]:
+                include(
+                    _exception_item(
+                        exception_id=f"buyer:{buyer.id}:wallet",
+                        kind="buyer_wallet_low",
+                        severity="warning",
+                        reason="wallet_below_threshold",
+                        entity_type="buyer",
+                        created_at=buyer.updated_at or buyer.created_at,
+                        recommended_action="Collect or simulate wallet funding, then resume routing for this buyer.",
+                        buyer=buyer,
+                        actions=[],
+                    )
+                )
+            elif buyer.status in {
+                BuyerStatus.ACTIVE.value,
+                BuyerStatus.PENDING_VERIFICATION.value,
+                BuyerStatus.PAUSED.value,
+            }:
+                include(
+                    _exception_item(
+                        exception_id=f"buyer:{buyer.id}:onboarding",
+                        kind="buyer_onboarding_incomplete",
+                        severity="info",
+                        reason="buyer_not_autopilot_ready",
+                        entity_type="buyer",
+                        created_at=buyer.updated_at or buyer.created_at,
+                        recommended_action="Complete terms, service/zip coverage, wallet, budget, API key, and webhook readiness before activation.",
+                        buyer=buyer,
+                        actions=[],
+                    )
+                )
+
+    severity_rank = {"critical": 0, "warning": 1, "info": 2}
+    items.sort(
+        key=lambda item: (
+            severity_rank.get(str(item["severity"]), 9),
+            -int(item["sla_age_minutes"]),
+            str(item["exception_id"]),
+        )
+    )
+    return items[:limit]
+
+
+async def _apply_return_decision(
+    s: Any,
+    request: ReturnRequest,
+    result: PostResult,
+    buyer: BuyerRow,
+    *,
+    action: str,
+    operator: str,
+    notes: str | None,
+    task_name: str,
+    policy_version: str | None = None,
+) -> dict[str, Any]:
+    request.reviewed_by = operator
+    request.review_notes = notes
+    request.reviewed_at = datetime.now(UTC)
+    credited_cents = 0
+    event_type = f"lead.return_{action}ed"
+    if action == "hold":
+        request.status = "held"
+        event_type = "lead.return_held"
+    elif action == "reject":
+        request.status = "rejected"
+    else:
+        event_type = "lead.return_approved"
+        if result.returned:
+            raise HTTPException(409, "lead sale has already been credited")
+        credit = Decimal(result.bid_cents) / Decimal(100)
+        buyer.deposit_balance += credit
+        buyer.lifetime_spend -= credit
+        result.returned = True
+        result.return_reason = request.reason
+        request.status = "approved"
+        credited_cents = result.bid_cents
+        s.add(
+            BillingEvent(
+                buyer_id=request.buyer_id,
+                lead_id=request.lead_id,
+                event_type="lead.returned",
+                amount_cents=result.bid_cents,
+                metadata_json={
+                    "return_request_id": str(request.id),
+                    "post_result_id": str(result.id),
+                    "reason": request.reason,
+                    "notes_present": bool(request.notes),
+                    "review_notes_present": bool(notes),
+                    "operator": operator,
+                    "policy_version": policy_version,
+                },
+            )
+        )
+
+    current_state = await latest_state(s, request.lead_id) or PipelineState.SOLD
+    await record_transition(
+        s,
+        lead_id=request.lead_id,
+        from_state=None,
+        to_state=current_state,
+        event_type=event_type,
+        task_name=task_name,
+        status=request.status,
+        idempotency_key=build_transition_idempotency_key(
+            lead_id=request.lead_id,
+            from_state=None,
+            to_state=current_state,
+            event_type=event_type,
+            task_name=task_name,
+            version=f"return:{request.id}:{action}",
+        ),
+        payload={
+            "return_request_id": str(request.id),
+            "post_result_id": str(result.id),
+            "buyer_id": str(request.buyer_id),
+            "reason": request.reason,
+            "action": action,
+            "operator": operator,
+            "credited_cents": credited_cents,
+            "policy_version": policy_version,
+        },
+    )
+    await s.flush()
+    return {
+        "return_request_id": str(request.id),
+        "lead_id": str(request.lead_id),
+        "buyer_id": str(request.buyer_id),
+        "status": request.status,
+        "credited_cents": credited_cents,
+        "auto_decided": operator == "autopilot-policy",
+        "policy_version": policy_version,
+        "wallet": _buyer_wallet_response(buyer),
+    }
 
 
 def _return_request_response(request: ReturnRequest) -> dict[str, Any]:
@@ -1945,11 +4622,15 @@ async def launch_readiness(
     if market_state and market_zip:
         raise HTTPException(400, "choose either market_state or market_zip, not both")
 
+    zip_coverage_filter = or_(
+        func.jsonb_array_length(BuyerRow.target_zips) > 0,
+        func.jsonb_array_length(BuyerRow.exclusive_zips) > 0,
+    )
     buyer_scope = [BuyerRow.status == BuyerStatus.ACTIVE.value, BuyerRow.deposit_balance > 0]
     configured_scope = [
         BuyerRow.status == BuyerStatus.ACTIVE.value,
         BuyerRow.deposit_balance > 0,
-        func.jsonb_array_length(BuyerRow.target_zips) > 0,
+        zip_coverage_filter,
         func.jsonb_array_length(BuyerRow.services) > 0,
         BuyerRow.daily_cap > 0,
         BuyerRow.monthly_budget > 0,
@@ -1957,17 +4638,24 @@ async def launch_readiness(
         BuyerRow.bid_per_lead_t3 > 0,
     ]
     lead_scope = []
+    activation_scope = []
     if market_state:
         lead_scope.append(LeadRow.state == market_state.upper())
     if market_zip:
         lead_scope.append(LeadRow.zip == market_zip)
-        buyer_scope.append(BuyerRow.target_zips.contains([market_zip]))
-        configured_scope.append(BuyerRow.target_zips.contains([market_zip]))
+        buyer_zip_filter = or_(
+            BuyerRow.target_zips.contains([market_zip]),
+            BuyerRow.exclusive_zips.contains([market_zip]),
+        )
+        buyer_scope.append(buyer_zip_filter)
+        configured_scope.append(buyer_zip_filter)
+        activation_scope.append(buyer_zip_filter)
     if service:
         normalized_service = service.strip().lower()
         lead_scope.append(LeadRow.requested_service == normalized_service)
         buyer_scope.append(BuyerRow.services.contains([normalized_service]))
         configured_scope.append(BuyerRow.services.contains([normalized_service]))
+        activation_scope.append(BuyerRow.services.contains([normalized_service]))
 
     try:
         async with get_session() as s:
@@ -1990,6 +4678,10 @@ async def launch_readiness(
                     BuyerRow.deposit_balance >= BuyerRow.monthly_budget * runway_multiplier,
                 )
             )
+            activation_query = select(BuyerRow)
+            if activation_scope:
+                activation_query = activation_query.where(and_(*activation_scope))
+            scoped_buyers = (await s.execute(activation_query)).scalars().all()
             lead_ids_query = select(LeadRow.id)
             if lead_scope:
                 lead_ids_query = lead_ids_query.where(and_(*lead_scope))
@@ -2025,6 +4717,17 @@ async def launch_readiness(
                 )
             )
 
+        buyer_readiness = [_buyer_onboarding_readiness(buyer) for buyer in scoped_buyers]
+        buyer_gap_counts: dict[str, int] = {}
+        for readiness in buyer_readiness:
+            for requirement in readiness["missing_requirements"]:
+                buyer_gap_counts[requirement] = buyer_gap_counts.get(requirement, 0) + 1
+        autopilot_ready_buyers = sum(
+            1 for readiness in buyer_readiness if readiness["autopilot_ready"]
+        )
+        active_buyers_in_scope = sum(
+            1 for buyer in scoped_buyers if buyer.status == BuyerStatus.ACTIVE.value
+        )
         local_simulation_checks = {
             "synthetic_ping_post_routed_test_lead": int(delivered or 0) > 0,
             "synthetic_return_review_credit_flow_tested": int(returned or 0) > 0
@@ -2035,6 +4738,7 @@ async def launch_readiness(
         technical_checks = {
             "three_funded_buyers_in_scope": int(funded_buyers or 0) >= 3,
             "buyers_have_services_zips_caps_and_prices": int(configured_buyers or 0) >= 3,
+            "buyers_are_activation_ready": autopilot_ready_buyers >= 3,
             "wallet_balance_covers_campaign_budget": int(total_wallet_cents or 0)
             >= campaign_budget_cents,
             "buyer_wallet_runway_covers_pause_threshold": int(runway_ready_buyers or 0) >= 3,
@@ -2044,10 +4748,14 @@ async def launch_readiness(
             "campaign_source_attribution_visible": int(attributed_leads or 0) > 0,
             "call_tracking_ingested": int(matched_call_events or 0) > 0,
         }
-        commercial_approval = os.getenv("STORMLEAD_COMMERCIAL_LAUNCH_APPROVED") == "true"
+        buyer_delivery_approval = provider_live_approved(ProviderArea.BUYER_DELIVERY)
+        payment_approval = provider_live_approved(ProviderArea.PAYMENTS)
+        commercial_approval = buyer_delivery_approval and payment_approval
         checks = {
             **local_simulation_checks,
             **technical_checks,
+            "buyer_delivery_live_approval_present": buyer_delivery_approval,
+            "live_payment_approval_present": payment_approval,
             "commercial_launch_approval_present": commercial_approval,
         }
         local_simulation_ready = all(local_simulation_checks.values())
@@ -2075,6 +4783,7 @@ async def launch_readiness(
             "metrics": {
                 "funded_buyers": int(funded_buyers or 0),
                 "configured_buyers": int(configured_buyers or 0),
+                "autopilot_ready_buyers": autopilot_ready_buyers,
                 "runway_ready_buyers": int(runway_ready_buyers or 0),
                 "required_runway_days": KPI_THRESHOLDS.pause_wallet_runway_days,
                 "active_wallet_total_cents": int(total_wallet_cents or 0),
@@ -2084,12 +4793,23 @@ async def launch_readiness(
                 "attributed_leads": int(attributed_leads or 0),
                 "matched_call_events": int(matched_call_events or 0),
             },
+            "buyer_activation_funnel": {
+                "total_buyers_in_scope": len(scoped_buyers),
+                "active_buyers": active_buyers_in_scope,
+                "funded_buyers": int(funded_buyers or 0),
+                "configured_buyers": int(configured_buyers or 0),
+                "autopilot_ready_buyers": autopilot_ready_buyers,
+                "wallet_runway_ready_buyers": int(runway_ready_buyers or 0),
+                "activation_rate": _normalize_ratio(autopilot_ready_buyers, len(scoped_buyers)),
+                "gap_counts": buyer_gap_counts,
+            },
             "notes": [
-                "ready_for_paid_launch remains false unless STORMLEAD_COMMERCIAL_LAUNCH_APPROVED=true",
-                "market_state scopes lead evidence; market_zip additionally scopes buyer zip coverage",
+                "ready_for_paid_launch remains false unless buyer delivery and live payment approvals are present",
+                "market_state scopes lead evidence; market_zip scopes buyer target or exclusive zip coverage",
                 "campaign_budget_cents defaults to a conservative $1,000 local validation threshold",
                 "call tracking readiness uses local synthetic call webhook events matched to scoped leads",
                 "buyer wallet runway must clear the configured pause threshold before technical readiness",
+                "payment readiness can be proven locally with refill intents and synthetic refill events before Stripe approval",
             ],
         }
     except Exception as e:
@@ -2134,7 +4854,10 @@ async def normalized_kpis(
             )
             coverage_count = await s.scalar(
                 select(func.count(BuyerRow.id)).where(
-                    func.jsonb_array_length(BuyerRow.target_zips) > 0
+                    or_(
+                        func.jsonb_array_length(BuyerRow.target_zips) > 0,
+                        func.jsonb_array_length(BuyerRow.exclusive_zips) > 0,
+                    )
                 )
             )
             avg_runway_days = await s.scalar(
@@ -2326,11 +5049,18 @@ def _lead_admin_summary(lead: LeadRow) -> dict[str, Any]:
         "state": lead.state,
         "zip": lead.zip,
         "requested_service": lead.requested_service,
+        "damage_type": lead.damage_type,
+        "urgency": lead.urgency,
         "damage_tier": lead.damage_tier,
+        "safety_flags": lead.safety_flags or [],
         "lead_class": lead.lead_class,
         "qualification_score": lead.qualification_score,
         "hold_for_review": lead.hold_for_review,
         "blocked_for_fraud": lead.blocked_for_fraud,
+        "photo_count": len(lead.photo_s3_keys or []),
+        "location_verification_status": lead.location_verification_status,
+        "gps_accuracy_meters": lead.gps_accuracy_meters,
+        "google_click_id_present": bool(lead.google_click_id),
         "created_at": lead.created_at.isoformat() if lead.created_at else None,
         "updated_at": lead.updated_at.isoformat() if lead.updated_at else None,
     }
@@ -2373,6 +5103,7 @@ def _buyer_response(buyer: BuyerRow) -> dict[str, Any]:
             "crm_low_balance_threshold_cents": buyer.low_balance_threshold_cents,
             "filter_expression": buyer.filter_expression,
             "webhook_url": buyer.webhook_url,
+            "onboarding_readiness": _buyer_onboarding_readiness(buyer),
         }
     )
     return payload

@@ -1,18 +1,45 @@
 from __future__ import annotations
 
 import os
+from ipaddress import ip_address
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from stormlead_core import get_logger
 
 log = get_logger(__name__)
 
+_TRUSTEDFORM_CERT_HOSTS = frozenset({"cert.trustedform.com"})
 
-async def verify_trustedform_cert(cert_url: str, api_key: str | None = None) -> dict[str, Any] | None:
+
+def _is_allowed_trustedform_url(cert_url: str) -> bool:
+    parsed = urlparse(cert_url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        return False
+    if parsed.username or parsed.password:
+        return False
+
+    host = parsed.hostname.rstrip(".").lower()
+    try:
+        ip_address(host)
+        return False
+    except ValueError:
+        pass
+
+    return host in _TRUSTEDFORM_CERT_HOSTS
+
+
+async def verify_trustedform_cert(
+    cert_url: str, api_key: str | None = None
+) -> dict[str, Any] | None:
     cert_url = cert_url.strip()
     key = api_key if api_key is not None else os.getenv("TRUSTEDFORM_API_KEY", "")
     if not cert_url or not key:
+        return None
+    if not _is_allowed_trustedform_url(cert_url):
+        parsed = urlparse(cert_url)
+        log.warning("trustedform.cert_url_rejected", cert_host=parsed.hostname)
         return None
 
     try:

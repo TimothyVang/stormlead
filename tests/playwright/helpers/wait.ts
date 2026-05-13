@@ -1,6 +1,8 @@
 import type { APIRequestContext } from '@playwright/test';
 import { PING_POST } from './api';
 
+const OPERATOR_TOKEN = process.env.STORMLEAD_OPERATOR_TOKEN;
+
 type TimelineBody = {
   current_state?: string;
   events?: Array<{ event_type: string; [k: string]: unknown }>;
@@ -15,6 +17,7 @@ async function readTimeline(
 ): Promise<{ body?: TimelineBody; error?: string }> {
   try {
     const res = await request.get(`${PING_POST}/v1/admin/leads/${leadId}/timeline`, {
+      headers: OPERATOR_TOKEN ? { Authorization: `Bearer ${OPERATOR_TOKEN}` } : undefined,
       timeout: TIMELINE_POLL_TIMEOUT_MS,
     });
     if (!res.ok()) return { error: `HTTP ${res.status()}` };

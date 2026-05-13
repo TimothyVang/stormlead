@@ -4,7 +4,12 @@ from datetime import date
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from agent_runtime.hermes import _fetch_weekly_traces, _persist_proposals, _summarize_traces
+from agent_runtime.hermes import (
+    _fetch_weekly_traces,
+    _parse_proposals,
+    _persist_proposals,
+    _summarize_traces,
+)
 
 
 def test_summarize_traces_empty_digest() -> None:
@@ -33,3 +38,33 @@ async def test_fetch_weekly_traces_connection_error_returns_empty(
 @pytest.mark.asyncio
 async def test_persist_proposals_empty_list_returns_zero() -> None:
     assert await _persist_proposals([], date.today()) == 0
+
+
+def test_parse_proposals_accepts_learning_types_and_aliases() -> None:
+    proposals = _parse_proposals(
+        """
+        {
+          "proposals": [
+            {
+              "proposal_type": "threshold",
+              "target_area": "lead scoring",
+              "title": "Tighten score floor"
+            },
+            {
+              "mutation_type": "cadence",
+              "title": "Slow low-intent nurture"
+            },
+            {
+              "proposal_type": "prompt_update",
+              "skill_name": "qualify_lead"
+            }
+          ]
+        }
+        """
+    )
+
+    assert [proposal["proposal_type"] for proposal in proposals] == [
+        "scoring_threshold",
+        "cadence_change",
+        "prompt_update",
+    ]

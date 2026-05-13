@@ -20,7 +20,7 @@
         "--profile",
         "stormlead_docker"
       ],
-      "enabled": true,
+      "enabled": false,
       "timeout": 15000
     },
     "kubernetes": {
@@ -33,8 +33,57 @@
         "--profile",
         "stormlead_kubernetes"
       ],
-      "enabled": true,
+      "enabled": false,
       "timeout": 15000
     }
+  },
+  "share": "disabled",
+  "lsp": {
+    "ruff": {
+      "command": [
+        "uv",
+        "run",
+        "ruff",
+        "server"
+      ],
+      "extensions": [
+        ".py",
+        ".pyi"
+      ]
+    }
+  },
+  "formatter": {
+    "ruff": {
+      "command": [
+        "uv",
+        "run",
+        "ruff",
+        "format",
+        "$FILE"
+      ],
+      "extensions": [
+        ".py",
+        ".pyi"
+      ]
+    }
+  },
+  "watcher": {
+    "ignore": [
+      ".git/**",
+      "node_modules/**",
+      ".opencode/node_modules/**",
+      ".venv/**",
+      "**/__pycache__/**",
+      "**/.pytest_cache/**",
+      ".mypy_cache/**",
+      ".ruff_cache/**",
+      "coverage/**",
+      "dist/**",
+      "build/**",
+      "testing/.pytest_cache/**",
+      "testing/playwright-report/**",
+      "testing/artifacts/**",
+      "testing/screenshots/**"
+    ]
   }
 }

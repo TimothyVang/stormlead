@@ -12,6 +12,8 @@ Research artifacts that informed the scaffold's choices. Older audit and forkabl
 - **`../execution-prompts/README.md`** - index of the master agent prompt and dated execution prompts for build, tooling/safety, workflow-visibility, and V1 technical-readiness milestones.
 - **`visual-agentic-workflow-runbook.md`** - admin workflow timeline, review actions, KPI semantics, and Cowork evidence manifests.
 - **`v1-paid-pilot-runbook.md`** - local technical V1 controls, scoped readiness, and evidence commands.
+- **`2026-05-10-production-autonomy-autoresearch/`** - durable archive of the approved autoresearch bundle for moving StormLead from local synthetic proof to a production-grade autonomous lead generation and buyer-sales funnel.
+- **`2026-05-end-to-end-automation-roadmap.md`** - prioritized engineering roadmap to "practically end-to-end automated" real-traffic operation. Reverses the TS/Node pivot, keeps Python; one P0 (hard duplicate suppression), four P1 (voice/SMS/email/Stripe + storm polling), four P2 (spend ingestion, budget rules, learning canary, exception queue).
 
 ## superseded technical claims
 
@@ -54,6 +56,7 @@ StormLead should become a self-hosted, buyer-funded lead marketplace:
 - `services/storm-watcher`: imports storm events from public sources.
 - `services/ping-post`: routes leads to buyers, posts winners, debits wallets, and records billing events.
 - `services/agent-runtime`: foundation for qualification and agent workflows.
+- `services/voice-bridge`: local-safe follow-up preview contracts; live phone-provider actions remain approval-gated.
 - `libs/stormlead_db`: Postgres schema for storms, buyers, leads, ping attempts, post results, billing events, review requests, intake audit rows, and workflow transitions.
 - `infra/compose/dev`: local development stack.
 
@@ -217,12 +220,12 @@ Should not be vendor-owned:
 The current code and docs are not yet a deployable revenue system until these gaps are closed:
 
 - prod compose and deploy script still need to be built.
-- Caddy references `landing`, `buyer-portal`, and `voice-bridge`, but those services are not implemented or included in compose.
+- Caddy and Compose service coverage must stay aligned before public deployment; `npm run validate:ingress` checks Caddy reverse-proxy targets against dev Compose services, and `voice-bridge` is currently local-preview only behind the dev Compose `voice` profile.
 - buyer CRM fields and territory/service matching are not yet implemented.
 - lead classification fields for class a/b/c/d are not yet implemented.
 - campaign/source attribution fields are not yet implemented.
 - buyer review workflow is documented but still maturing.
-- AI voice is documented but `voice-bridge` is not implemented.
+- AI voice provider integration is not implemented; `voice-bridge` is local-preview only and cannot place calls.
 - call tracking ingestion is not implemented.
 - mailer CSV export and campaign records are not implemented.
 - admin KPI and buyer report endpoints are not implemented.

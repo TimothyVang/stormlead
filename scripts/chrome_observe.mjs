@@ -2,6 +2,7 @@
 
 import { chromium } from '@playwright/test';
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -42,17 +43,58 @@ function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
+function isLoopbackHostname(hostname) {
+  const host = hostname.toLowerCase();
+  const normalized = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+  if (normalized === 'localhost' || normalized === '::1') return true;
+  return net.isIP(normalized) === 4 && normalized.split('.')[0] === '127';
+}
+
 function assertLoopbackHttpUrl(value) {
   const url = new URL(value);
-  const hostname = url.hostname.toLowerCase();
-  const isLoopback = hostname === 'localhost'
-    || hostname === '::1'
-    || hostname === '[::1]'
-    || hostname.startsWith('127.');
-  if (!['http:', 'https:'].includes(url.protocol) || !isLoopback) {
+  if (!['http:', 'https:'].includes(url.protocol) || !isLoopbackHostname(url.hostname)) {
     throw new Error(`Chrome observer only accepts loopback HTTP(S) URLs: ${value}`);
   }
   return url.toString();
+}
+
+const SENSITIVE_EVENT_KEY = /authorization|cookie|credential|headers|password|payload|secret|token|api[_-]?key|webhook/i;
+const SENSITIVE_TEXT = /(authorization|cookie|password|secret|token|api[_-]?key|webhook)(["'\s:=]+)([^"'\s,}]+)/gi;
+
+function redactText(value) {
+  return String(value).replace(SENSITIVE_TEXT, '$1$2[REDACTED]');
+}
+
+function redactUrl(value) {
+  try {
+    const url = new URL(value);
+    url.username = '';
+    url.password = '';
+    for (const key of [...url.searchParams.keys()]) {
+      if (SENSITIVE_EVENT_KEY.test(key)) url.searchParams.set(key, '[REDACTED]');
+    }
+    return url.toString();
+  } catch {
+    return value;
+  }
+}
+
+function redactObject(value, key = '') {
+  if (SENSITIVE_EVENT_KEY.test(key)) return '[REDACTED]';
+  if (key === 'body_preview' && typeof value === 'string') return redactText(value);
+  if (typeof value === 'string' && /url/i.test(key)) return redactUrl(value);
+  if (!value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map((item) => redactObject(item, key));
+
+  const redacted = {};
+  for (const [entryKey, entryValue] of Object.entries(value)) {
+    if (entryKey === 'action' && entryValue && typeof entryValue === 'object' && entryValue.type === 'fill') {
+      redacted[entryKey] = { ...redactObject(entryValue, entryKey), value: '[REDACTED]' };
+    } else {
+      redacted[entryKey] = redactObject(entryValue, entryKey);
+    }
+  }
+  return redacted;
 }
 
 function safeRunId(value) {
@@ -86,8 +128,8 @@ function installObserver(page, runId, eventsPath) {
       run_id: runId,
       type,
       severity,
-      page_url: page.url(),
-      data,
+      page_url: redactUrl(page.url()),
+      data: redactObject(data),
     };
     eventCounts[type] = (eventCounts[type] ?? 0) + 1;
     if (severity === 'error') recentErrors.push(event);
