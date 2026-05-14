@@ -17,6 +17,7 @@
 :80 {
     @formbricks_webhook path /webhooks/formbricks
     @form_receiver path /healthz /readyz /api/lead/* /webhooks/call-tracking /privacy /terms /v1/privacy/opt-out
+    @stripe_payment_webhook path /v1/payments/stripe/refill-webhook
     @ping_post_health path /ping-post/healthz
     @external_admin {
         path /admin /v1/admin/*
@@ -79,6 +80,26 @@
         reverse_proxy form-receiver:8000
     }
 
+    handle @stripe_payment_webhook {
+        rate_limit {
+            zone stripe_payment_webhooks {
+                key {remote_host}
+                events 60
+                window 1m
+            }
+        }
+        coraza_waf {
+            load_owasp_crs
+            directives `
+                Include /etc/caddy/coraza.conf
+                Include /etc/caddy/owasp_crs/@crs-setup.conf.example
+                Include /etc/caddy/owasp_crs/rules/*.conf
+                SecRuleEngine On
+            `
+        }
+        reverse_proxy ping-post:8000
+    }
+
     handle @ping_post_health {
         uri strip_prefix /ping-post
         reverse_proxy ping-post:8000
@@ -107,8 +128,8 @@
         X-Content-Type-Options "nosniff"
         X-Frame-Options "DENY"
         Referrer-Policy "strict-origin-when-cross-origin"
-        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'"
-        Permissions-Policy "geolocation=(), camera=(), microphone=()"
+        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' {$FORMBRICKS_CSP_SCRIPT_SRC:}; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' {$FORMBRICKS_CSP_CONNECT_SRC:}"
+        Permissions-Policy "geolocation=(self), camera=(), microphone=()"
     }
 }
 

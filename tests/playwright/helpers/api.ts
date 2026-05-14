@@ -1,4 +1,4 @@
-import type { APIRequestContext } from '@playwright/test';
+import type { APIRequestContext, Page } from '@playwright/test';
 import { randomInt } from 'node:crypto';
 
 export const FORM_RECEIVER = process.env.FORM_RECEIVER_URL ?? 'http://127.0.0.1:8002';
@@ -12,11 +12,21 @@ const PHONE_SPACE = PHONE_MID_COUNT * PHONE_SUFFIX_COUNT;
 
 type RequestOptions = { data?: unknown; headers?: Record<string, string> };
 
+export function operatorHeaders(headers: Record<string, string> = {}): Record<string, string> {
+  if (!OPERATOR_TOKEN) return headers;
+  return { ...headers, Authorization: `Bearer ${OPERATOR_TOKEN}` };
+}
+
+export async function installOperatorToken(page: Page): Promise<void> {
+  await page.addInitScript((token) => {
+    window.localStorage.setItem('stormlead_operator_token', token);
+  }, OPERATOR_TOKEN);
+}
+
 function withOperatorHeaders(options: RequestOptions = {}): RequestOptions {
-  if (!OPERATOR_TOKEN) return options;
   return {
     ...options,
-    headers: { ...(options.headers ?? {}), Authorization: `Bearer ${OPERATOR_TOKEN}` },
+    headers: operatorHeaders(options.headers),
   };
 }
 
@@ -78,6 +88,11 @@ export class StormLeadApiClient {
     return { status: res.status(), body: await res.json() };
   }
 
+  async rotateBuyerApiKey(buyerId: string) {
+    const res = await this.req.post(`${PING_POST}/v1/buyers/${buyerId}/api-key/rotate`, withOperatorHeaders());
+    return { status: res.status(), body: await res.json() };
+  }
+
   async listBuyers() {
     const res = await this.req.get(`${PING_POST}/v1/buyers`, withOperatorHeaders());
     return { status: res.status(), body: await res.json() };
@@ -89,7 +104,7 @@ export class StormLeadApiClient {
   }
 
   async getBuyerDailyReport(buyerId: string) {
-    const res = await this.req.get(`${PING_POST}/v1/buyers/${buyerId}/daily-report`);
+    const res = await this.req.get(`${PING_POST}/v1/buyers/${buyerId}/daily-report`, withOperatorHeaders());
     return { status: res.status(), body: await res.json() };
   }
 

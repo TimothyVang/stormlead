@@ -161,9 +161,13 @@
     <main>
       <section class="hero">
         <div class="hero-inner">
-          <div class="eyebrow">Storm damage response</div>
+          <div class="eyebrow">{{ market.hero_eyebrow | default('Storm damage response') }}</div>
+          {% if market.hero_title %}
+          <h1>{{ market.hero_title }}</h1>
+          {% else %}
           <h1>Tree on your <span class="shimmer">property?</span></h1>
-          <p class="hero-copy">Tell us what happened and StormLead will match your request with a verified local storm cleanup partner when commercial launch is approved. We are a referral and matching service, not the tree crew.</p>
+          {% endif %}
+          <p class="hero-copy">{{ market.hero_copy | default('Tell us what happened and StormLead will match your request with a verified local storm cleanup partner when commercial launch is approved. We are a referral and matching service, not the tree crew.') }}</p>
           <div class="hero-actions">
             <a class="shiny-button" href="#request"><span>Open request form</span></a>
             <a class="text-link" href="#proof">Review local proof</a>
@@ -196,7 +200,7 @@
         <div class="form-shell" id="request">
           <div class="form-shell-header">
             <strong>StormLead request form</strong>
-            <span class="pill">Local synthetic submit</span>
+            <span class="pill">{{ market.market_badge | default('Local synthetic submit') }}</span>
           </div>
           {% if local_demo_enabled %}
           <p>This browser form signs a synthetic Formbricks-style envelope through the local landing service and forwards only to the local form receiver. It does not contact real homeowners, buyers, payments, ads, SMS, email, or public webhooks.</p>
@@ -224,9 +228,9 @@
               <label class="wide">Active danger?<select name="active_danger" required><option value="false">No immediate danger</option><option value="true">Yes, active danger</option></select></label>
               <label class="wide">What happened?<textarea name="damage_description" required>Large limb fell across the driveway after a storm. No injuries or power lines reported in this synthetic proof.</textarea></label>
               <label class="wide">Address<input name="address_line1" value="999 Local Proof Ln" autocomplete="street-address" required></label>
-              <label>City<input name="city" value="Austin" autocomplete="address-level2" required></label>
-              <label>State<input name="state" value="TX" maxlength="2" autocomplete="address-level1" required></label>
-              <label>ZIP<input name="zip" value="78761" autocomplete="postal-code" required></label>
+              <label>City<input name="city" value="{{ market.default_city | default('Austin') }}" autocomplete="address-level2" required></label>
+              <label>State<input name="state" value="{{ market.default_state | default('TX') }}" maxlength="2" autocomplete="address-level1" required></label>
+              <label>ZIP<input name="zip" value="{{ market.default_zip | default('78761') }}" autocomplete="postal-code" required></label>
               <label class="wide">Consent text<textarea name="consent_text" required>I agree that StormLead may call, text, or email me about my tree-damage request, may use AI-assisted review of my request details and photos, and may share my contact information, address, precise location if shared, and damage photos with selected local tree-service providers for this request. Consent is not required to buy services. Reply STOP to opt out. This local proof submission is synthetic test data.</textarea></label>
             </div>
             <section class="verification-card" aria-label="location verification">
@@ -403,7 +407,8 @@
           formData.set('damage_photo_keys', JSON.stringify(uploadedPhotoKeys));
           // Files are uploaded locally first; the signed envelope carries only local photo keys.
           formData.delete('damage_photos');
-          const payload = Object.fromEntries(formData.entries());
+          const hiddenFields = window.formbricksConfig?.hiddenFields || {};
+          const payload = { ...hiddenFields, ...Object.fromEntries(formData.entries()) };
           localLeadResult.className = 'local-result';
           localLeadResult.textContent = 'Submitting signed local envelope...';
           try {

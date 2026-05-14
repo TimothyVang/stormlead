@@ -1,5 +1,5 @@
 import { test, expect, clearBuyerWebhookEvents, getBuyerWebhookEvents } from './fixtures';
-import { BUYER_PORTAL, FORM_RECEIVER, LANDING, PING_POST } from './helpers/api';
+import { BUYER_PORTAL, FORM_RECEIVER, LANDING, OPERATOR_TOKEN, PING_POST, installOperatorToken } from './helpers/api';
 import {
   type BuyerWebhookExpectation,
   createActiveBuyer,
@@ -22,6 +22,10 @@ test.describe('Full human persona workflow suite', () => {
     clearBuyerWebhookEvents();
   });
 
+  test.beforeEach(async ({ page }) => {
+    await installOperatorToken(page);
+  });
+
   test('homeowner browser persona covers validation, duplicate, opt-out suppression, and mobile submit', async ({ page, request, phone, email, seed }) => {
     const base = {
       name: `Persona Homeowner ${seed}`,
@@ -36,7 +40,7 @@ test.describe('Full human persona workflow suite', () => {
     await test.step('required field validation blocks an incomplete human form', async () => {
       await page.goto(`${LANDING}/?utm_source=local_persona_suite&utm_campaign=local_validation_${seed}`);
       await page.locator('[data-testid="local-lead-form"] input[name="name"]').fill('');
-      await page.getByTestId('local-lead-submit').click();
+      await expect(page.getByTestId('local-lead-submit')).toBeDisabled();
       await expect(page.getByTestId('local-lead-result')).toContainText('Ready to submit');
       await expect(page.locator('[data-testid="local-lead-form"] input[name="name"]')).toBeFocused();
     });
@@ -48,9 +52,14 @@ test.describe('Full human persona workflow suite', () => {
       firstLeadId = first.leadId;
       expect(firstLeadId).toMatch(/^[0-9a-f-]{36}$/);
 
-      const second = await submitLandingLead(page, { ...base, campaign: `local_duplicate_retry_${seed}` });
-      expect(second.status).toBe('accepted-duplicate');
-      expect(second.leadId).toBe(firstLeadId);
+      const second = await submitLandingLead(
+        page,
+        { ...base, campaign: `local_duplicate_retry_${seed}` },
+        { expectOk: false },
+      );
+      expect(second.status).toBe('error');
+      expect(second.text).toContain('duplicate');
+      expect(firstLeadId).toMatch(/^[0-9a-f-]{36}$/);
     });
 
     await test.step('opted-out contact is suppressed when they try to submit again', async () => {
@@ -96,7 +105,7 @@ test.describe('Full human persona workflow suite', () => {
     await test.step('buyer logs into portal and reviews wallet', async () => {
       await page.goto(`${BUYER_PORTAL}/login`);
       await page.getByLabel('Buyer ID').fill(buyer.buyer_id);
-      await page.getByLabel('Buyer API Key').fill('playwright-local-api-key');
+      await page.getByLabel('Buyer API Key').fill(OPERATOR_TOKEN);
       await page.getByRole('button', { name: 'Open Wallet' }).click();
       await expect(page).toHaveURL(/\/buyer-portal\/wallet/);
       await expect(page.getByTestId('wallet-balance')).toBeVisible();

@@ -118,6 +118,27 @@ def test_local_demo_forces_local_formbricks_script(monkeypatch):
     assert "https://forms.example.test" not in page.text
 
 
+def test_louisiana_landing_preserves_google_ads_attribution(monkeypatch):
+    module = _load_landing(monkeypatch, enabled=True)
+    client = TestClient(module.app)
+
+    page = client.get(
+        "/louisiana-storm-tree-removal"
+        "?utm_source=google_ads&utm_medium=paid_search"
+        "&utm_campaign=la-canary&gclid=gclid12345678"
+    )
+
+    assert page.status_code == 200
+    assert "Louisiana hurricane response" in page.text
+    assert 'name="city" value="New Orleans"' in page.text
+    assert 'name="state" value="LA"' in page.text
+    assert 'name="zip" value="70112"' in page.text
+    assert 'name="utm_source" value="google_ads"' in page.text
+    assert 'name="utm_medium" value="paid_search"' in page.text
+    assert 'name="utm_campaign" value="la-canary"' in page.text
+    assert 'name="gclid" value="gclid12345678"' in page.text
+
+
 def test_local_demo_upload_requires_content_length(monkeypatch):
     module = _load_landing(monkeypatch, enabled=True)
 

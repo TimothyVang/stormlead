@@ -151,6 +151,11 @@ async def preview_follow_up(payload: FollowUpPreviewRequest) -> FollowUpPreviewR
 @app.post("/v1/inbound/preview")
 async def preview_inbound_call(payload: InboundCallPreviewRequest) -> InboundCallPreviewResponse:
     blocked_reasons: list[str] = []
+    intake_status: Literal[
+        "ready_for_operator_review",
+        "held_for_safety_review",
+        "blocked_missing_required_fields",
+    ]
     transcript_present = bool((payload.transcript_text or "").strip())
     consent_present = bool((payload.consent_text or "").strip())
     photo_link_present = bool(payload.photo_link_url)

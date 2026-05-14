@@ -34,6 +34,19 @@ LOCAL_DNS_NAMES = {"form-receiver", "localhost", "host.docker.internal"}
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 LOCAL_UPLOAD_DEFAULT_DIR = PROJECT_ROOT / "testing" / "runs" / "local-demo-uploads"
 DEFAULT_CONSENT_VERSION = "tree-damage-intake-v1"
+LOUISIANA_CANARY_DEFAULTS = {
+    "market_badge": "Louisiana storm tree removal",
+    "hero_eyebrow": "Louisiana hurricane response",
+    "hero_title": "Tree down after a Louisiana storm?",
+    "hero_copy": (
+        "Request storm-damage tree help in Southeast Louisiana. StormLead captures consent, "
+        "source attribution, and location proof before matching eligible requests to approved buyers."
+    ),
+    "default_city": "New Orleans",
+    "default_state": "LA",
+    "default_zip": "70112",
+    "default_utm_campaign": "louisiana_storm_tree_removal_canary",
+}
 HEIC_BRANDS = {
     b"heic",
     b"heix",
@@ -417,11 +430,24 @@ if _local_demo_enabled():
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
+    return _landing_response(request, market_defaults=None)
+
+
+@app.get("/louisiana-storm-tree-removal", response_class=HTMLResponse)
+async def louisiana_storm_tree_removal(request: Request) -> HTMLResponse:
+    return _landing_response(request, market_defaults=LOUISIANA_CANARY_DEFAULTS)
+
+
+def _landing_response(request: Request, *, market_defaults: dict[str, str] | None) -> HTMLResponse:
     hidden_fields: dict[str, Any] = {}
     for key, value in request.query_params.multi_items():
         if (key.startswith("utm_") or key == "gclid") and value:
             hidden_fields[key] = value
     hidden_fields.setdefault("consent_version", _consent_version())
+    if market_defaults:
+        hidden_fields.setdefault("utm_source", "google_ads")
+        hidden_fields.setdefault("utm_medium", "paid_search")
+        hidden_fields.setdefault("utm_campaign", market_defaults["default_utm_campaign"])
 
     return templates.TemplateResponse(
         request,
@@ -432,5 +458,6 @@ async def index(request: Request) -> HTMLResponse:
             "formbricks_script_src": _formbricks_script_src(),
             "hidden_fields": hidden_fields,
             "local_demo_enabled": _local_demo_enabled(),
+            "market": market_defaults or {},
         },
     )

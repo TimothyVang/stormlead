@@ -1,6 +1,14 @@
 import { expect, test, buyerWebhookUrl } from './fixtures';
 import { CoworkRun, type CoworkWorkflow } from './helpers/cowork';
-import { FORM_RECEIVER, PING_POST, runSeed, syntheticPhone, syntheticEmail } from './helpers/api';
+import {
+  FORM_RECEIVER,
+  PING_POST,
+  installOperatorToken,
+  operatorHeaders,
+  runSeed,
+  syntheticEmail,
+  syntheticPhone,
+} from './helpers/api';
 import { buildSignedHeaders, buildEnvelope, resolveWebhookSecret } from './helpers/webhook';
 import { waitForLeadStatus } from './helpers/wait';
 
@@ -37,6 +45,7 @@ test('operator views sold lead timeline in admin UI', async ({ page, request }, 
   const webhookSecret = resolveWebhookSecret();
 
   const buyerRes = await request.post(`${PING_POST}/v1/buyers`, {
+    headers: operatorHeaders(),
     data: {
       name: 'Playwright Operator Review',
       company: 'Playwright Operator Review Co',
@@ -57,7 +66,8 @@ test('operator views sold lead timeline in admin UI', async ({ page, request }, 
   expect([200, 201]).toContain(buyerRes.status());
   const buyer = await buyerRes.json();
   const activateRes = await request.patch(`${PING_POST}/v1/buyers/${buyer.buyer_id}`, {
-    data: { status: 'active' },
+    headers: operatorHeaders(),
+    data: { status: 'active', sales_stage: 'funded' },
   });
   expect(activateRes.status()).toBe(200);
 
@@ -80,6 +90,7 @@ test('operator views sold lead timeline in admin UI', async ({ page, request }, 
   cowork.observe(`Lead ${leadId} reached sold. current_state=${timeline.current_state}`);
 
   cowork.note('Opening admin dashboard in browser.');
+  await installOperatorToken(page);
   await page.goto(`${PING_POST}/admin`);
   await page.waitForLoadState('networkidle');
   await cowork.installCursor();

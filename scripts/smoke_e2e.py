@@ -126,6 +126,7 @@ def _env_file_value(file_name: str, key: str) -> str | None:
 
 
 DEFAULT_SMOKE_SECRET = "whsec_" + base64.b64encode(b"smoke-test-secret-32-bytes-padded").decode()
+DEFAULT_CONSENT_VERSION = "tree-damage-intake-v1"
 
 
 def _candidate_secrets() -> list[str]:
@@ -140,6 +141,27 @@ def _candidate_secrets() -> list[str]:
         if candidate and candidate not in unique:
             unique.append(candidate)
     return unique
+
+
+def _operator_headers() -> dict[str, str]:
+    token = (
+        os.environ.get("STORMLEAD_OPERATOR_TOKEN")
+        or _env_file_value(".env", "STORMLEAD_OPERATOR_TOKEN")
+        or _env_file_value(".env.example", "STORMLEAD_OPERATOR_TOKEN")
+        or ""
+    ).strip()
+    if not token:
+        return {}
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _current_consent_version() -> str:
+    return (
+        os.environ.get("STORMLEAD_CONSENT_VERSION")
+        or _env_file_value(".env", "STORMLEAD_CONSENT_VERSION")
+        or _env_file_value(".env.example", "STORMLEAD_CONSENT_VERSION")
+        or DEFAULT_CONSENT_VERSION
+    ).strip() or DEFAULT_CONSENT_VERSION
 
 
 SYNTHETIC_PHONE = os.environ.get(
@@ -177,7 +199,7 @@ def _make_handler(name: str):
         except Exception:
             return web.json_response({"error": "invalid_json"}, status=400)
         received[name].append({"headers": dict(request.headers), "body": body})
-        return web.json_response({"accept": True, "bid_cents": 5000})
+        return web.json_response({"accept": True, "bid_cents": 18_000})
 
     return handler
 
@@ -226,6 +248,7 @@ def _synthetic_envelope() -> dict[str, Any]:
                 "consent_text": (
                     "I agree to be contacted by tree-removal contractors regarding storm damage."
                 ),
+                "consent_version": _current_consent_version(),
                 "page_html_sha256": hashlib.sha256(str(time.time()).encode()).hexdigest(),
                 "requested_service": "tree_removal",
                 "damage_type": "fallen_tree",
@@ -284,9 +307,12 @@ def _smoke_buyer_payload(name: str, webhook_path: str, unique_id: int) -> dict[s
 async def _ensure_smoke_buyers(client: httpx.AsyncClient) -> list[str]:
     buyer_ids: list[str] = []
     unique_id = time.time_ns() % 10_000_000
+    operator_headers = _operator_headers()
     for offset, (name, path_suffix) in enumerate((("A", "buyer-a"), ("B", "buyer-b"))):
         payload = _smoke_buyer_payload(name, path_suffix, unique_id + offset)
-        response = await client.post(f"{PING_POST_URL}/v1/buyers", json=payload)
+        response = await client.post(
+            f"{PING_POST_URL}/v1/buyers", json=payload, headers=operator_headers
+        )
         if response.status_code != 200:
             _fail("seed-smoke-buyers", f"status={response.status_code} body={response.text}")
         buyer = response.json()
@@ -300,6 +326,7 @@ async def _ensure_smoke_buyers(client: httpx.AsyncClient) -> list[str]:
                 "sales_stage": "funded",
                 "notes": payload["notes"],
             },
+            headers=operator_headers,
         )
         if activate_response.status_code != 200:
             _fail(
@@ -455,6 +482,7 @@ async def main() -> None:
         _ok(f"idempotency_key={post_idempotency_key[:12]}...")
 
         async with httpx.AsyncClient(timeout=15) as client:
+            operator_headers = _operator_headers()
             _step("requesting invalid-lead return review")
             return_response = await client.post(
                 f"{PING_POST_URL}/v1/leads/{lead_id}/return",
@@ -464,6 +492,7 @@ async def main() -> None:
                     "evidence": {"buyer_delivery_lead_id": post_body.get("lead_id")},
                     "requested_by": "smoke-test-buyer",
                 },
+                headers=operator_headers,
             )
             if return_response.status_code != 200:
                 _fail(
@@ -484,6 +513,7 @@ async def main() -> None:
                     "notes": "Approved by smoke test to validate credit audit path.",
                     "operator": "smoke-e2e",
                 },
+                headers=operator_headers,
             )
             if review_response.status_code != 200:
                 _fail(
@@ -498,7 +528,10 @@ async def main() -> None:
             _ok(f"buyer_id={buyer_id} credited_cents={credited_cents}")
 
             _step("loading buyer daily report")
-            report_response = await client.get(f"{PING_POST_URL}/v1/buyers/{buyer_id}/daily-report")
+            report_response = await client.get(
+                f"{PING_POST_URL}/v1/buyers/{buyer_id}/daily-report",
+                headers=operator_headers,
+            )
             if report_response.status_code != 200:
                 _fail(
                     "buyer-daily-report",
@@ -511,7 +544,8 @@ async def main() -> None:
 
             _step("loading admin lead timeline")
             timeline_response = await client.get(
-                f"{PING_POST_URL}/v1/admin/leads/{lead_id}/timeline"
+                f"{PING_POST_URL}/v1/admin/leads/{lead_id}/timeline",
+                headers=operator_headers,
             )
             if timeline_response.status_code != 200:
                 _fail(
@@ -539,6 +573,7 @@ async def main() -> None:
                     "service": "tree_removal",
                     "campaign_budget_cents": 1000,
                 },
+                headers=operator_headers,
             )
             if readiness_response.status_code != 200:
                 _fail(

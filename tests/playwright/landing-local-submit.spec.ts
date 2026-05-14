@@ -1,5 +1,5 @@
 import { test, expect, buyerWebhookUrl } from './fixtures';
-import { LANDING, PING_POST } from './helpers/api';
+import { LANDING, PING_POST, operatorHeaders } from './helpers/api';
 import { waitForLeadStatus, waitForTimelineEvent } from './helpers/wait';
 
 test.describe('Landing Local Submit UI', () => {
@@ -30,7 +30,11 @@ test.describe('Landing Local Submit UI', () => {
       daily_cap: 100,
     });
     expect([200, 201]).toContain(buyer.status);
-    await apiClient.updateBuyer(buyer.body.buyer_id, { status: 'active' });
+    const updatedBuyer = await apiClient.updateBuyer(buyer.body.buyer_id, {
+      status: 'active',
+      sales_stage: 'funded',
+    });
+    expect(updatedBuyer.status).toBe(200);
 
     await context.grantPermissions(['geolocation'], { origin: LANDING });
     await context.setGeolocation({ latitude: 30.4515, longitude: -91.1871, accuracy: 25 });
@@ -53,6 +57,9 @@ test.describe('Landing Local Submit UI', () => {
       { name: 'close-damage.png', mimeType: 'image/png', buffer: pngBytes },
     ]);
     await expect(page.getByTestId('photo-status')).toContainText('2 of 2');
+    await page
+      .locator('[data-testid="local-lead-form"] textarea[name="consent_text"]')
+      .fill('I agree to be contacted regarding storm damage repair services. This is synthetic local QA data.');
     await page.getByTestId('consent-ack').check();
     await expect(page.getByTestId('local-lead-submit')).toBeEnabled();
     await page.getByTestId('local-lead-submit').click();
@@ -64,7 +71,10 @@ test.describe('Landing Local Submit UI', () => {
     expect(leadId).toMatch(/^[0-9a-f-]{36}$/);
 
     await waitForTimelineEvent(request, leadId!, 'lead.qualified', { timeoutMs: 90_000 });
-    const auction = await request.post(`${PING_POST}/v1/auction`, { data: { lead_id: leadId } });
+    const auction = await request.post(`${PING_POST}/v1/auction`, {
+      headers: operatorHeaders(),
+      data: { lead_id: leadId },
+    });
     expect(auction.status()).toBe(200);
     const timeline = await waitForLeadStatus(request, leadId!, 'sold', { timeoutMs: 60_000 });
     expect(timeline.current_state).toBe('sold');

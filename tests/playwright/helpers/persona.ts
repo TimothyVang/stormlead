@@ -29,6 +29,10 @@ interface WebhookLead {
   campaignId?: string;
 }
 
+interface SubmitLandingLeadOptions {
+  expectOk?: boolean;
+}
+
 export type BuyerWebhookExpectation = 'none' | 'ping-only' | 'ping-and-post';
 
 export function testZip(prefix: string, seed: number): string {
@@ -104,7 +108,13 @@ export async function createActiveBuyer(
   return { buyer: updated.body, webhookPath };
 }
 
-export async function submitLandingLead(page: Page, lead: LandingLead) {
+export async function submitLandingLead(
+  page: Page,
+  lead: LandingLead,
+  options: SubmitLandingLeadOptions = {},
+) {
+  await page.context().grantPermissions(['geolocation'], { origin: LANDING });
+  await page.context().setGeolocation({ latitude: 30.2672, longitude: -97.7431, accuracy: 25 });
   await page.goto(`${LANDING}/?utm_source=${lead.source ?? 'local_persona_suite'}&utm_campaign=${lead.campaign}`);
   await expect(page.getByTestId('local-lead-form')).toBeVisible();
   await page.locator('[data-testid="local-lead-form"] input[name="name"]').fill(lead.name);
@@ -116,10 +126,31 @@ export async function submitLandingLead(page: Page, lead: LandingLead) {
   await page.locator('[data-testid="local-lead-form"] input[name="state"]').fill(lead.state);
   await page.locator('[data-testid="local-lead-form"] input[name="zip"]').fill(lead.zip);
   await page.locator('[data-testid="local-lead-form"] textarea[name="consent_text"]').fill('I agree to be contacted regarding storm damage repair services. This is synthetic local QA data.');
+  await page.getByTestId('capture-location').click();
+  await expect(page.getByTestId('location-status')).toContainText('GPS captured');
+  await page.getByTestId('damage-photos').setInputFiles([
+    {
+      name: 'wide-persona-proof.jpg',
+      mimeType: 'image/jpeg',
+      buffer: Buffer.from('ffd8ffe000104a464946000101', 'hex'),
+    },
+    {
+      name: 'close-persona-proof.png',
+      mimeType: 'image/png',
+      buffer: Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'),
+    },
+  ]);
+  await expect(page.getByTestId('photo-status')).toContainText('2 of 2');
+  await page.getByTestId('consent-ack').check();
+  await expect(page.getByTestId('local-lead-submit')).toBeEnabled();
   await page.getByTestId('local-lead-submit').click();
 
   const result = page.getByTestId('local-lead-result');
-  await expect(result).toHaveClass(/ok/, { timeout: 30_000 });
+  if (options.expectOk ?? true) {
+    await expect(result).toHaveClass(/ok/, { timeout: 30_000 });
+  } else {
+    await expect(result).toBeVisible({ timeout: 30_000 });
+  }
   return {
     leadId: (await result.getAttribute('data-lead-id')) ?? '',
     status: (await result.getAttribute('data-status')) ?? '',

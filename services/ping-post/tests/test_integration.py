@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import os
+import time
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar, cast
 from uuid import uuid4
 
 import httpx
@@ -338,6 +342,56 @@ def _launch_ready_buyer(index: int = 0) -> api_module.BuyerRow:
         low_balance_threshold=Decimal("100.00"),
         lifetime_spend=Decimal("0.00"),
     )
+
+
+def _louisiana_canary_buyer() -> api_module.BuyerRow:
+    buyer = _launch_ready_buyer(0)
+    buyer.company = "Louisiana Storm Tree"
+    buyer.contact_email = "ops@louisiana-tree.example"
+    buyer.license_state = "LA"
+    buyer.target_zips = ["70112", "70119", "70001"]
+    buyer.filter_expression = "lead.state == 'LA'"
+    buyer.monthly_budget = Decimal("100.00")
+    buyer.deposit_balance = Decimal("150.00")
+    return buyer
+
+
+class FakeStripeResponse:
+    status_code = 200
+
+    def json(self) -> dict[str, str]:
+        return {
+            "id": "cs_test_wallet_refill",
+            "url": "https://checkout.stripe.test/session/cs_test_wallet_refill",
+        }
+
+
+class FakeStripeAsyncClient:
+    calls: ClassVar[list[dict[str, object]]] = []
+
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def __aenter__(self) -> FakeStripeAsyncClient:
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+    async def post(
+        self,
+        url: str,
+        *,
+        data: dict[str, str],
+        headers: dict[str, str],
+    ) -> FakeStripeResponse:
+        self.calls.append({"url": url, "data": data, "headers": headers})
+        return FakeStripeResponse()
+
+
+def _stripe_signature(raw: bytes, secret: str, timestamp: int) -> str:
+    signed = f"{timestamp}.".encode() + raw
+    return hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
 
 
 async def test_health_check(client: httpx.AsyncClient) -> None:
@@ -723,6 +777,65 @@ async def test_launch_readiness_requires_scoped_call_tracking_evidence(
     assert body["metrics"]["matched_call_events"] == 0
 
 
+async def test_louisiana_canary_readiness_uses_one_buyer_without_weakening_full_gate(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("STORMLEAD_APPROVE_PAYMENTS_SANDBOX", "true")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_canary")
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_canary")
+    fake_session = FakeLaunchReadinessSession(
+        scalar_values=[1, 1, 0],
+        buyers=[_louisiana_canary_buyer()],
+    )
+    monkeypatch.setattr(api_module, "get_session", lambda: fake_session)
+
+    response = await client.get(
+        "/v1/admin/canary-readiness",
+        params={
+            "market_state": "LA",
+            "service": "tree_removal",
+            "monthly_budget_cents": 10_000,
+            "daily_budget_cents": 333,
+        },
+    )
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["mode"] == "single_buyer_paid_canary"
+    assert body["readiness_label"] == "single_buyer_paid_canary_ready"
+    assert body["technical_canary_ready"] is True
+    assert body["ready_for_paid_launch"] is False
+    assert "three-buyer" in body["full_launch_gate_note"]
+    assert body["checks"]["one_active_louisiana_buyer_ready"] is True
+    assert body["checks"]["stripe_sandbox_ready"] is True
+    assert body["metrics"]["eligible_buyers"] == 1
+    assert body["buyer_readiness"][0]["coverage_zips"] == ["70001", "70112", "70119"]
+
+
+async def test_louisiana_canary_readiness_blocks_missing_buyer_and_sandbox(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("STORMLEAD_APPROVE_PAYMENTS_SANDBOX", raising=False)
+    monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
+    monkeypatch.delenv("STRIPE_WEBHOOK_SECRET", raising=False)
+    buyer = _louisiana_canary_buyer()
+    buyer.deposit_balance = Decimal("20.00")
+    buyer.target_zips = ["32801"]
+    fake_session = FakeLaunchReadinessSession(scalar_values=[0, 0, 0], buyers=[buyer])
+    monkeypatch.setattr(api_module, "get_session", lambda: fake_session)
+
+    response = await client.get("/v1/admin/canary-readiness")
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["readiness_label"] == "single_buyer_paid_canary_blocked"
+    assert body["technical_canary_ready"] is False
+    assert body["checks"]["one_active_louisiana_buyer_ready"] is False
+    assert body["checks"]["stripe_sandbox_ready"] is False
+    assert "wallet_covers_monthly_ad_budget" in body["buyer_readiness"][0]["missing_requirements"]
+    assert "louisiana_zip_coverage_ready" in body["buyer_readiness"][0]["missing_requirements"]
+
+
 async def test_operator_gate_blocks_admin_api_when_required(
     client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -922,8 +1035,52 @@ async def test_stripe_refill_intent_requires_payment_approval(
 
     body = response.json()
     assert response.status_code == 403
+    assert body["detail"]["error_code"] == "payment_provider_not_approved"
+    assert body["detail"]["message"] == "payment provider action is not approved"
     assert body["detail"]["provider_gate"]["allowed"] is False
     assert body["detail"]["approval_packet"]["status"] == "approval_required"
+
+
+async def test_stripe_sandbox_refill_intent_creates_checkout_session(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("STORMLEAD_REQUIRE_OPERATOR_TOKEN", "true")
+    monkeypatch.setenv("STORMLEAD_OPERATOR_TOKEN", "test-operator-token")
+    monkeypatch.setenv("STORMLEAD_APPROVE_PAYMENTS_SANDBOX", "true")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_wallet_refill")
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_wallet_refill")
+    FakeStripeAsyncClient.calls.clear()
+    monkeypatch.setattr(api_module.httpx, "AsyncClient", FakeStripeAsyncClient)
+
+    buyer_id = uuid4()
+    fake_session = FakeBuyerSession(_test_buyer(buyer_id, f"buyer-{buyer_id.hex}"))
+    monkeypatch.setattr(api_module, "get_session", lambda: fake_session)
+
+    response = await client.post(
+        f"/v1/buyers/{buyer_id}/wallet/refill-intents",
+        json={
+            "amount_cents": 50000,
+            "provider": "stripe",
+            "idempotency_key": "stripe-refill-test",
+        },
+        headers={"Authorization": "Bearer test-operator-token"},
+    )
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["provider"] == "stripe"
+    assert body["mode"] == "stripe_sandbox"
+    assert body["checkout_contract"]["type"] == "stripe_checkout_session"
+    assert body["checkout_contract"]["would_contact_payment_provider"] is True
+    assert body["checkout_contract"]["live_checkout_url"].startswith(
+        "https://checkout.stripe.test/"
+    )
+    call = FakeStripeAsyncClient.calls[0]
+    assert call["url"] == "https://api.stripe.com/v1/checkout/sessions"
+    call_data = cast(dict[str, str], call["data"])
+    call_headers = cast(dict[str, str], call["headers"])
+    assert call_data["metadata[buyer_id]"] == str(buyer_id)
+    assert "stripe-refill-test" in call_headers["Idempotency-Key"]
 
 
 async def test_local_refill_event_credits_wallet_once(
@@ -1025,7 +1182,8 @@ async def test_local_refill_event_credits_wallet_once(
     )
 
     assert conflict.status_code == 409
-    assert "idempotency conflict" in conflict.json()["detail"]
+    assert conflict.json()["detail"]["error_code"] == "payment_refill_idempotency_conflict"
+    assert "idempotency conflict" in conflict.json()["detail"]["message"]
     assert fake_session.exit_exc_types[-1] is None
     assert duplicate_body["buyer"]["deposit_balance_cents"] == 62500
     failed_webhook_event = fake_session.added[3]
@@ -1033,6 +1191,144 @@ async def test_local_refill_event_credits_wallet_once(
     assert failed_webhook_event.external_event_id == "evt_local_refill_conflict"
     assert failed_webhook_event.status == "failed"
     assert len(fake_session.added) == 4
+
+
+async def test_stripe_signed_webhook_credits_wallet_once(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = "whsec_signed_refill"  # noqa: S105 - fake Stripe webhook secret for test signing.
+    monkeypatch.setenv("STORMLEAD_APPROVE_PAYMENTS_SANDBOX", "true")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_signed_refill")
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", secret)
+    buyer_id = uuid4()
+    fake_session = FakeBuyerSession(_test_buyer(buyer_id, f"buyer-{buyer_id.hex}"))
+    monkeypatch.setattr(api_module, "get_session", lambda: fake_session)
+    event = {
+        "id": "evt_stripe_refill_signed_1",
+        "livemode": False,
+        "type": "checkout.session.completed",
+        "data": {
+            "object": {
+                "id": "cs_test_refill_1",
+                "payment_intent": "pi_test_refill_1",
+                "amount_total": 62500,
+                "currency": "usd",
+                "payment_status": "paid",
+                "metadata": {
+                    "buyer_id": str(buyer_id),
+                    "idempotency_key": "stripe-signed-refill-key",
+                    "source": "stormlead_wallet_refill",
+                },
+            }
+        },
+    }
+    raw = json.dumps(event, separators=(",", ":")).encode()
+    timestamp = int(time.time())
+    signature = _stripe_signature(raw, secret, timestamp)
+
+    response = await client.post(
+        "/v1/payments/stripe/refill-webhook",
+        content=raw,
+        headers={"Stripe-Signature": f"t={timestamp},v1={signature}"},
+    )
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["provider"] == "stripe"
+    assert body["status"] == "credited"
+    assert body["buyer"]["deposit_balance_cents"] == 62500
+    webhook_event = fake_session.added[0]
+    assert isinstance(webhook_event, api_module.PaymentWebhookEvent)
+    assert webhook_event.provider == "stripe"
+    assert webhook_event.status == "processed"
+    billing_event = fake_session.added[1]
+    assert isinstance(billing_event, api_module.BillingEvent)
+    assert billing_event.metadata_json["payment_provider"] == "stripe"
+    assert billing_event.metadata_json["local_simulation"] is False
+
+
+async def test_stripe_webhook_rejects_bad_signature(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_signed_refill")
+    raw = b'{"id":"evt_bad","type":"checkout.session.completed","data":{"object":{}}}'
+    timestamp = int(time.time())
+
+    response = await client.post(
+        "/v1/payments/stripe/refill-webhook",
+        content=raw,
+        headers={"Stripe-Signature": f"t={timestamp},v1=bad"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error_code"] == "stripe_webhook_signature_invalid"
+    assert "signature verification failed" in response.json()["detail"]["message"]
+
+
+async def test_stripe_webhook_rejects_oversized_body_before_processing(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(api_module, "STRIPE_WEBHOOK_MAX_BODY_BYTES", 32)
+    verification_called = False
+
+    def fail_if_verified(_raw_body: bytes, _signature_header: str) -> dict[str, Any]:
+        nonlocal verification_called
+        verification_called = True
+        raise AssertionError("oversized webhook body reached signature verification")
+
+    monkeypatch.setattr(api_module, "_verified_stripe_event", fail_if_verified)
+
+    response = await client.post(
+        "/v1/payments/stripe/refill-webhook",
+        content=b'{"id":"evt_oversized","padding":"too-large"}',
+        headers={"Stripe-Signature": "t=1,v1=unused"},
+    )
+
+    assert response.status_code == 413
+    assert response.json()["detail"]["error_code"] == "stripe_webhook_body_too_large"
+    assert "body exceeds" in response.json()["detail"]["message"]
+    assert verification_called is False
+
+
+async def test_stripe_webhook_rejects_live_mode_event(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = "whsec_live_mode_reject"  # noqa: S105 - fake Stripe webhook secret for test signing.
+    monkeypatch.setenv("STORMLEAD_APPROVE_PAYMENTS_SANDBOX", "true")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_live_mode_reject")
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", secret)
+    buyer_id = uuid4()
+    fake_session = FakeBuyerSession(_test_buyer(buyer_id, f"buyer-{buyer_id.hex}"))
+    monkeypatch.setattr(api_module, "get_session", lambda: fake_session)
+    event = {
+        "id": "evt_stripe_live_mode_1",
+        "livemode": True,
+        "type": "checkout.session.completed",
+        "data": {
+            "object": {
+                "id": "cs_live_refill_1",
+                "payment_intent": "pi_live_refill_1",
+                "amount_total": 62500,
+                "currency": "usd",
+                "payment_status": "paid",
+                "metadata": {"buyer_id": str(buyer_id)},
+            }
+        },
+    }
+    raw = json.dumps(event, separators=(",", ":")).encode()
+    timestamp = int(time.time())
+    signature = _stripe_signature(raw, secret, timestamp)
+
+    response = await client.post(
+        "/v1/payments/stripe/refill-webhook",
+        content=raw,
+        headers={"Stripe-Signature": f"t={timestamp},v1={signature}"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["error_code"] == "stripe_webhook_livemode_not_allowed"
+    assert "livemode=false" in response.json()["detail"]["message"]
+    assert fake_session.added == []
 
 
 async def test_refill_event_rejects_failed_or_unapproved_live_events(
@@ -1059,6 +1355,7 @@ async def test_refill_event_rejects_failed_or_unapproved_live_events(
         headers={"Authorization": "Bearer test-operator-token"},
     )
     assert failed.status_code == 409
+    assert failed.json()["detail"]["error_code"] == "payment_status_not_creditable"
     assert fake_session.buyer.deposit_balance == Decimal("0.00")
 
     live = await client.post(
@@ -1067,6 +1364,7 @@ async def test_refill_event_rejects_failed_or_unapproved_live_events(
         headers={"Authorization": "Bearer test-operator-token"},
     )
     assert live.status_code == 403
+    assert live.json()["detail"]["error_code"] == "payment_provider_not_approved"
     assert fake_session.buyer.deposit_balance == Decimal("0.00")
 
 
@@ -1096,6 +1394,7 @@ async def test_approved_live_refill_event_still_requires_signed_provider_webhook
     )
 
     assert response.status_code == 403
+    assert response.json()["detail"]["error_code"] == "live_payment_requires_signed_webhook"
     assert "signed Stripe webhook" in response.json()["detail"]["message"]
     assert fake_session.buyer.deposit_balance == Decimal("0.00")
 

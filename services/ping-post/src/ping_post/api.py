@@ -23,6 +23,7 @@ import json
 import os
 import re
 import secrets
+import time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -32,6 +33,7 @@ from io import StringIO
 from typing import Any, cast
 from uuid import UUID, uuid4
 
+import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from hatchet_sdk import Context, Hatchet
@@ -43,6 +45,7 @@ from stormlead_core import (
     Lead,
     PipelineState,
     ProviderArea,
+    ProviderDecision,
     configure_logging,
     get_logger,
     provider_decision,
@@ -160,6 +163,73 @@ PAYMENT_SENSITIVE_METADATA_VALUE_MARKERS = (
     "rk_test_",
     "whsec_",
 )
+STRIPE_SIGNATURE_TOLERANCE_SECONDS = 300
+STRIPE_WEBHOOK_MAX_BODY_BYTES = 256 * 1024
+STRIPE_SANDBOX_APPROVAL_ENV = "STORMLEAD_APPROVE_PAYMENTS_SANDBOX"
+
+
+def _payment_error_detail(message: str, error_code: str, **metadata: Any) -> dict[str, Any]:
+    detail: dict[str, Any] = {"message": message, "error_code": error_code}
+    detail.update({key: value for key, value in metadata.items() if value is not None})
+    return detail
+
+
+def _payment_http_exception(
+    status_code: int, message: str, error_code: str, **metadata: Any
+) -> HTTPException:
+    return HTTPException(status_code, _payment_error_detail(message, error_code, **metadata))
+
+
+DEFAULT_CANARY_MARKET_STATE = "LA"
+DEFAULT_CANARY_SERVICE = "tree_removal"
+DEFAULT_CANARY_MONTHLY_BUDGET_CENTS = 10_000
+DEFAULT_CANARY_DAILY_BUDGET_CENTS = 333
+LOUISIANA_CANARY_ZIPS = {
+    "70001",
+    "70002",
+    "70003",
+    "70005",
+    "70006",
+    "70062",
+    "70065",
+    "70112",
+    "70113",
+    "70114",
+    "70115",
+    "70116",
+    "70117",
+    "70118",
+    "70119",
+    "70122",
+    "70124",
+    "70125",
+    "70126",
+    "70127",
+    "70128",
+    "70129",
+    "70130",
+    "70131",
+    "70301",
+    "70360",
+    "70364",
+    "70433",
+    "70435",
+    "70448",
+    "70458",
+    "70460",
+    "70461",
+    "70471",
+    "70801",
+    "70802",
+    "70805",
+    "70806",
+    "70808",
+    "70809",
+    "70810",
+    "70816",
+    "70817",
+    "70820",
+}
 ADS_OFFLINE_CONVERSION_COLUMNS = [
     "Google Click ID",
     "Conversion Name",
@@ -668,6 +738,8 @@ def _operator_token(request: Request) -> str | None:
 
 
 def _operator_path_requires_gate(path: str, method: str) -> bool:
+    if path == "/v1/payments/stripe/refill-webhook":
+        return False
     if path.startswith("/v1/admin/"):
         return True
     if path.startswith("/v1/kpis/"):
@@ -2661,41 +2733,45 @@ async def get_wallet_reconciliation(buyer_id: UUID, request: Request) -> dict[st
 
 @app.post("/v1/buyers/{buyer_id}/wallet/refill-intents")
 async def create_wallet_refill_intent(
-    buyer_id: UUID, payload: WalletRefillIntentRequest
+    buyer_id: UUID, payload: WalletRefillIntentRequest, request: Request
 ) -> dict[str, Any]:
-    decision = _payment_provider_decision(
-        payload.provider, action="create buyer wallet refill intent"
+    decision = (
+        _stripe_sandbox_payment_decision("create Stripe sandbox buyer wallet refill intent")
+        if payload.provider == "stripe"
+        else _payment_provider_decision(
+            payload.provider, action="create buyer wallet refill intent"
+        )
     )
     if not decision.allowed:
-        raise HTTPException(
+        raise _payment_http_exception(
             403,
-            {
-                "message": "payment provider action is not approved",
-                "provider_gate": _provider_decision_response(decision),
-                "approval_packet": _payment_approval_packet(),
-            },
-        )
-    if payload.provider != "local":
-        raise HTTPException(
-            403,
-            {
-                "message": "live payment provider checkout requires signed provider integration before use",
-                "provider_gate": _provider_decision_response(decision),
-                "approval_packet": _payment_approval_packet(),
-            },
+            "payment provider action is not approved",
+            "payment_provider_not_approved",
+            provider_gate=_provider_decision_response(decision),
+            approval_packet=_payment_approval_packet(),
         )
     try:
         async with get_session() as s:
             buyer = await s.get(BuyerRow, buyer_id)
             if buyer is None:
-                raise HTTPException(404, "buyer not found; verify the buyer id and try again")
+                raise _payment_http_exception(
+                    404,
+                    "buyer not found; verify the buyer id and try again",
+                    "payment_buyer_not_found",
+                )
+            if payload.provider == "stripe":
+                return await _stripe_wallet_refill_intent_response(
+                    buyer, payload, decision, request
+                )
             return _wallet_refill_intent_response(buyer, payload, decision)
     except HTTPException:
         raise
     except Exception as e:
         log.error("buyer.wallet_refill_intent_failed", buyer_id=str(buyer_id), error=str(e))
-        raise HTTPException(
-            500, "wallet refill intent could not be created; retry after checking database health"
+        raise _payment_http_exception(
+            500,
+            "wallet refill intent could not be created; retry after checking database health",
+            "wallet_refill_intent_failed",
         ) from e
 
 
@@ -2734,32 +2810,61 @@ async def ingest_payment_refill_event(payload: PaymentRefillEventRequest) -> dic
         payload.provider, action="credit buyer wallet from payment event"
     )
     if not decision.allowed:
-        raise HTTPException(
+        raise _payment_http_exception(
             403,
-            {
-                "message": "payment provider action is not approved",
-                "provider_gate": _provider_decision_response(decision),
-                "approval_packet": _payment_approval_packet(),
-            },
+            "payment provider action is not approved",
+            "payment_provider_not_approved",
+            provider_gate=_provider_decision_response(decision),
+            approval_packet=_payment_approval_packet(),
         )
     if payload.provider != "local":
-        raise HTTPException(
+        raise _payment_http_exception(
             403,
-            {
-                "message": "live payment events require signed Stripe webhook verification before wallet crediting",
-                "provider_gate": _provider_decision_response(decision),
-                "approval_packet": _payment_approval_packet(),
-            },
+            "live payment events require signed Stripe webhook verification before wallet crediting",
+            "live_payment_requires_signed_webhook",
+            provider_gate=_provider_decision_response(decision),
+            approval_packet=_payment_approval_packet(),
         )
+    return await _credit_payment_refill_event(payload, decision=decision)
+
+
+@app.post("/v1/payments/stripe/refill-webhook")
+async def ingest_stripe_refill_webhook(request: Request) -> dict[str, Any]:
+    raw_body = await _read_stripe_webhook_body(request)
+    event = _verified_stripe_event(raw_body, request.headers.get("stripe-signature", ""))
+    payload = _stripe_refill_event_payload(event)
+    decision = _stripe_sandbox_payment_decision("credit buyer wallet from signed Stripe webhook")
+    if not decision.allowed:
+        raise _payment_http_exception(
+            403,
+            "Stripe sandbox payment webhook is not approved or configured",
+            "stripe_webhook_not_approved",
+            provider_gate=_provider_decision_response(decision),
+            approval_packet=_payment_approval_packet(),
+        )
+    return await _credit_payment_refill_event(payload, decision=decision)
+
+
+async def _credit_payment_refill_event(
+    payload: PaymentRefillEventRequest, *, decision: Any
+) -> dict[str, Any]:
     if payload.status not in PAYMENT_CREDITABLE_STATUSES:
-        raise HTTPException(409, "payment event status is not creditable")
+        raise _payment_http_exception(
+            409,
+            "payment event status is not creditable",
+            "payment_status_not_creditable",
+        )
     try:
         conflict_detail: str | None = None
         async with get_session() as s:
             await _lock_payment_refill_idempotency_scope(s, payload)
             buyer = await s.get(BuyerRow, payload.buyer_id, with_for_update=True)
             if buyer is None:
-                raise HTTPException(404, "buyer not found; verify the buyer id and try again")
+                raise _payment_http_exception(
+                    404,
+                    "buyer not found; verify the buyer id and try again",
+                    "payment_buyer_not_found",
+                )
             existing = await _existing_payment_refill_event(
                 s,
                 provider=payload.provider,
@@ -2826,7 +2931,11 @@ async def ingest_payment_refill_event(payload: PaymentRefillEventRequest) -> dic
                     webhook_event=webhook_event,
                 )
         if conflict_detail is not None:
-            raise HTTPException(409, conflict_detail)
+            raise _payment_http_exception(
+                409,
+                conflict_detail,
+                "payment_refill_idempotency_conflict",
+            )
         raise RuntimeError("payment refill event reached an unreachable state")
     except HTTPException:
         raise
@@ -2838,8 +2947,10 @@ async def ingest_payment_refill_event(payload: PaymentRefillEventRequest) -> dic
             provider_event_id=payload.provider_event_id,
             error=str(e),
         )
-        raise HTTPException(
-            500, "payment refill event could not be recorded; reconcile before retrying"
+        raise _payment_http_exception(
+            500,
+            "payment refill event could not be recorded; reconcile before retrying",
+            "payment_refill_record_failed",
         ) from e
 
 
@@ -3359,6 +3470,57 @@ def _payment_provider_decision(provider: str, *, action: str):
     )
 
 
+def _stripe_secret_key() -> str:
+    return os.getenv("STRIPE_SECRET_KEY", "").strip()
+
+
+def _stripe_webhook_secret() -> str:
+    return os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
+
+
+def _stripe_key_mode() -> str:
+    key = _stripe_secret_key()
+    if key.startswith("sk_test_"):
+        return "sandbox"
+    if key.startswith("sk_live_"):
+        return "live"
+    return "missing"
+
+
+def _stripe_sandbox_configured() -> bool:
+    return _stripe_key_mode() == "sandbox" and _stripe_webhook_secret().startswith("whsec_")
+
+
+def _stripe_sandbox_payment_decision(action: str) -> ProviderDecision:
+    base = provider_decision(ProviderArea.PAYMENTS, action=action)
+    if not base.allowed:
+        return base
+    if not _truthy_env(STRIPE_SANDBOX_APPROVAL_ENV):
+        return ProviderDecision(
+            ProviderArea.PAYMENTS,
+            False,
+            "Stripe sandbox payment action is not approved",
+            action,
+            external=True,
+        )
+    if not _stripe_sandbox_configured():
+        return ProviderDecision(
+            ProviderArea.PAYMENTS,
+            False,
+            "Stripe sandbox secret key and webhook secret are not configured",
+            action,
+            external=True,
+        )
+    return ProviderDecision(
+        ProviderArea.PAYMENTS,
+        True,
+        "Stripe sandbox provider action approved",
+        action,
+        external=True,
+        live_mode=False,
+    )
+
+
 def _provider_decision_response(decision: Any) -> dict[str, Any]:
     return {
         "area": decision.area.value,
@@ -3373,11 +3535,22 @@ def _provider_decision_response(decision: Any) -> dict[str, Any]:
 
 def _payment_approval_packet() -> dict[str, Any]:
     approved = provider_live_approved(ProviderArea.PAYMENTS)
+    sandbox_configured = _stripe_sandbox_configured()
     return {
         "status": "approved" if approved else "approval_required",
         "required": not approved,
         "requested_action": "Approve Stripe sandbox/live payment provider setup for buyer wallet refills.",
         "scope": "Create Stripe Checkout or PaymentIntent sessions and accept signed Stripe webhook credits for buyer wallet deposits.",
+        "sandbox": {
+            "approved": _truthy_env(STRIPE_SANDBOX_APPROVAL_ENV),
+            "configured": sandbox_configured,
+            "key_mode": _stripe_key_mode(),
+            "required_env": [
+                f"{STRIPE_SANDBOX_APPROVAL_ENV}=true",
+                "STRIPE_SECRET_KEY=sk_test_<local secret store>",
+                "STRIPE_WEBHOOK_SECRET=whsec_<local secret store>",
+            ],
+        },
         "required_env": [
             "STORMLEAD_APPROVE_PAYMENTS_LIVE=true",
             "STRIPE_SECRET_KEY=<local secret store>",
@@ -3450,6 +3623,276 @@ def _wallet_refill_intent_response(
         },
         "buyer": _buyer_wallet_response(buyer),
     }
+
+
+async def _stripe_wallet_refill_intent_response(
+    buyer: BuyerRow,
+    payload: WalletRefillIntentRequest,
+    decision: Any,
+    request: Request,
+) -> dict[str, Any]:
+    idempotency_key = _refill_idempotency_key(
+        buyer_id=buyer.id,
+        amount_cents=payload.amount_cents,
+        currency=payload.currency,
+        supplied=payload.idempotency_key,
+    )
+    session = await _create_stripe_checkout_session(
+        buyer=buyer,
+        payload=payload,
+        idempotency_key=idempotency_key,
+        request=request,
+    )
+    return {
+        "buyer_id": str(buyer.id),
+        "provider": "stripe",
+        "mode": "stripe_sandbox",
+        "payment_intent_id": None,
+        "amount_cents": payload.amount_cents,
+        "currency": payload.currency,
+        "status": "requires_stripe_checkout_completion",
+        "idempotency_key": idempotency_key,
+        "provider_gate": _provider_decision_response(decision),
+        "live_payment_approval": _payment_approval_packet(),
+        "checkout_contract": {
+            "type": "stripe_checkout_session",
+            "checkout_session_id": session["id"],
+            "live_checkout_url": session["url"],
+            "would_contact_payment_provider": True,
+            "webhook_endpoint": "/v1/payments/stripe/refill-webhook",
+            "event_payload": None,
+            "operator_steps": [
+                "Complete the Stripe sandbox Checkout Session with a Stripe test card.",
+                "Confirm Stripe posts a signed checkout.session.completed webhook to the refill webhook endpoint.",
+                "Do not use Stripe live keys unless STORMLEAD_APPROVE_PAYMENTS_LIVE=true is approved.",
+            ],
+        },
+        "buyer": _buyer_wallet_response(buyer),
+    }
+
+
+async def _create_stripe_checkout_session(
+    *,
+    buyer: BuyerRow,
+    payload: WalletRefillIntentRequest,
+    idempotency_key: str,
+    request: Request,
+) -> dict[str, str]:
+    secret_key = _stripe_secret_key()
+    if not secret_key.startswith("sk_test_"):
+        raise _payment_http_exception(
+            403,
+            "Stripe sandbox checkout requires a sk_test_ secret key",
+            "stripe_checkout_requires_sandbox_key",
+        )
+    origin = str(request.base_url).rstrip("/")
+    success_url = os.getenv("STRIPE_CHECKOUT_SUCCESS_URL", f"{origin}/admin?stripe=success")
+    cancel_url = os.getenv("STRIPE_CHECKOUT_CANCEL_URL", f"{origin}/admin?stripe=cancel")
+    data = {
+        "mode": "payment",
+        "success_url": success_url,
+        "cancel_url": cancel_url,
+        "client_reference_id": str(buyer.id),
+        "line_items[0][quantity]": "1",
+        "line_items[0][price_data][currency]": payload.currency.lower(),
+        "line_items[0][price_data][unit_amount]": str(payload.amount_cents),
+        "line_items[0][price_data][product_data][name]": "StormLead buyer wallet refill",
+        "metadata[buyer_id]": str(buyer.id),
+        "metadata[idempotency_key]": idempotency_key,
+        "metadata[source]": "stormlead_wallet_refill",
+    }
+    if payload.description:
+        data["metadata[description]"] = payload.description[:255]
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.post(
+            "https://api.stripe.com/v1/checkout/sessions",
+            data=data,
+            headers={
+                "Authorization": f"Bearer {secret_key}",
+                "Idempotency-Key": idempotency_key,
+            },
+        )
+    if response.status_code >= 400:
+        raise _payment_http_exception(
+            502,
+            "Stripe sandbox checkout session could not be created",
+            "stripe_checkout_create_failed",
+            stripe_status_code=response.status_code,
+        )
+    body = response.json()
+    session_id = str(body.get("id") or "")
+    url = str(body.get("url") or "")
+    if not session_id or not url:
+        raise _payment_http_exception(
+            502,
+            "Stripe sandbox checkout response omitted session id or url",
+            "stripe_checkout_response_invalid",
+        )
+    return {"id": session_id, "url": url}
+
+
+def _stripe_signature_values(header: str) -> tuple[int, list[str]]:
+    timestamp: int | None = None
+    signatures: list[str] = []
+    for part in header.split(","):
+        key, _, value = part.partition("=")
+        if key == "t" and value:
+            try:
+                timestamp = int(value)
+            except ValueError as e:
+                raise _payment_http_exception(
+                    400,
+                    "invalid Stripe webhook timestamp",
+                    "stripe_signature_timestamp_invalid",
+                ) from e
+        elif key == "v1" and value:
+            signatures.append(value)
+    if timestamp is None or not signatures:
+        raise _payment_http_exception(
+            400,
+            "Stripe-Signature must include t and v1 values",
+            "stripe_signature_header_invalid",
+        )
+    return timestamp, signatures
+
+
+async def _read_stripe_webhook_body(request: Request) -> bytes:
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            declared_size = int(content_length)
+        except ValueError as e:
+            raise _payment_http_exception(
+                400,
+                "Stripe webhook Content-Length is invalid",
+                "stripe_webhook_content_length_invalid",
+            ) from e
+        if declared_size > STRIPE_WEBHOOK_MAX_BODY_BYTES:
+            raise _payment_http_exception(
+                413,
+                "Stripe webhook body exceeds the configured size limit",
+                "stripe_webhook_body_too_large",
+            )
+
+    chunks: list[bytes] = []
+    total_size = 0
+    async for chunk in request.stream():
+        total_size += len(chunk)
+        if total_size > STRIPE_WEBHOOK_MAX_BODY_BYTES:
+            raise _payment_http_exception(
+                413,
+                "Stripe webhook body exceeds the configured size limit",
+                "stripe_webhook_body_too_large",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _verified_stripe_event(raw_body: bytes, signature_header: str) -> dict[str, Any]:
+    secret = _stripe_webhook_secret()
+    if not secret.startswith("whsec_"):
+        raise _payment_http_exception(
+            403,
+            "Stripe webhook secret is not configured",
+            "stripe_webhook_secret_not_configured",
+        )
+    timestamp, signatures = _stripe_signature_values(signature_header)
+    if abs(int(time.time()) - timestamp) > STRIPE_SIGNATURE_TOLERANCE_SECONDS:
+        raise _payment_http_exception(
+            400,
+            "Stripe webhook timestamp is outside the replay window",
+            "stripe_webhook_timestamp_outside_window",
+        )
+    signed_payload = f"{timestamp}.".encode() + raw_body
+    expected = hmac.new(secret.encode("utf-8"), signed_payload, hashlib.sha256).hexdigest()
+    if not any(hmac.compare_digest(expected, signature) for signature in signatures):
+        raise _payment_http_exception(
+            400,
+            "Stripe webhook signature verification failed",
+            "stripe_webhook_signature_invalid",
+        )
+    try:
+        event = json.loads(raw_body.decode("utf-8"))
+    except json.JSONDecodeError as e:
+        raise _payment_http_exception(
+            400,
+            "Stripe webhook body must be valid JSON",
+            "stripe_webhook_json_invalid",
+        ) from e
+    if not isinstance(event, dict):
+        raise _payment_http_exception(
+            400,
+            "Stripe webhook event must be a JSON object",
+            "stripe_webhook_event_not_object",
+        )
+    return event
+
+
+def _stripe_refill_event_payload(event: Mapping[str, Any]) -> PaymentRefillEventRequest:
+    event_id = str(event.get("id") or "")
+    event_type = str(event.get("type") or "")
+    if event.get("livemode") is not False:
+        raise _payment_http_exception(
+            403,
+            "Stripe sandbox refill webhook requires livemode=false",
+            "stripe_webhook_livemode_not_allowed",
+        )
+    data = event.get("data")
+    stripe_object_raw = data.get("object") if isinstance(data, Mapping) else None
+    if not event_id or not isinstance(stripe_object_raw, Mapping):
+        raise _payment_http_exception(
+            400,
+            "Stripe webhook event is missing id or data.object",
+            "stripe_webhook_event_missing_data",
+        )
+    stripe_object = cast(Mapping[str, Any], stripe_object_raw)
+    if event_type not in {"checkout.session.completed", "payment_intent.succeeded"}:
+        raise _payment_http_exception(
+            409,
+            f"Stripe event type {event_type} is not creditable",
+            "stripe_webhook_event_not_creditable",
+        )
+    metadata_raw = stripe_object.get("metadata")
+    metadata: Mapping[str, Any]
+    if isinstance(metadata_raw, Mapping):
+        metadata = cast(Mapping[str, Any], metadata_raw)
+    else:
+        metadata = {}
+    buyer_id = str(metadata.get("buyer_id") or "")
+    payment_intent_id = str(stripe_object.get("payment_intent") or stripe_object.get("id") or "")
+    amount_cents_raw = stripe_object.get("amount_total") or stripe_object.get("amount_received")
+    if amount_cents_raw is None:
+        raise _payment_http_exception(
+            400,
+            "Stripe refill webhook is missing an amount",
+            "stripe_webhook_amount_missing",
+        )
+    currency = str(stripe_object.get("currency") or "usd").upper()
+    payment_status = str(stripe_object.get("payment_status") or stripe_object.get("status") or "")
+    status = "succeeded" if event_type == "payment_intent.succeeded" else payment_status
+    idempotency_key = str(metadata.get("idempotency_key") or f"stripe:{event_id}")
+    try:
+        return PaymentRefillEventRequest(
+            provider="stripe",
+            provider_event_id=event_id,
+            payment_intent_id=payment_intent_id,
+            buyer_id=UUID(buyer_id),
+            amount_cents=int(amount_cents_raw),
+            currency=currency,
+            status=status,
+            idempotency_key=idempotency_key,
+            metadata={
+                "stripe_event_type": event_type,
+                "stripe_object_id": str(stripe_object.get("id") or ""),
+                "source": str(metadata.get("source") or "stripe_checkout"),
+            },
+        )
+    except (TypeError, ValueError) as e:
+        raise _payment_http_exception(
+            400,
+            "Stripe refill webhook is missing valid refill metadata",
+            "stripe_webhook_metadata_invalid",
+        ) from e
 
 
 def _safe_payment_metadata(metadata: Mapping[str, Any]) -> dict[str, str]:
@@ -3799,6 +4242,217 @@ def _buyer_sandbox_certification_response(buyer: BuyerRow) -> dict[str, Any]:
             "must_pass_before_active_delivery": True,
             "activation_readiness": readiness,
         },
+    }
+
+
+def _buyer_coverage_zips(buyer: BuyerRow) -> list[str]:
+    return _normalize_string_list(list((buyer.target_zips or []) + (buyer.exclusive_zips or [])))
+
+
+def _zip_looks_louisiana(zip_code: str) -> bool:
+    return zip_code.startswith("70") or zip_code.startswith("71")
+
+
+def _buyer_manual_delivery_ready(buyer: BuyerRow) -> bool:
+    notes = str(buyer.notes or "").lower()
+    return "manual delivery approved" in notes or "approved manual delivery" in notes
+
+
+def _single_buyer_canary_readiness(
+    buyer: BuyerRow,
+    *,
+    market_state: str,
+    market_zip: str | None,
+    service: str,
+    monthly_budget_cents: int,
+) -> dict[str, Any]:
+    activation = _buyer_onboarding_readiness(buyer)
+    coverage_zips = sorted(_buyer_coverage_zips(buyer))
+    services = _normalize_string_list(list(buyer.services or []))
+    balance_cents = _decimal_to_cents(buyer.deposit_balance)
+    monthly_budget_ready = _decimal_to_cents(buyer.monthly_budget) >= monthly_budget_cents
+    wallet_ready = balance_cents >= monthly_budget_cents and balance_cents > 0
+    service_ready = service in services
+    if market_zip:
+        zip_ready = market_zip in coverage_zips
+    else:
+        zip_ready = bool(set(coverage_zips) & LOUISIANA_CANARY_ZIPS) or any(
+            _zip_looks_louisiana(zip_code) for zip_code in coverage_zips
+        )
+    delivery_path_ready = bool(
+        buyer.webhook_url and buyer.webhook_secret and buyer.api_key
+    ) or _buyer_manual_delivery_ready(buyer)
+    terms_ready = (
+        str(buyer.sales_stage or "") == BuyerSalesStage.FUNDED.value
+        or "terms accepted" in str(buyer.notes or "").lower()
+    )
+    requirements = {
+        "active_status": buyer.status == BuyerStatus.ACTIVE.value,
+        "terms_or_manual_delivery_policy_ready": terms_ready,
+        "service_tree_removal_ready": service_ready,
+        "louisiana_zip_coverage_ready": market_state == "LA" and zip_ready,
+        "wallet_covers_monthly_ad_budget": wallet_ready,
+        "lead_price_ready": _decimal_to_cents(buyer.bid_per_lead_t1_t2) > 0
+        and _decimal_to_cents(buyer.bid_per_lead_t3) > 0,
+        "caps_and_budget_ready": int(buyer.daily_cap or 0) > 0 and monthly_budget_ready,
+        "delivery_path_ready": delivery_path_ready,
+    }
+    missing = [name for name, ready in requirements.items() if not ready]
+    return {
+        "buyer_id": str(buyer.id),
+        "company": buyer.company,
+        "canary_ready": not missing,
+        "missing_requirements": missing,
+        "requirements": requirements,
+        "coverage_zips": coverage_zips,
+        "services": services,
+        "delivery_mode": "manual_approved"
+        if _buyer_manual_delivery_ready(buyer)
+        else "webhook"
+        if delivery_path_ready
+        else "missing",
+        "activation_readiness": activation,
+        "wallet_balance_cents": balance_cents,
+        "monthly_budget_cents": _decimal_to_cents(buyer.monthly_budget),
+        "daily_cap": buyer.daily_cap,
+    }
+
+
+@app.get("/v1/admin/canary-readiness")
+async def single_buyer_canary_readiness(
+    market_state: str = Query(default=DEFAULT_CANARY_MARKET_STATE, min_length=2, max_length=2),
+    market_zip: str | None = Query(default=None, min_length=3, max_length=10),
+    service: str = Query(default=DEFAULT_CANARY_SERVICE, min_length=1, max_length=64),
+    monthly_budget_cents: int = Query(default=DEFAULT_CANARY_MONTHLY_BUDGET_CENTS, ge=0),
+    daily_budget_cents: int = Query(default=DEFAULT_CANARY_DAILY_BUDGET_CENTS, ge=0),
+    require_sold_evidence: bool = Query(default=False),
+) -> dict[str, Any]:
+    """Evaluate the narrowed Louisiana one-buyer paid canary without changing full launch gates."""
+    normalized_state = market_state.strip().upper()
+    normalized_service = service.strip().lower()
+    if normalized_state != DEFAULT_CANARY_MARKET_STATE:
+        raise HTTPException(400, "single-buyer paid canary is currently scoped to Louisiana only")
+    lead_scope = [
+        LeadRow.state == normalized_state,
+        LeadRow.requested_service == normalized_service,
+    ]
+    if market_zip:
+        lead_scope.append(LeadRow.zip == market_zip)
+    try:
+        async with get_session() as s:
+            buyers = (
+                (
+                    await s.execute(
+                        select(BuyerRow).where(
+                            BuyerRow.status == BuyerStatus.ACTIVE.value,
+                            BuyerRow.services.contains([normalized_service]),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            lead_ids_subq = select(LeadRow.id).where(and_(*lead_scope)).subquery()
+            delivered = await s.scalar(
+                select(func.count(PostResult.id)).where(
+                    PostResult.delivered.is_(True),
+                    PostResult.lead_id.in_(select(lead_ids_subq.c.id)),
+                )
+            )
+            attributed_leads = await s.scalar(
+                select(func.count(LeadRow.id)).where(
+                    LeadRow.id.in_(select(lead_ids_subq.c.id)),
+                    or_(
+                        and_(LeadRow.google_click_id.is_not(None), LeadRow.google_click_id != ""),
+                        and_(LeadRow.campaign_source.is_not(None), LeadRow.campaign_source != ""),
+                    ),
+                )
+            )
+            failed_deliveries = await s.scalar(
+                select(func.count(PostResult.id)).where(
+                    PostResult.delivered.is_(False),
+                    PostResult.lead_id.in_(select(lead_ids_subq.c.id)),
+                )
+            )
+    except Exception as e:
+        log.error("admin.canary_readiness_failed", error=str(e))
+        raise HTTPException(
+            500, "canary readiness could not be computed; retry after checking database health"
+        ) from e
+
+    buyer_readiness = [
+        _single_buyer_canary_readiness(
+            buyer,
+            market_state=normalized_state,
+            market_zip=market_zip,
+            service=normalized_service,
+            monthly_budget_cents=monthly_budget_cents,
+        )
+        for buyer in buyers
+    ]
+    eligible_buyers = [item for item in buyer_readiness if item["canary_ready"]]
+    daily_budget_within_monthly_cap = daily_budget_cents * 30 <= monthly_budget_cents
+    payment_gate = _stripe_sandbox_payment_decision("prepare Stripe sandbox buyer wallet refill")
+    ads_dry_run_gate = provider_decision(
+        ProviderArea.ADS, action="prepare Google Ads dry-run canary"
+    )
+    buyer_delivery_gate = provider_decision(
+        ProviderArea.BUYER_DELIVERY, action="prepare one-buyer canary delivery"
+    )
+    checks = {
+        "one_active_louisiana_buyer_ready": len(eligible_buyers) >= 1,
+        "stripe_sandbox_ready": payment_gate.allowed,
+        "ads_dry_run_allowed": ads_dry_run_gate.allowed,
+        "buyer_delivery_gate_not_paused": buyer_delivery_gate.allowed,
+        "campaign_daily_budget_within_monthly_cap": daily_budget_within_monthly_cap,
+        "synthetic_sold_lead_evidence_present": int(delivered or 0) > 0
+        or not require_sold_evidence,
+        "attribution_evidence_present": int(attributed_leads or 0) > 0 or not require_sold_evidence,
+    }
+    technical_ready = all(checks.values())
+    ready_for_real_ads = technical_ready and provider_live_approved(ProviderArea.ADS)
+    return {
+        "mode": "single_buyer_paid_canary",
+        "scope": {
+            "market_state": normalized_state,
+            "market_zip": market_zip,
+            "service": normalized_service,
+            "monthly_budget_cents": monthly_budget_cents,
+            "daily_budget_cents": daily_budget_cents,
+            "default_louisiana_canary_zips": sorted(LOUISIANA_CANARY_ZIPS),
+        },
+        "readiness_label": "single_buyer_paid_canary_ready"
+        if technical_ready
+        else "single_buyer_paid_canary_blocked",
+        "technical_canary_ready": technical_ready,
+        "ready_for_real_ads": ready_for_real_ads,
+        "ready_for_paid_launch": False,
+        "full_launch_gate_note": "The existing /v1/admin/launch-readiness three-buyer paid-pilot gate is unchanged.",
+        "checks": checks,
+        "provider_gate": {
+            "payments_sandbox": _provider_decision_response(payment_gate),
+            "ads_dry_run": _provider_decision_response(ads_dry_run_gate),
+            "buyer_delivery": _provider_decision_response(buyer_delivery_gate),
+            "ads_live_approved": provider_live_approved(ProviderArea.ADS),
+            "payments_live_approved": provider_live_approved(ProviderArea.PAYMENTS),
+        },
+        "metrics": {
+            "candidate_buyers": len(buyer_readiness),
+            "eligible_buyers": len(eligible_buyers),
+            "delivered_posts": int(delivered or 0),
+            "failed_deliveries": int(failed_deliveries or 0),
+            "attributed_leads": int(attributed_leads or 0),
+        },
+        "buyer_readiness": buyer_readiness,
+        "recommended_next_actions": [
+            "Add one funded Louisiana buyer with service zips and delivery path."
+            if len(eligible_buyers) < 1
+            else "Run one synthetic Louisiana lead through capture, sale, wallet debit, and buyer report.",
+            "Set STORMLEAD_APPROVE_PAYMENTS_SANDBOX=true with sk_test_/whsec_ secrets to test Stripe sandbox."
+            if not payment_gate.allowed
+            else "Complete Stripe sandbox Checkout and verify signed webhook wallet credit.",
+            "Keep Google Ads paused until explicit spend approval; use offline conversion dry-run first.",
+        ],
     }
 
 

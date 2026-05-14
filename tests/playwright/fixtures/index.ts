@@ -153,7 +153,7 @@ export const test = base.extend<StormLeadFixtures>({
 
       res.writeHead(200, { 'content-type': 'application/json' });
       if (mode === 'ping') {
-        res.end(JSON.stringify({ accept: true, bid_cents: 5000 }));
+        res.end(JSON.stringify({ accept: true, bid_cents: 30_000 }));
       } else {
         res.end(JSON.stringify({ accepted: true }));
       }

@@ -1,5 +1,5 @@
 import { test, expect, buyerWebhookUrl, clearBuyerWebhookEvents } from './fixtures';
-import { LANDING, PING_POST } from './helpers/api';
+import { installOperatorToken, LANDING, operatorHeaders, PING_POST } from './helpers/api';
 import { expectBuyerWebhookPair } from './helpers/persona';
 import { waitForLeadStatus } from './helpers/wait';
 
@@ -29,6 +29,7 @@ test.describe('Human lead acquisition and sale workflow', () => {
     };
 
     await test.step('buyer operator creates, activates, and funds a synthetic buyer in the browser UI', async () => {
+      await installOperatorToken(page);
       await page.goto(`${PING_POST}/admin`);
       await expect(page.getByRole('heading', { name: 'StormLead Admin' })).toBeVisible();
 
@@ -51,13 +52,6 @@ test.describe('Human lead acquisition and sale workflow', () => {
       expect([200, 201]).toContain((await createResponse).status());
       await expect(page.locator('#selected-buyer-id')).not.toHaveValue('', { timeout: 30_000 });
 
-      await page.locator('#buyer-update-form input[name="target_zips"]').fill(zip);
-      const updateResponse = page.waitForResponse(
-        (response) => response.url().includes('/v1/buyers/') && response.request().method() === 'PATCH',
-      );
-      await page.getByRole('button', { name: 'Update Real Buyer' }).click();
-      expect((await updateResponse).status()).toBe(200);
-
       await page.locator('#deposit-form input[name="amount_cents"]').fill('500000');
       await page.locator('#deposit-form input[name="external_reference"]').fill(`human-workflow-${seed}`);
       const depositResponse = page.waitForResponse(
@@ -65,6 +59,13 @@ test.describe('Human lead acquisition and sale workflow', () => {
       );
       await page.getByRole('button', { name: 'Add Real Deposit' }).click();
       expect((await depositResponse).status()).toBe(200);
+
+      await page.locator('#buyer-update-form input[name="target_zips"]').fill(zip);
+      const updateResponse = page.waitForResponse(
+        (response) => response.url().includes('/v1/buyers/') && response.request().method() === 'PATCH',
+      );
+      await page.getByRole('button', { name: 'Update Real Buyer' }).click();
+      expect((await updateResponse).status()).toBe(200);
       await expect(page.getByRole('table', { name: 'buyers' })).toContainText(buyerCompany, { timeout: 60_000 });
     });
 
@@ -143,7 +144,9 @@ test.describe('Human lead acquisition and sale workflow', () => {
     });
 
     await test.step('paid launch remains locked while local synthetic flow is allowed', async () => {
-      const readiness = await request.get(`${PING_POST}/v1/admin/launch-readiness`);
+      const readiness = await request.get(`${PING_POST}/v1/admin/launch-readiness`, {
+        headers: operatorHeaders(),
+      });
       expect(readiness.status()).toBe(200);
       const body = await readiness.json();
       expect(typeof body.local_simulation_ready).toBe('boolean');

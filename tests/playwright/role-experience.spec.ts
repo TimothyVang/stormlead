@@ -7,6 +7,7 @@ import {
   roleExperienceWorkflow,
   sampleScenarioNames,
 } from './workflows/role-experience.workflow';
+import { installOperatorToken, operatorHeaders } from './helpers/api';
 
 const baseURL = process.env.STORMLEAD_ADMIN_URL ?? 'http://127.0.0.1:8003';
 
@@ -16,6 +17,7 @@ test('role-based agentic workflow sample data is visible and reviewable', async 
 }, testInfo) => {
   const cowork = new CoworkRun(page, testInfo, roleExperienceWorkflow);
   const reviewStamp = Date.now();
+  await installOperatorToken(page);
 
   cowork.note(
     `Testing roles: ${roleExperienceRoles.map((role) => role.name).join(', ')}`,
@@ -39,7 +41,9 @@ test('role-based agentic workflow sample data is visible and reviewable', async 
     'The local admin UI exposes KPIs, workflow runs, timeline review controls, readiness, and buyer roster sections.',
   );
 
-  const runsResponse = await request.get(`${baseURL}/v1/admin/workflow-runs/recent?limit=20`);
+  const runsResponse = await request.get(`${baseURL}/v1/admin/workflow-runs/recent?limit=20`, {
+    headers: operatorHeaders(),
+  });
   expect(runsResponse.ok()).toBeTruthy();
   const runsPayload = await runsResponse.json();
   const runs = Array.isArray(runsPayload.runs) ? runsPayload.runs : [];
@@ -54,6 +58,7 @@ test('role-based agentic workflow sample data is visible and reviewable', async 
 
   const timelineResponse = await request.get(
     `${baseURL}/v1/admin/leads/${encodeURIComponent(leadId)}/timeline`,
+    { headers: operatorHeaders() },
   );
   expect(timelineResponse.ok()).toBeTruthy();
   const timeline = await timelineResponse.json();
@@ -90,7 +95,7 @@ test('role-based agentic workflow sample data is visible and reviewable', async 
     'Homeowner and agentic workflow evidence appears in the admin timeline.',
   );
 
-  const buyersResponse = await request.get(`${baseURL}/v1/buyers`);
+  const buyersResponse = await request.get(`${baseURL}/v1/buyers`, { headers: operatorHeaders() });
   expect(buyersResponse.ok()).toBeTruthy();
   const buyersPayload = await buyersResponse.json();
   const buyers = Array.isArray(buyersPayload.buyers) ? buyersPayload.buyers : [];
@@ -112,6 +117,7 @@ test('role-based agentic workflow sample data is visible and reviewable', async 
 
   const reportResponse = await request.get(
     `${baseURL}/v1/buyers/${encodeURIComponent(fundedBuyer.buyer_id)}/daily-report`,
+    { headers: operatorHeaders() },
   );
   expect(reportResponse.ok()).toBeTruthy();
   const report = await reportResponse.json();
@@ -175,7 +181,9 @@ test('role-based agentic workflow sample data is visible and reviewable', async 
     'Operator/admin role can hold and approve the selected workflow run.',
   );
 
-  const readinessResponse = await request.get(`${baseURL}/v1/admin/launch-readiness`);
+  const readinessResponse = await request.get(`${baseURL}/v1/admin/launch-readiness`, {
+    headers: operatorHeaders(),
+  });
   expect(readinessResponse.ok()).toBeTruthy();
   const readiness = await readinessResponse.json();
   expect(readiness.technical_local_ready).toBeTruthy();
