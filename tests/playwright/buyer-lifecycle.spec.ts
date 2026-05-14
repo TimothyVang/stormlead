@@ -1,7 +1,7 @@
 import { test, expect, buyerWebhookUrl } from './fixtures';
 
 // Minimal valid buyer payload matching BuyerCreateRequest in ping-post/api.py
-function buyerPayload(seed: number, tag: string) {
+function buyerPayload(seed: number, tag: string, depositBalance = 0) {
   return {
     name: `Playwright ${tag} ${seed}`,
     company: `Playwright ${tag} Co ${seed}`,
@@ -15,7 +15,7 @@ function buyerPayload(seed: number, tag: string) {
     filter_expression: 'true',
     services: ['tree_removal'],
     target_zips: ['78710'],
-    deposit_balance: 0,
+    deposit_balance: depositBalance,
     daily_cap: 10,
   };
 }
@@ -29,15 +29,26 @@ test.describe('Buyer Lifecycle', () => {
   });
 
   test('activate buyer → status active', async ({ apiClient, seed }) => {
-    const { body: created } = await apiClient.createBuyer(buyerPayload(seed + 1, 'activate'));
-    const { status, body } = await apiClient.updateBuyer(created.buyer_id, { status: 'active' });
+    const { body: created } = await apiClient.createBuyer(buyerPayload(seed + 1, 'activate', 1000));
+    const { status, body } = await apiClient.updateBuyer(created.buyer_id, {
+      status: 'active',
+      sales_stage: 'funded',
+      notes: 'Terms accepted for local buyer lifecycle proof.',
+    });
     expect(status).toBe(200);
     expect(body.status).toBe('active');
+    expect(body.onboarding_readiness.autopilot_ready).toBe(true);
+  });
+
+  test('rejects activation until readiness requirements are met', async ({ apiClient, seed }) => {
+    const { body: created } = await apiClient.createBuyer(buyerPayload(seed + 2, 'not-ready'));
+    const { status, body } = await apiClient.updateBuyer(created.buyer_id, { status: 'active' });
+    expect(status).toBe(409);
+    expect(body.detail).toContain('buyer is not activation ready');
   });
 
   test('add deposit → deposit_balance_cents increases', async ({ apiClient, seed }) => {
-    const { body: buyer } = await apiClient.createBuyer(buyerPayload(seed + 2, 'wallet'));
-    await apiClient.updateBuyer(buyer.buyer_id, { status: 'active' });
+    const { body: buyer } = await apiClient.createBuyer(buyerPayload(seed + 3, 'wallet'));
     const { status, body: wallet } = await apiClient.addDeposit(buyer.buyer_id, 75000); // $750 in cents
     expect(status).toBe(200);
     expect(wallet.deposit_balance_cents).toBeGreaterThanOrEqual(75000);

@@ -96,12 +96,12 @@ def test_lead_model_declares_location_metadata_indexes() -> None:
     assert "ix_leads_estimated_job_size" in names
 
 
-def test_billing_event_has_external_event_id_unique_index() -> None:
+def test_billing_event_has_external_event_id_lookup_index() -> None:
     columns = set(BillingEvent.__table__.columns.keys())
     assert "external_event_id" in columns
     table = cast(Any, BillingEvent.__table__)
     names = {index.name for index in table.indexes}
-    assert "uq_billing_events_external_event_id" in names
+    assert "ix_billing_events_external_event_id" in names
 
 
 def test_payment_webhook_event_declares_idempotency_contract() -> None:

@@ -23,7 +23,12 @@ test.describe('Lead Lifecycle Scenarios', () => {
       daily_cap: 100,
     });
     expect([200, 201]).toContain(buyer.status);
-    await apiClient.updateBuyer(buyer.body.buyer_id, { status: 'active' });
+    const activated = await apiClient.updateBuyer(buyer.body.buyer_id, {
+      status: 'active',
+      sales_stage: 'funded',
+      notes: 'Terms accepted for local lead lifecycle proof.',
+    });
+    expect(activated.status).toBe(200);
 
     const { envelope, webhookId } = buildEnvelope({
       scenario: 'qualified_sold',

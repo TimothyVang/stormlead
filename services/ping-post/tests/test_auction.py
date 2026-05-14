@@ -9,6 +9,7 @@ import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -20,12 +21,15 @@ from ping_post.auction import (
     _buyer_can_afford_bid,
     _buyer_delivery_allowed,
     _buyer_matches_paid_pilot_rules,
+    _buyer_within_caps,
     _collect_bid_window_responses,
+    _credit_failed_delivery,
     _debit_amount,
     _delivery_idempotency_key,
     _lead_can_enter_auction,
     _pick_winner,
     _ping_payload,
+    _reserve_buyer_wallet,
     _should_retry_post,
     _sign_webhook,
 )
@@ -123,6 +127,38 @@ def _activation_buyer(**overrides: object) -> SimpleNamespace:
     }
     data.update(overrides)
     return SimpleNamespace(**data)
+
+
+class _FakeCapsSession:
+    def __init__(self, scalar_results: list[int]) -> None:
+        self._scalar_results = scalar_results
+
+    async def __aenter__(self) -> _FakeCapsSession:
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+    async def scalar(self, *_args: object, **_kwargs: object) -> int:
+        return self._scalar_results.pop(0)
+
+
+class _FakeWalletSession:
+    def __init__(self, *, rowcount: int = 1) -> None:
+        self.rowcount = rowcount
+        self.added: list[Any] = []
+
+    async def __aenter__(self) -> _FakeWalletSession:
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+    async def execute(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(rowcount=self.rowcount)
+
+    def add(self, row: Any) -> None:
+        self.added.append(row)
 
 
 def test_avm_band_buckets() -> None:
@@ -376,6 +412,54 @@ def test_wallet_helpers_convert_cents_to_dollars() -> None:
     assert _debit_amount(12550) == Decimal("125.5")
 
 
+async def test_reserve_buyer_wallet_records_reserved_debit_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    buyer_id = uuid4()
+    lead_id = uuid4()
+    fake_session = _FakeWalletSession(rowcount=1)
+    monkeypatch.setattr("ping_post.auction.get_session", lambda: fake_session)
+
+    assert await _reserve_buyer_wallet(buyer_id, lead_id, 18_000)
+
+    assert len(fake_session.added) == 1
+    event = fake_session.added[0]
+    assert event.buyer_id == buyer_id
+    assert event.lead_id == lead_id
+    assert event.event_type == "lead.reserved"
+    assert event.amount_cents == -18_000
+    assert event.metadata_json == {"exclusive": True}
+
+
+async def test_reserve_buyer_wallet_rejects_without_audit_event_when_balance_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_session = _FakeWalletSession(rowcount=0)
+    monkeypatch.setattr("ping_post.auction.get_session", lambda: fake_session)
+
+    assert not await _reserve_buyer_wallet(uuid4(), uuid4(), 18_000)
+    assert fake_session.added == []
+
+
+async def test_failed_delivery_credit_records_refund_audit_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    buyer_id = uuid4()
+    lead_id = uuid4()
+    fake_session = _FakeWalletSession(rowcount=1)
+    monkeypatch.setattr("ping_post.auction.get_session", lambda: fake_session)
+
+    await _credit_failed_delivery(buyer_id, lead_id, 18_000, 500)
+
+    assert len(fake_session.added) == 1
+    event = fake_session.added[0]
+    assert event.buyer_id == buyer_id
+    assert event.lead_id == lead_id
+    assert event.event_type == "lead.delivery_failed_credit"
+    assert event.amount_cents == 18_000
+    assert event.metadata_json == {"post_result_status_code": 500}
+
+
 def test_buyer_activation_readiness_requires_launch_fields() -> None:
     ready = buyer_activation_readiness(_activation_buyer())
     assert ready["autopilot_ready"] is True
@@ -486,6 +570,27 @@ def test_paid_pilot_rules_require_requested_service_when_configured() -> None:
     assert not _buyer_matches_paid_pilot_rules(buyer, _lead(requested_service="tree_removal"))
     buyer.services = ["tree_removal"]
     assert _buyer_matches_paid_pilot_rules(buyer, _lead(requested_service="tree_removal"))
+
+
+@pytest.mark.parametrize(
+    ("delivered_today", "gross_spend_month_cents", "expected"),
+    [(1, 19_999, True), (2, 0, False), (0, 20_000, False)],
+)
+async def test_buyer_within_caps_enforces_daily_and_monthly_limits(
+    delivered_today: int,
+    gross_spend_month_cents: int,
+    expected: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    buyer = _buyer()
+    buyer.daily_cap = 2
+    buyer.monthly_budget = Decimal("200.00")
+    monkeypatch.setattr(
+        "ping_post.auction.get_session",
+        lambda: _FakeCapsSession([delivered_today, gross_spend_month_cents]),
+    )
+
+    assert await _buyer_within_caps(buyer) is expected
 
 
 def test_lead_blocked_or_hold_is_not_auctioned() -> None:

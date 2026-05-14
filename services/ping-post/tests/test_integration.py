@@ -1183,6 +1183,7 @@ async def test_buyer_wallet_requires_valid_api_key_when_strict_gate(
     client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("STORMLEAD_REQUIRE_BUYER_API_KEY", "true")
+    monkeypatch.setenv("STORMLEAD_OPERATOR_TOKEN", "test-operator-token")
 
     buyer_id = uuid4()
     buyer_key = f"buyer-{buyer_id.hex}"
@@ -1206,6 +1207,13 @@ async def test_buyer_wallet_requires_valid_api_key_when_strict_gate(
     )
     assert valid.status_code == 200
     assert valid.json()["buyer_id"] == str(buyer_id)
+
+    operator = await client.get(
+        f"/v1/buyers/{buyer_id}/wallet",
+        headers={"x-stormlead-operator-token": "test-operator-token"},
+    )
+    assert operator.status_code == 200
+    assert operator.json()["buyer_id"] == str(buyer_id)
 
 
 async def test_buyer_can_rotate_api_key_and_old_key_stops_working(

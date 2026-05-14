@@ -197,6 +197,23 @@ def test_local_communication_outbox_marks_channel_suppressions() -> None:
     assert _outbox_channels({"outbox": outbox}) == ["email", "nurture_webhook"]
 
 
+def test_local_communication_outbox_includes_emergency_safety_message() -> None:
+    lead = MagicMock(
+        phone_e164="+13215550001",
+        email="lead@example.test",
+        urgency="emergency",
+        safety_flags=["power_line"],
+    )
+
+    outbox = _local_communication_outbox(lead, webhook_url="", source_event="lead.unsold")
+
+    sms_entry = next(entry for entry in outbox if entry["channel"] == "sms")
+    assert sms_entry["safety_message_required"] is True
+    assert "emergency services or the utility" in sms_entry["safety_message"]
+    assert lead.phone_e164 not in sms_entry["safety_message"]
+    assert lead.email not in sms_entry["safety_message"]
+
+
 @pytest.mark.asyncio
 async def test_channel_suppression_states_match_contact_by_channel() -> None:
     lead = MagicMock(phone_e164="+13215550001", email="LEAD@EXAMPLE.TEST")

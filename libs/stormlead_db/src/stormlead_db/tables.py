@@ -571,9 +571,8 @@ class BillingEvent(Base):
 
     __table_args__ = (
         Index(
-            "uq_billing_events_external_event_id",
+            "ix_billing_events_external_event_id",
             "external_event_id",
-            unique=True,
             postgresql_where=text("external_event_id IS NOT NULL"),
         ),
     )

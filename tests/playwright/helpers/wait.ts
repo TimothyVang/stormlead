@@ -1,7 +1,5 @@
 import type { APIRequestContext } from '@playwright/test';
-import { PING_POST } from './api';
-
-const OPERATOR_TOKEN = process.env.STORMLEAD_OPERATOR_TOKEN;
+import { OPERATOR_TOKEN, PING_POST } from './api';
 
 type TimelineBody = {
   current_state?: string;

@@ -716,6 +716,8 @@ def _require_buyer_api_key(request: Request, buyer: BuyerRow) -> None:
         return
     if _buyer_api_key_matches(request, buyer):
         return
+    if _operator_token_supplied_and_authorized(request):
+        return
     raise HTTPException(401, "valid buyer API key required")
 
 

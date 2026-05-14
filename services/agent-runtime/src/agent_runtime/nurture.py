@@ -30,6 +30,14 @@ from stormlead_db import (
 
 log = get_logger(__name__)
 LOCAL_OUTBOX_TEMPLATE = "stormlead_nurture_followup_v1"
+EMERGENCY_SAFETY_MESSAGE = (
+    "For injuries, power lines, active danger, unstable structures, or blocked emergency access, "
+    "stay away from the damage area and contact emergency services or the utility before "
+    "contractor matching."
+)
+SAFETY_MESSAGE_FLAGS = frozenset(
+    {"power_line", "injury", "active_danger", "roof_impact", "structure_impact", "emergency"}
+)
 PROVIDER_CHANNELS: tuple[tuple[str, ProviderArea], ...] = (
     ("sms", ProviderArea.SMS),
     ("email", ProviderArea.EMAIL),
@@ -79,6 +87,18 @@ def _recipient_availability(lead: LeadRow, channel: str) -> dict[str, bool]:
     return {"phone_e164_present": phone_present, "email_present": email_present}
 
 
+def _safety_message_for_lead(lead: LeadRow) -> str | None:
+    safety_flags = {
+        str(flag).strip().lower()
+        for flag in (getattr(lead, "safety_flags", None) or [])
+        if str(flag).strip()
+    }
+    urgency = str(getattr(lead, "urgency", "") or "").strip().lower()
+    if urgency == "emergency" or bool(safety_flags & SAFETY_MESSAGE_FLAGS):
+        return EMERGENCY_SAFETY_MESSAGE
+    return None
+
+
 def _local_communication_outbox(
     lead: LeadRow,
     *,
@@ -88,6 +108,7 @@ def _local_communication_outbox(
     skip_webhook_gate: bool = False,
 ) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
+    safety_message = _safety_message_for_lead(lead)
     for channel, area in PROVIDER_CHANNELS:
         recipient = _recipient_availability(lead, channel)
         contact_available = any(recipient.values())
@@ -113,6 +134,8 @@ def _local_communication_outbox(
                 "provider_gate": _provider_gate_payload(gate),
                 "would_contact_provider": False,
                 "requires_action_approval": False if suppressed else True,
+                "safety_message_required": safety_message is not None,
+                "safety_message": safety_message,
             }
         )
 
@@ -143,6 +166,8 @@ def _local_communication_outbox(
             "provider_gate": _provider_gate_payload(webhook_gate),
             "would_contact_provider": False,
             "requires_action_approval": False if skip_webhook_gate else bool(webhook_gate.external),
+            "safety_message_required": safety_message is not None,
+            "safety_message": safety_message,
         }
     )
     return entries

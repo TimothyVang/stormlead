@@ -102,6 +102,7 @@ export interface EnvelopeParams {
   campaignId?: string;
   webhookId?: string;
   service?: string;
+  consentVersion?: string;
 }
 
 export function buildEnvelope(p: EnvelopeParams): { envelope: object; webhookId: string } {
@@ -121,6 +122,7 @@ export function buildEnvelope(p: EnvelopeParams): { envelope: object; webhookId:
         state: p.state,
         zip: p.zip,
         consent_text: 'I agree to be contacted regarding storm damage repair services.',
+        consent_version: p.consentVersion ?? 'tree-damage-intake-v1',
         requested_service: p.service ?? 'tree_removal',
         damage_type: 'fallen_tree',
         urgency: 'same_day',

@@ -6,6 +6,7 @@ import { waitForLeadStatus } from './helpers/wait';
 test.describe('Human lead acquisition and sale workflow', () => {
   test('human-like homeowner submit is acquired, sold, and delivered with ping/post privacy boundaries', async ({
     page,
+    context,
     request,
     phone,
     email,
@@ -69,6 +70,8 @@ test.describe('Human lead acquisition and sale workflow', () => {
 
     let leadId = '';
     await test.step('homeowner fills the local landing page like a real lead', async () => {
+      await context.grantPermissions(['geolocation'], { origin: LANDING });
+      await context.setGeolocation({ latitude: 30.2672, longitude: -97.7431, accuracy: 25 });
       await page.goto(`${LANDING}/?utm_source=local_human_workflow&utm_campaign=local_lead_sale_${seed}`);
       await expect(page.getByTestId('local-lead-form')).toBeVisible();
 
@@ -80,7 +83,24 @@ test.describe('Human lead acquisition and sale workflow', () => {
       await page.locator('[data-testid="local-lead-form"] input[name="city"]').fill(homeowner.city);
       await page.locator('[data-testid="local-lead-form"] input[name="state"]').fill(homeowner.state);
       await page.locator('[data-testid="local-lead-form"] input[name="zip"]').fill(homeowner.zip);
+      await page.getByTestId('capture-location').click();
+      await expect(page.getByTestId('location-status')).toContainText('GPS captured');
+      await page.getByTestId('damage-photos').setInputFiles([
+        {
+          name: 'wide-human-workflow.jpg',
+          mimeType: 'image/jpeg',
+          buffer: Buffer.from('ffd8ffe000104a464946000101', 'hex'),
+        },
+        {
+          name: 'close-human-workflow.png',
+          mimeType: 'image/png',
+          buffer: Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'),
+        },
+      ]);
+      await expect(page.getByTestId('photo-status')).toContainText('2 of 2');
       await page.locator('[data-testid="local-lead-form"] textarea[name="consent_text"]').fill(homeowner.consent);
+      await page.getByTestId('consent-ack').check();
+      await expect(page.getByTestId('local-lead-submit')).toBeEnabled();
       await page.getByTestId('local-lead-submit').click();
 
       const result = page.getByTestId('local-lead-result');

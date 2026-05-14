@@ -1,5 +1,5 @@
 import { test, expect, buyerWebhookUrl } from './fixtures';
-import { FORM_RECEIVER, PING_POST, StormLeadApiClient } from './helpers/api';
+import { FORM_RECEIVER, OPERATOR_TOKEN, PING_POST, StormLeadApiClient } from './helpers/api';
 import { buildSignedHeaders, buildEnvelope } from './helpers/webhook';
 import { waitForLeadStatus, waitForTimelineEvent } from './helpers/wait';
 
@@ -33,7 +33,12 @@ async function submitAndSellLead(
     daily_cap: 100,
   });
   expect([200, 201]).toContain(buyer.status);
-  await apiClient.updateBuyer(buyer.body.buyer_id, { status: 'active' });
+  const activated = await apiClient.updateBuyer(buyer.body.buyer_id, {
+    status: 'active',
+    sales_stage: 'funded',
+    notes: 'Terms accepted for local return workflow proof.',
+  });
+  expect(activated.status).toBe(200);
 
   const { envelope, webhookId } = buildEnvelope({
     scenario: 'return_setup',
@@ -47,7 +52,10 @@ async function submitAndSellLead(
   const json = await res.json();
   if (!json.lead_id) throw new Error(`Expected lead_id in response: ${JSON.stringify(json)}`);
   await waitForTimelineEvent(request, json.lead_id, 'lead.qualified', { timeoutMs: 90_000 });
-  const auction = await request.post(`${PING_POST}/v1/auction`, { data: { lead_id: json.lead_id } });
+  const auction = await request.post(`${PING_POST}/v1/auction`, {
+    headers: { Authorization: `Bearer ${OPERATOR_TOKEN}` },
+    data: { lead_id: json.lead_id },
+  });
   expect(auction.status()).toBe(200);
   await waitForLeadStatus(request, json.lead_id, 'sold', { timeoutMs: 60_000 });
   return json.lead_id;

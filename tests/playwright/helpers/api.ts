@@ -5,7 +5,7 @@ export const FORM_RECEIVER = process.env.FORM_RECEIVER_URL ?? 'http://127.0.0.1:
 export const PING_POST     = process.env.PING_POST_URL     ?? 'http://127.0.0.1:8003';
 export const LANDING       = process.env.LANDING_URL       ?? 'http://127.0.0.1:8005';
 export const BUYER_PORTAL  = process.env.BUYER_PORTAL_URL  ?? 'http://127.0.0.1:8004';
-const OPERATOR_TOKEN = process.env.STORMLEAD_OPERATOR_TOKEN;
+export const OPERATOR_TOKEN = process.env.STORMLEAD_OPERATOR_TOKEN ?? 'local-operator-token-change-me';
 const PHONE_MID_COUNT = 700;
 const PHONE_SUFFIX_COUNT = 9000;
 const PHONE_SPACE = PHONE_MID_COUNT * PHONE_SUFFIX_COUNT;
@@ -84,7 +84,7 @@ export class StormLeadApiClient {
   }
 
   async getWallet(buyerId: string) {
-    const res = await this.req.get(`${PING_POST}/v1/buyers/${buyerId}/wallet`);
+    const res = await this.req.get(`${PING_POST}/v1/buyers/${buyerId}/wallet`, withOperatorHeaders());
     return { status: res.status(), body: await res.json() };
   }
 
@@ -109,9 +109,9 @@ export class StormLeadApiClient {
 
   // POST /v1/leads/{lead_id}/return — returns { return_request_id, ... }
   async requestReturn(leadId: string, reason: string, notes?: string) {
-    const res = await this.req.post(`${PING_POST}/v1/leads/${leadId}/return`, {
+    const res = await this.req.post(`${PING_POST}/v1/leads/${leadId}/return`, withOperatorHeaders({
       data: { reason, notes: notes ?? null, evidence: {}, requested_by: 'playwright-test' },
-    });
+    }));
     return { status: res.status(), body: await res.json() };
   }
 

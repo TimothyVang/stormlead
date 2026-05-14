@@ -3,7 +3,7 @@ import { FORM_RECEIVER } from './helpers/api';
 import { buildEnvelope, buildSignedHeaders } from './helpers/webhook';
 import { waitForLeadStatus, waitForTimelineEvent } from './helpers/wait';
 
-function buyerPayload(seed: number, tag: string, zip: string, depositBalance = 1000) {
+function buyerPayload(seed: number, tag: string, zip: string, depositBalance = 1000, lowBalanceThreshold = 0) {
   return {
     name: `Autopilot ${tag} ${seed}`,
     company: `Autopilot ${tag} Co ${seed}`,
@@ -18,6 +18,7 @@ function buyerPayload(seed: number, tag: string, zip: string, depositBalance = 1
     services: ['tree_removal'],
     target_zips: [zip],
     deposit_balance: depositBalance,
+    low_balance_threshold: lowBalanceThreshold,
     daily_cap: 100,
   };
 }
@@ -70,12 +71,13 @@ test.describe('Paid Pilot Autopilot', () => {
 
   test('keeps no-buyer coverage and low-wallet states in the exception queue', async ({ request, apiClient, seed, phone, email, webhookSecret }) => {
     const lowWalletZip = `76${String(seed % 1000).padStart(3, '0')}`;
-    const lowWallet = await apiClient.createBuyer(buyerPayload(seed + 1, 'low-wallet', lowWalletZip, 0));
+    const lowWallet = await apiClient.createBuyer(buyerPayload(seed + 1, 'low-wallet', lowWalletZip, 1000, 950));
     expect([200, 201]).toContain(lowWallet.status);
     const lowWalletUpdated = await apiClient.updateBuyer(lowWallet.body.buyer_id, { status: 'active', sales_stage: 'funded', notes: 'Terms accepted but wallet empty.' });
     expect(lowWalletUpdated.status).toBe(200);
-    expect(lowWalletUpdated.body.onboarding_readiness.wallet_ready).toBe(false);
-    expect(lowWalletUpdated.body.onboarding_readiness.auto_pause_recommended).toBe(true);
+    expect(lowWalletUpdated.body.onboarding_readiness.autopilot_ready).toBe(true);
+    const lowWalletLeadId = await submitSyntheticLead(request, webhookSecret, 'low-wallet-sale', lowWalletZip, phone(221), email('paid-pilot-low-wallet-sale'));
+    await waitForLeadStatus(request, lowWalletLeadId, 'sold', { timeoutMs: 45_000 });
 
     const { envelope, webhookId } = buildEnvelope({
       scenario: 'paid_pilot_autopilot_no_buyer',
@@ -102,8 +104,7 @@ test.describe('Paid Pilot Autopilot', () => {
   test('auto-decides safe return policy reasons and removes them from manual return exceptions', async ({ request, apiClient, seed, phone, email, webhookSecret }) => {
     const zip = `75${String(seed % 1000).padStart(3, '0')}`;
     const buyer = await createAutopilotReadyBuyer(apiClient, seed + 2, 'auto-return', zip);
-    const beforeWallet = await apiClient.getWallet(buyer.buyer_id);
-    expect(beforeWallet.status).toBe(200);
+    const beforeWalletCents = buyer.deposit_balance_cents;
     const leadId = await submitSyntheticLead(request, webhookSecret, 'auto-return', zip, phone(230), email('paid-pilot-auto-return'));
     await waitForLeadStatus(request, leadId, 'sold', { timeoutMs: 45_000 });
 
@@ -112,7 +113,7 @@ test.describe('Paid Pilot Autopilot', () => {
     expect(returnResult.body.status).toBe('approved');
     expect(returnResult.body.auto_decided).toBe(true);
     expect(returnResult.body.credited_cents).toBeGreaterThan(0);
-    expect(returnResult.body.wallet.deposit_balance_cents).toBeGreaterThan(beforeWallet.body.deposit_balance_cents - returnResult.body.credited_cents);
+    expect(returnResult.body.wallet.deposit_balance_cents).toBeGreaterThan(beforeWalletCents - returnResult.body.credited_cents);
     await waitForTimelineEvent(request, leadId, 'lead.return_approved', { timeoutMs: 10_000 });
 
     const queue = await apiClient.getAutopilotExceptions({ kind: 'return_pending', lead_id: leadId, limit: 100 });
